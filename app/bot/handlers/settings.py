@@ -129,7 +129,8 @@ def _panel(user: dict[str, Any]) -> str:
     lines = [
         "⚙️ <b>你的推送设置</b>",
         "",
-        f"☀️ 早报：{'开' if user['daily_enabled'] else '关'} · {user['daily_time']}（{fmt.esc(user['timezone'])}）",
+        f"☀️ 早报：{'开' if user['daily_enabled'] else '关'} · {user['daily_time']}"
+        f"（{fmt.timezone_label(user['timezone'])}）",
         f"🌙 晚报：{'开' if user['evening_enabled'] else '关'} · {user['evening_time']}",
         f"🚨 突发新闻：{'开' if user['breaking_enabled'] else '关'} · {breaking.describe()}",
         f"📊 最低评分：{user['min_score']:.0f}",

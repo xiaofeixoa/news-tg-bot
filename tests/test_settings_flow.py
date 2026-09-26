@@ -260,6 +260,32 @@ async def test_interest_words_are_escaped_or_the_whole_panel_gets_rejected():
     assert "<b>GPT" not in msg.last_text() and "GPT<b>" not in msg.last_text()
 
 
+@pytest.mark.asyncio
+async def test_the_panel_names_the_clock_in_chinese_not_with_an_iana_key():
+    """/设置 上那句"（Asia/Shanghai）"是他设置页唯一说明按哪个钟的地方。"""
+    from app.services import format as fmt
+
+    news = news_service()
+    msg = Msg()
+    await cmd_settings(msg, news)
+    assert "上海 UTC+8" in msg.last_text()
+    assert "Asia/Shanghai" not in msg.last_text(), "内部标识符不该出现在他读的页面上"
+    assert fmt.timezone_label("UTC") == "协调世界时 UTC+0"
+
+
+def test_the_utc_offset_is_computed_from_the_calendar_not_hardcoded():
+    from app.services import format as fmt
+
+    # 半小时的区：只写整数小时会把加尔各答说成 UTC+5
+    assert fmt.timezone_label("Asia/Kolkata") == "加尔各答 UTC+5:30"
+    # 会调表的区：一年里两个偏移都可能出现，写死任何一个都会在半年里说谎
+    assert fmt.timezone_label("America/Los_Angeles") in ("洛杉矶 UTC-8", "洛杉矶 UTC-7")
+    assert fmt.timezone_label("Mars/Olympus") == "Mars/Olympus", "认不出的区原样回显，别编偏移"
+    # 空名字不是"未知"：调度器与卡片的时间都按 UTC 渲染它，标签必须说同一件事
+    assert fmt.timezone_label("") == "UTC+0"
+    assert fmt.timezone_label(None) == "UTC+0"
+
+
 # -------------------------------------------------------------- pause/兴趣
 @pytest.mark.asyncio
 async def test_pause_and_resume_survive_a_new_service_instance():

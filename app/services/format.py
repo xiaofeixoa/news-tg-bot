@@ -52,6 +52,39 @@ def short_date(value: datetime | None, tz_name: str = "UTC") -> str:
     return value.replace(tzinfo=timezone.utc).astimezone(_zone(tz_name)).strftime("%m-%d %H:%M")
 
 
+_TZ_CITY = {
+    "Asia/Shanghai": "上海", "Asia/Chongqing": "重庆", "Asia/Urumqi": "乌鲁木齐",
+    "Asia/Hong_Kong": "香港", "Asia/Macau": "澳门", "Asia/Taipei": "台北",
+    "Asia/Tokyo": "东京", "Asia/Seoul": "首尔", "Asia/Singapore": "新加坡",
+    "Asia/Kolkata": "加尔各答", "Asia/Dubai": "迪拜",
+    "Europe/London": "伦敦", "Europe/Paris": "巴黎", "Europe/Berlin": "柏林",
+    "Europe/Moscow": "莫斯科", "America/New_York": "纽约", "America/Chicago": "芝加哥",
+    "America/Los_Angeles": "洛杉矶", "America/Sao_Paulo": "圣保罗",
+    "Australia/Sydney": "悉尼", "Pacific/Auckland": "奥克兰", "UTC": "协调世界时",
+}
+
+
+def timezone_label(name: str | None) -> str:
+    """`Asia/Shanghai` → "上海 UTC+8"：设置页上那句"按哪个钟"不能是英文标识符。
+
+    偏移当场用 zoneinfo 算而不是写死（调两次表的区，写死的那半年就是假话）；
+    认不出城市名的区只报偏移，认不出区本身才原样回显 - 那时偏移也无从算起。
+    空名字跟着调度器同一套回落走（`_zone("")` 也是 UTC），所以报 UTC+0。
+    """
+    raw = str(name or "").strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        offset = datetime.now(ZoneInfo(raw or "UTC")).utcoffset() or timedelta(0)
+    except Exception:
+        return esc(raw)
+    minutes = int(offset.total_seconds() // 60)
+    hours, remainder = divmod(abs(minutes), 60)
+    stamp = f"UTC{'+' if minutes >= 0 else '-'}{hours}" + (f":{remainder:02d}" if remainder else "")
+    city = _TZ_CITY.get(raw)
+    return f"{city} {stamp}" if city else stamp
+
+
 def score_emoji(score: float, config: AppConfig | None = None) -> str:
     config = config or get_config()
     hot, star, dot = breaking.emoji_bars(config)
