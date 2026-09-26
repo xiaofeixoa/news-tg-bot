@@ -1,0 +1,25 @@
+services:
+  ai-news-radar:
+    build: .
+    image: ai-news-radar:latest
+    container_name: ai-news-radar
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Inside the container the database lives on the mounted volume
+      DATABASE_URL: sqlite:////app/data/news.db
+      DATA_DIR: /app/data
+      LOG_DIR: /app/logs
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Edit sources/prompts on the host without rebuilding the image
+      - ./config:/app/config:ro
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

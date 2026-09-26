@@ -1,0 +1,244 @@
+"""Digest composition (design doc sections 16, 27).
+
+Turns stored articles into Telegram-ready messages: morning / evening
+briefings, breaking-news alerts, and the cooldown + daily-cap guards that keep
+the bot from becoming a message cannon.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Sequence
+
+from sqlalchemy import func, select
+
+from app.config import AppConfig, as_int, get_config
+from app.database import repository as repo
+from app.database.database import session_scope
+from app.database.models import Article, PushLog
+from app.logging_setup import get_logger
+from app.services import format as F
+from app.services.llm import LLMService, get_llm
+from app.services.news import ArticleView, NewsService, get_news_service
+
+log = get_logger("app")
+
+# The briefing reads 4x its length so the per-source cap has material left over.
+BRIEFING_DEPTH = 4
+
+
+def select_briefing(items: Sequence[ArticleView], *, top_items: int,
+                    max_per_source: int) -> list[ArticleView]:
+    """Best-first, and never owned by one feed.
+
+    The briefing used to be `latest()[:10]` - the ten most *recent* rows. On a
+    measured evening that handed 8 of 10 slots to Reddit thread titles
+    ("杰夫的炒作让我很生气") while 17 higher-scoring stories in the same window
+    were dropped, because selection followed whichever poller finished last.
+    Ordering by score fixes the ranking; without the cap a single 25-item
+    GitHub burst would simply own the briefing in score order instead of in
+    arrival order. A thin day backfills past the cap - ten real items beat
+    three items plus a rule.
+    """
+    ranked = sorted(items, key=lambda item: item.final_score or 0, reverse=True)
+    chosen: list[ArticleView] = []
+    overflow: list[ArticleView] = []
+    per_source: dict[str, int] = {}
+    for item in ranked:
+        source = item.source_name or "?"
+        if max_per_source > 0 and per_source.get(source, 0) >= max_per_source:
+            overflow.append(item)
+            continue
+        per_source[source] = per_source.get(source, 0) + 1
+        chosen.append(item)
+        if len(chosen) >= top_items:
+            return chosen
+    for item in overflow:                      # thin day: fill the slots anyway
+        if len(chosen) >= top_items:
+            break
+        chosen.append(item)
+    return chosen
+
+
+@dataclass
+class Digest:
+    kind: str
+    messages: list[str] = field(default_factory=list)
+    article_ids: list[int] = field(default_factory=list)
+    date_label: str = ""
+    empty: bool = False
+
+
+class DigestService:
+    def __init__(self, config: AppConfig | None = None, news: NewsService | None = None,
+                 llm: LLMService | None = None) -> None:
+        self.config = config or get_config()
+        self.news = news or get_news_service()
+        self.llm = llm
+
+    def _llm(self, override: LLMService | None = None) -> LLMService:
+        return override or self.llm or get_llm()
+
+    # ------------------------------------------------------------- briefings
+    async def generate(self, kind: str = "morning", *, chat_id: int | None = None,
+                       llm: LLMService | None = None) -> Digest:
+        kind = (kind or "morning").lower()
+        if kind in {"daily", "morning", "早报"}:
+            return await self.generate_daily(chat_id=chat_id, llm=llm)
+        if kind in {"evening", "晚报"}:
+            return await self.generate_evening(chat_id=chat_id, llm=llm)
+        if kind in {"breaking"}:
+            raise ValueError("generate_breaking() needs an article id")
+        raise ValueError(f"unknown digest kind: {kind}")
+
+    async def generate_daily(self, *, chat_id: int | None = None,
+                             llm: LLMService | None = None) -> Digest:
+        return await self._briefing("morning", window_hours=24, chat_id=chat_id, llm=llm)
+
+    async def generate_evening(self, *, chat_id: int | None = None,
+                              llm: LLMService | None = None) -> Digest:
+        return await self._briefing("evening", window_hours=12, chat_id=chat_id, llm=llm)
+
+    async def _briefing(self, kind: str, *, window_hours: int,
+                        chat_id: int | None, llm: LLMService | None) -> Digest:
+        """A rolling window (last 24h / last 12h), not a calendar day.
+
+        A calendar-day window at 08:00 would silently drop the overnight news
+        that a morning briefing exists to surface.
+        """
+        cfg = self.config
+        top_items = int(cfg.get(f"digest.{kind}.top_items", 10))
+        min_score = float(cfg.get(f"digest.{kind}.min_score", cfg.settings.min_article_score))
+        prefs = self.news.user_for(chat_id) if chat_id else {}
+        if prefs:
+            min_score = max(min_score, float(prefs.get("min_score") or 0))
+        tz_name = prefs.get("timezone") or cfg.settings.timezone
+        zone = F._zone(tz_name)
+        date_label = datetime.now(zone).strftime("%Y-%m-%d")
+
+        # The candidate pool is deliberately deeper than the briefing: with a
+        # per-source cap there must be something left to pick after it bites.
+        items = self.news.latest(limit=top_items * BRIEFING_DEPTH, min_score=min_score,
+                                 hours=window_hours, order_by_score=True)
+        if not items:
+            # A quiet window: widen once rather than send an empty briefing.
+            items = self.news.latest(limit=top_items * 2, min_score=min_score,
+                                     hours=window_hours * 2, order_by_score=True)
+        if not items:
+            return Digest(kind=kind, messages=[], date_label=date_label, empty=True)
+
+        day_items = select_briefing(
+            items, top_items=top_items,
+            max_per_source=as_int(cfg.get("digest.max_per_source", 3), 3))
+        # 简报里每一条都保证中文：后台翻译轮还没覆盖到的，这里当场补齐
+        day_items = await self.news.ensure_chinese(day_items)
+        blocks = F.section_blocks(
+            day_items, config=cfg, tz_name=tz_name,
+            top_count=int(cfg.get("digest.top_count", 3)),
+            show_summary=bool(cfg.get("digest.show_summary", True)),
+        )
+        overview = ""
+        service = self._llm(llm)
+        if service.enabled and bool(cfg.get("digest.use_llm_overview", True)):
+            try:
+                data = await service.digest_overview([a.to_dict() for a in day_items])
+                overview = data.get("overview") or ""
+                highlights = data.get("highlights") or []
+                if highlights:
+                    overview = (overview + "\n" + "\n".join(f"{F.BULLET} {h}" for h in highlights)).strip()
+            except Exception as exc:
+                log.info("digest overview skipped: %s", exc)
+
+        stats_line = (
+            f"<i>覆盖 {len(day_items)} 条重点 · 最近 {window_hours} 小时 · "
+            f"共 {self.news.count_since(hours=window_hours)} 条入库</i>"
+        )
+        header = F.digest_header(kind, cfg, date=date_label)
+        chunks: list[str] = []
+        if overview:
+            chunks.append(f"<b>今日总体判断</b>\n{F.esc(overview)}")
+        chunks.extend(blocks)
+        messages = F.split_messages(chunks, header=header, footer=stats_line,
+                                   limit=int(cfg.get("digest.per_message_limit", 3700)))
+        return Digest(kind=kind, messages=messages, article_ids=[a.id for a in day_items],
+                      date_label=date_label)
+
+    # ------------------------------------------------------------- breaking
+    async def generate_breaking(self, article_id: int, *, chat_id: int | None = None) -> Digest:
+        item = self.news.by_id(article_id)
+        if item is None:
+            return Digest(kind="breaking", messages=[], empty=True)
+        tz_name = self.config.settings.timezone
+        if chat_id:
+            tz_name = (self.news.user_for(chat_id).get("timezone") or tz_name)
+        message = F.breaking_card(item, config=self.config, tz_name=tz_name)
+        return Digest(kind="breaking", messages=[message], article_ids=[item.id])
+
+    def can_send_breaking(self, chat_id: int, *, article_id: int | None = None) -> tuple[bool, str]:
+        """Cooldown + daily cap + user switch (design doc section 16.3)."""
+        cfg = self.config
+        breaking_cfg = cfg.get("breaking", {}) or {}
+        cooldown = int(breaking_cfg.get("cooldown_minutes", cfg.settings.breaking_cooldown_minutes))
+        max_per_day = int(breaking_cfg.get("max_per_day", cfg.settings.max_breaking_news_per_day))
+        threshold = float(breaking_cfg.get("threshold", cfg.settings.breaking_news_threshold))
+        if not cfg.settings.breaking_news_enabled or not breaking_cfg.get("enabled", True):
+            return False, "breaking news disabled in config"
+        with session_scope() as session:
+            user = repo.get_user(session, chat_id) if chat_id else None
+            if user is not None:
+                if user.paused or not user.breaking_enabled:
+                    return False, "user paused / breaking off"
+                threshold = float(user.breaking_threshold or threshold)
+            if article_id is not None:
+                article = session.get(Article, article_id)
+                if article is None:
+                    return False, "article missing"
+                if (article.final_score or 0) < threshold:
+                    return False, f"score {article.final_score:.0f} below threshold {threshold:.0f}"
+                if article.is_breaking:
+                    return False, "already sent as breaking"
+                if article.event_id:
+                    same_event = session.scalars(
+                        select(Article).where(Article.event_id == article.event_id, Article.is_breaking.is_(True))
+                    ).first()
+                    if same_event is not None:
+                        return False, "same event already sent as breaking"
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            count = repo.pushes_since(session, user=user, kind="breaking", since=today_start)
+            if count >= max_per_day:
+                return False, f"daily cap reached ({count}/{max_per_day})"
+            last = repo.last_push_of(session, user=user, kind="breaking")
+            if last is not None and cooldown > 0:
+                elapsed = (datetime.utcnow() - last.created_at).total_seconds() / 60
+                if elapsed < cooldown:
+                    return False, f"cooldown {cooldown - elapsed:.0f} min left"
+        return True, "ok"
+
+    # --------------------------------------------------------------- sending
+    def record_delivery(self, *, chat_id: int | None, digest: Digest) -> None:
+        if digest.kind == "breaking":
+            with session_scope() as session:
+                user = repo.get_user(session, chat_id) if chat_id else None
+                for article_id in digest.article_ids:
+                    article = session.get(Article, article_id)
+                    repo.record_push(session, user=user, kind="breaking", article_id=article_id,
+                                     event_id=article.event_id if article else None)
+                    session.commit()
+            self.news.mark_sent(digest.article_ids, breaking=True)
+            return
+        self.news.mark_sent(digest.article_ids)
+        with session_scope() as session:
+            user = repo.get_user(session, chat_id) if chat_id else None
+            repo.record_push(session, user=user, kind=digest.kind)
+            session.commit()
+
+
+_service: DigestService | None = None
+
+
+def get_digest_service() -> DigestService:
+    global _service
+    if _service is None:
+        _service = DigestService()
+    return _service

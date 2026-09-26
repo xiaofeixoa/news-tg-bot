@@ -1,0 +1,20 @@
+# ---- Core runtime ----
+aiogram==3.15.0
+httpx==0.27.2
+# 可选：绕开 Cloudflare 的 TLS 指纹（browser_tls 源，如 linux.do）。
+# 没装也能跑，只是这些源会 403；见 app/collectors/base.py 的说明。
+curl_cffi>=0.15,<0.18
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+lxml==5.3.0
+SQLAlchemy==2.0.35
+apscheduler==3.10.4
+pydantic==2.9.2
+pydantic-settings==2.6.1
+PyYAML==6.0.2
+python-dotenv==1.0.1
+tenacity==9.0.0
+
+# ---- Tests ----
+pytest==8.3.3
+pytest-asyncio==0.24.0

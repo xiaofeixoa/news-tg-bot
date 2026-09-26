@@ -1,0 +1,401 @@
+# ============================================================
+# News sources. Adding a source = editing this file only.
+#   quality: A official / B mainstream tech media / C community / D personal
+#   type:    rss | hackernews | github | reddit | arxiv | youtube
+# ============================================================
+
+sources:
+  # ---------- Official AI labs & vendors (tier A) ----------
+  - name: OpenAI
+    type: rss
+    url: https://openai.com/news/rss.xml
+    enabled: true
+    category: official
+    quality: A
+
+  - name: Google AI
+    type: rss
+    url: https://blog.google/technology/ai/rss/
+    enabled: true
+    category: official
+    quality: A
+
+  - name: Google DeepMind
+    type: rss
+    url: https://deepmind.google/blog/rss.xml
+    enabled: true
+    category: official
+    quality: A
+
+  - name: Anthropic
+    type: rss
+    # No public RSS/Atom feed was found at anthropic.com/news (returns 404).
+    # Enable one of: your own RSSHub route, or an aggregator feed that mirrors
+    # the Anthropic newsroom; then flip enabled to true.
+    url: https://www.anthropic.com/rss.xml
+    enabled: false
+    category: official
+    quality: A
+
+  - name: Hugging Face
+    type: rss
+    url: https://huggingface.co/blog/feed.xml
+    enabled: true
+    category: official
+    quality: A
+
+  - name: NVIDIA Developer
+    type: rss
+    url: https://developer.nvidia.com/blog/feed/
+    enabled: true
+    category: official
+    quality: A
+
+  - name: Microsoft Research
+    type: rss
+    url: https://www.microsoft.com/en-us/research/feed/
+    enabled: true
+    category: official
+    quality: A
+
+  - name: AWS ML
+    type: rss
+    url: https://aws.amazon.com/blogs/machine-learning/feed/
+    enabled: true
+    category: official
+    quality: A
+
+  - name: Meta AI
+    type: rss
+    url: https://ai.meta.com/blog/rss/
+    enabled: false          # feed moves around; enable after checking with test_sources.py
+    category: official
+    quality: A
+
+  - name: Mistral
+    type: rss
+    url: https://mistral.ai/rss.xml
+    enabled: false
+    category: official
+    quality: A
+
+  - name: GitHub Blog
+    type: rss
+    url: https://github.blog/feed/
+    enabled: true
+    category: official
+    quality: A
+
+  # ---------- Tech media (tier B) ----------
+  - name: TechCrunch AI
+    type: rss
+    url: https://techcrunch.com/category/artificial-intelligence/feed/
+    enabled: true
+    category: media
+    quality: B
+
+  - name: VentureBeat AI
+    type: rss
+    url: https://venturebeat.com/category/ai/feed/
+    # Off since 2026-09-26: VB's WAF answers a 429 with no Retry-After for datacenter
+    # IPs, so from the VPS it has never yielded one article (69 failures in six hours).
+    # TechCrunch / The Verge / Ars carry the same news; flip back on via a residential
+    # proxy if it ever matters.
+    enabled: false
+    category: media
+    quality: B
+
+  - name: The Verge AI
+    type: rss
+    url: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
+    enabled: true
+    category: media
+    quality: B
+
+  - name: Ars Technica AI
+    type: rss
+    url: https://arstechnica.com/ai/feed/
+    enabled: true
+    category: media
+    quality: B
+
+  - name: MIT Technology Review
+    type: rss
+    url: https://www.technologyreview.com/topic/artificial-intelligence/feed
+    enabled: true
+    category: media
+    quality: B
+
+  - name: InfoQ AI
+    type: rss
+    url: https://www.infoq.com/ai-ml-data-eng/feed/
+    enabled: false
+    category: media
+    quality: B
+
+  # ---------- Community (tier C) ----------
+  - name: Hacker News
+    type: hackernews
+    enabled: true
+    category: community
+    quality: C
+    # min points before a story is worth collecting
+    min_points: 80
+    # extra search terms on top of filters.keywords
+    queries:
+      - AI
+      - LLM
+      - OpenAI
+      - Claude
+      - Gemini
+      - GPU
+      - NVIDIA
+      - inference
+      - agent
+      - RAG
+      - MCP
+    # stories from the front page are always considered
+    front_page: true
+
+  - name: GitHub Trending
+    type: github
+    enabled: true
+    category: community
+    quality: C
+    # GitHub search over AI topics. Each entry is its own query: GitHub ANDs
+    # qualifiers, so putting all three in one query asks for repos carrying
+    # every tag - 4 hits in two weeks against 26 for topic:ai alone.
+    searches:
+      - topic: ai
+      - topic: llm
+      - topic: agents
+    # One credit per query out of the 60/hour anonymous budget; raise once
+    # GITHUB_TOKEN is set (max_search_calls: 0 removes the cap entirely).
+    max_search_calls: 2
+    language: ""
+    # created/pushed within these days
+    recent_days: 7
+    # A repo created this week with no stars is not a trend
+    min_new_stars: 10
+    max_items: 25
+
+  - name: GitHub Releases
+    type: github
+    enabled: true
+    category: official
+    quality: A
+    mode: releases
+    repositories:
+      - openai/openai-python
+      - openai/codex
+      - openai/openai-agents-python
+      - anthropics/claude-code
+      - anthropics/anthropic-sdk-python
+      - google-gemini/gemini-cli
+      - google/adk-python
+      - huggingface/transformers
+      - huggingface/trl
+      - vllm-project/vllm
+      - sgl-project/sglang
+      - ollama/ollama
+      - ggml-org/llama.cpp
+      - deepseek-ai/DeepSeek-V3
+      # QwenLM/Qwen3 从来没有打过 release（API 实测 releases=0），只会白耗配额
+      - microsoft/autogen
+      - modelcontextprotocol/servers
+      - run-llama/llama_index
+      - langgenius/dify
+
+  - name: Reddit LocalLLaMA
+    type: reddit
+    enabled: false
+    category: community
+    quality: C
+    subreddit: LocalLLaMA
+    min_upvotes: 100
+    min_comments: 20
+
+  - name: Reddit MachineLearning
+    type: reddit
+    enabled: false
+    category: community
+    quality: C
+    subreddit: MachineLearning
+    min_upvotes: 150
+    min_comments: 25
+
+  - name: Reddit OpenAI
+    type: reddit
+    enabled: false
+    category: community
+    quality: C
+    subreddit: OpenAI
+    min_upvotes: 150
+
+  - name: Reddit ClaudeAI
+    type: reddit
+    enabled: false
+    category: community
+    quality: C
+    subreddit: ClaudeAI
+    min_upvotes: 100
+
+  - name: Reddit singularity
+    type: reddit
+    enabled: false
+    category: community
+    quality: D
+    subreddit: singularity
+    min_upvotes: 800
+
+  # ---------- Research ----------
+  - name: arXiv AI
+    type: arxiv
+    enabled: true
+    category: research
+    quality: B
+    categories:
+      - cs.AI
+      - cs.CL
+      - cs.LG
+      - cs.CV
+    # Never push everything: only keyword hits, then AI relevance scoring
+    require_keyword: true
+
+  # ---------- Video (phase 3, RSS first, no YouTube API) ----------
+  - name: YouTube AI Channels
+    type: youtube
+    enabled: false
+    category: community
+    quality: D
+    channels:
+      # resolve channel ids with: python scripts/test_sources.py --youtube "https://www.youtube.com/@SomeChannel"
+      - id: UCHnyfV28KTe7G_TsP4xDHvE
+        name: Two Minute Papers
+
+  # ---------- /免费 的信息源：白嫖与限免公告最密集的地方 ----------
+  # Reddit 的 .json 接口对机房 IP 返回 403，但 .rss 正常；同时 Reddit 会按 IP 限流，
+  # 所以 attempts 设成 1，避免一轮里三个源互相抢额度。
+  - name: Reddit LocalLLaMA RSS
+    type: rss
+    url: https://www.reddit.com/r/LocalLLaMA/hot/.rss?limit=50
+    enabled: true
+    category: community
+    quality: C
+    attempts: 1
+    headers:
+      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  - name: Reddit ChatGPTCoding RSS
+    type: rss
+    url: https://www.reddit.com/r/ChatGPTCoding/hot/.rss?limit=40
+    enabled: false        # 同一轮第三个 reddit 请求必被 429，只留两个最有用的
+    category: community
+    quality: C
+    attempts: 1
+    headers:
+      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  - name: Reddit ClaudeAI RSS
+    type: rss
+    url: https://www.reddit.com/r/ClaudeAI/hot/.rss?limit=40
+    enabled: false        # 三个 reddit 源同轮请求容易 429，需要时再开
+    category: community
+    quality: C
+    attempts: 1
+    headers:
+      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  # 检索型源：直接盯"免费"关键词，比等热帖里偶然出现要可靠得多
+  - name: Reddit Free 搜索
+    type: rss
+    url: https://www.reddit.com/r/LocalLLaMA/search.rss?q=free&restrict_sr=on&sort=new&t=month&limit=40
+    enabled: false        # reddit 的 search.rss 对机房 IP 限流最狠，需要时手动开一轮
+    category: community
+    quality: C
+    attempts: 1
+    headers:
+      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  - name: Reddit Coding Free 搜索
+    type: rss
+    url: https://www.reddit.com/r/ChatGPTCoding+ClaudeAI+cursor/search.rss?q=free&restrict_sr=on&sort=new&t=month&limit=40
+    enabled: false        # 多 subreddit 的 search.rss 对机房 IP 直接 429，单 subreddit 版可用
+    category: community
+    quality: C
+    attempts: 1
+    headers:
+      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  # 福利 / 羊毛分类：/免费 最主要的中文信源。
+  # 注意必须用带 id 的规范地址，/c/welfare.rss 会 301 到挑战页。
+  # 实测：Cloudflare 按 TLS 指纹（JA3）拦 python 客户端 —— 同一台机器同一时刻
+  # curl 200 / httpx 403。解法是 browser_tls：用 curl_cffi 复刻 Chrome 握手，
+  # 在美西 VPS 上实测 200（59KB）。装了 curl_cffi 才生效，没装会自动回落 httpx
+  # 并留一行 warning。
+  - name: Linux.do 福利分类
+    type: rss
+    url: https://linux.do/c/welfare/36.rss
+    enabled: true
+    category: community
+    quality: C
+    attempts: 1
+    browser_tls: true
+    impersonate: chrome
+    headers:
+      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  - name: V2EX 技术节点
+    type: rss
+    url: https://www.v2ex.com/index.xml
+    enabled: false          # 内容偏杂，需要时打开
+    category: community
+    quality: D
+
+  # 专门盯"免费"相关的 HN 讨论（min_points 低一些，白嫖帖热度天然不高）
+  - name: Hacker News Free
+    type: hackernews
+    enabled: true
+    category: community
+    quality: C
+    min_points: 15
+    front_page: false
+    require_keyword: false
+    queries:
+      - free API
+      - free credits
+      - now free
+      - free tier
+      - limited time free
+
+  # 专门盯编程 agent 的发布说明：限免/送额度最常写在自家 changelog 里，
+  # 比等论坛发帖快且权威。列表里的仓库都逐个用 API 验证过有 releases，
+  # 0 release 的（例如 getcursor/cursor）只会白耗配额，不要放进来。
+  - name: Coding Agent Releases
+    type: github
+    enabled: true
+    category: official
+    quality: A
+    mode: releases
+    fresh_hours: 168
+    repositories:
+      - sst/opencode
+      - openclaw/openclaw
+      - zai-org/ZCode                 # Z.ai 的 coding agent，即 Zcode
+      - QoderAI/better-harness        # Qoder 的开源 harness
+      - continuedev/continue
+      - aider-ai/aider
+      - RooCodeInc/Roo-Code
+      - block/goose
+      - qodo-ai/qodo-gen
+
+  # ---------- RSSHub bridge example (no official feed) ----------
+  - name: xAI News
+    type: rss
+    enabled: false
+    category: official
+    quality: A
+    # Point this at your own RSSHub instance; never a public rate-limited one.
+    url: https://rsshub.example.com/xai/news
+    headers:
+      User-Agent: "AI-News-Radar/1.0 (+personal use)"

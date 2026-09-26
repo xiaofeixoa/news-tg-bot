@@ -1,0 +1,246 @@
+# ============================================================
+# /免费 功能词表：识别"某个 agent / 模型 / API 现在免费"的资讯
+# 全部可调，不需要改代码。
+# ============================================================
+
+# 命中一条免费资讯至少需要：一个 free 信号 + 一个主体（工具/模型/厂商）
+min_signals: 1
+require_subject: true
+# 正文里只认这些强信号，并且必须与主体相邻（避免 "free software"、硬件帖里的 "no cost" 误报）
+body_max_distance: 140
+# 注意 "for free" 故意不放进这里：它更多出现在"我自己跑着不要钱"的用法描述里，
+# 而不是官方的免费公告里；出现在标题中才算数（signals_en）。
+signals_strong:
+  - is free
+  - now free
+  - made free
+  - free to use
+  - free access
+  - free tier
+  - free credits
+  - free quota
+  - free api
+  - limited-time free
+  - 免费
+  - 限免
+  - 限时免费
+  - 白嫖
+  - 免费额度
+  - 免费使用
+  - 免费开放
+  - 开放试用
+  - 送额度
+  - 送积分
+
+# ---------- 免费信号（英文）----------
+signals_en:
+  - free
+  - for free
+  - is free
+  - now free
+  - made free
+  - completely free
+  - free to use
+  - free access
+  - free tier
+  - free plan
+  - free credits
+  - free quota
+  - free api
+  - no cost
+  - no-charge
+  - at no charge
+  - zero cost
+  - $0
+  - 0 dollar
+  - free trial
+  - limited-time free
+  - open for free
+  - unlocked for free
+  - without a subscription
+  - no subscription required
+  # 英文促销的口头说法，之前完全没覆盖：on us / on the house / complimentary
+  - on us
+  - on the house
+  - complimentary
+  - free of charge
+  - ad-free
+  - price drop
+  - now cheaper
+  - free week
+  - promo
+  - promotion
+  - giveaway
+
+# ---------- 免费信号（中文）----------
+signals_zh:
+  - 免费
+  - 限时免费
+  - 白嫖
+  - 白薅
+  - 0元
+  - 零元
+  - 不要钱
+  - 免费额度
+  - 免费试用
+  - 免费开放
+  - 开放试用
+  - 送额度
+  - 送积分
+  - 兑换码
+  - 注册码
+  - 限免
+  - 降价
+  - 免费使用
+  - 无限量
+  - 不限量
+  - 免费API
+  - 随便用
+
+# ---------- 明确不是"免费资讯"的说法（避免 camera-free / encoder-free 误报）----------
+false_friends:
+  - camera-free
+  - encoder-free
+  - filter-free
+  - sugar-free
+  - caffeine-free
+  - free-tier abuse
+  - freedom
+  - free speech
+  - free will
+  - free radical
+  - free market
+  - copyright-free
+  - royalty-free
+  # 许可证措辞不是价格促销：开源模型"可以免费商用"是授权声明，不是限免活动
+  - free license
+  - free commercial license
+  - free for commercial use
+  - driver-free
+  - error-free
+  - bug-free
+  - noise-free
+  - free software
+  - free as in freedom
+  - is free from
+  - free from the
+  - feels free
+  - feel free
+  - for free of
+
+# ---------- 主体：编程 agent / IDE / 平台 ----------
+tools:
+  Qoder: [qoder, 通义灵码, lingma]
+  Zcode: [zcode, z code, zcode ai]
+  opencode: [opencode, anycoder, "sst/opencode"]
+  Claude Code: [claude code, claude-code, anthropic claude code]
+  Codex: [codex cli, openai codex, codex]
+  Gemini CLI: [gemini cli, gemini-cli]
+  Cursor: [cursor, cursor ai]
+  Windsurf: [windsurf, codeium]
+  GitHub Copilot: [github copilot, copilot]
+  Cline: [cline, roo code]
+  Aider: [aider]
+  Continue: [continue.dev]
+  Trae: [trae, byteplus trae]
+  CodeBuddy: [codebuddy, 腾讯 codebuddy]
+  Zed: [zed dev, zed editor]
+  KataBump: [katabump]
+  Kiro: [kiro, kiro pro]
+  StepFun: [stepfun, 阶跃星辰]
+  Tongyi: [通义千问, tongyi]
+  Antigravity: [antigravity]
+  Qoder Wake: [qoder wake, qoderwork]
+  OpenClaw: [openclaw]
+  OpenRouter: [openrouter]
+  Ollama: [ollama]
+  LM Studio: [lm studio, lmstudio]
+  Hugging Face: [hugging face, huggingface]
+  ModelScope: [modelscope, 魔搭]
+  SiliconFlow: [siliconflow, 硅基流动]
+  Groq: [groq]
+  Together AI: [together ai, together.xyz]
+  Fireworks: [fireworks ai, fireworks.ai]
+  DeepSeek: [deepseek, 深度求索]
+  OpenAI: [openai, chatgpt]
+  Anthropic: [anthropic]
+  Google: [google ai, gemini, google studio, ai studio]
+  Meta: [meta ai, llama]
+  Mistral: [mistral]
+  xAI: [xai, grok]
+  Moonshot: [moonshot, kimi]
+  MiniMax: [minimax, 海螺]
+  Zhipu: [zhipu, glm, 智谱]
+  Qwen: [qwen, 通义千问]
+  Baichuan: [baichuan]
+  Stepflow: [step-1, step-2, step-3, step-5, 阶跃]
+  Baidu: [ernie, 文心]
+  Volcengine: [volcengine, doubao, 豆包, 火山引擎]
+  Alibaba Cloud: [aliyun, alibaba cloud, 阿里云百炼]
+  Tencent Cloud: [tencent cloud, 腾讯云]
+  AWS: [aws bedrock, amazon bedrock, sagemaker]
+  Azure: [azure openai, azure ai]
+
+# ---------- 模型名（用于说明"哪个模型免费"）----------
+models:
+  - gpt-4o
+  - gpt-4.1
+  - gpt-5
+  - o3
+  - o4-mini
+  - chatgpt
+  - claude
+  - claude-opus
+  - claude-sonnet
+  - claude-haiku
+  - gemini
+  - gemini-2.5
+  - gemini-3
+  - deepseek
+  - deepseek-v3
+  - deepseek-r1
+  - qwen3
+  - qwen-max
+  - qwen3.8
+  - glm
+  - glm-5
+  - kimi
+  - minimax
+  - doubao
+  - nemotron
+  - mistral-large
+  - glm-4
+  - glm-4.6
+  - kimi
+  - minimax
+  - llama
+  - mistral
+  - grok
+  - step
+  - doubao
+  - ernie
+
+# ---------- 有效期线索（只认月份/星期/明确天数，避免 "through Portland" 这种误判）----------
+expiry_patterns:
+  - '\b(?:until|till|through|by)\s+(?:the\s+)?(?:\d{1,2}\s+)?(?:january|february|march|april|may|june|july|august|september|october|november|december)\b'
+  - '\b(?:until|till|through|by)\s+(?:the\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|midnight|eoy|month\s+end)\b'
+  - '\bfor\s+(?:a\s+)?(\d+)\s*(?:days?|hours?|weeks?|months?)\b'
+  - '(?:截止|截至)\s*(?:到)?\s*(?:\d{1,2}\s*月\s*\d{1,2}\s*日|\d{4}-\d{1,2}-\d{1,2})'
+  - '\d{1,2}\s*月\s*\d{1,2}\s*日(?:前|之前|截止)'
+  - '(?:限时|活动期间|促销期|优惠期)[^。，,]{0,12}'
+
+# ---------- 展示分组与图标 ----------
+kinds:
+  "编程 Agent/IDE": "💻"
+  "模型": "🤖"
+  "API/平台": "☁️"
+  "其他": "🎁"
+
+# 主体到 kind 的映射（未列出的走"其他"）
+kind_map:
+  "编程 Agent/IDE": [Qoder, Zcode, opencode, "Claude Code", Codex, "Gemini CLI", Cursor, Windsurf,
+                    "GitHub Copilot", Cline, Aider, Continue, Trae, CodeBuddy, Zed, OpenClaw]
+  "API/平台": [OpenRouter, Ollama, "LM Studio", "Hugging Face", ModelScope, SiliconFlow, Groq,
+              "Together AI", Fireworks, "AWS", Azure, "Alibaba Cloud", "Tencent Cloud", "Google"]
+  "模型": [DeepSeek, OpenAI, Anthropic, Meta, Mistral, xAI, Moonshot, MiniMax, Zhipu, Qwen,
+          Baichuan, Stepflow, Baidu, Volcengine]

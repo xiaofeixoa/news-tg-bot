@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+logs/
+.deploy_stamp
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+*.egg-info/
+.DS_Store
+
+# docs figures only
+docs/images/.matplotlib/

@@ -1,0 +1,97 @@
+# ============================================================
+# Taxonomy (design doc section 12).
+# keywords drive layer-1 rule classification; the LLM picks from
+# this same list, so it is also the prompt vocabulary.
+# ============================================================
+
+top_categories:
+  - AI Models
+  - AI Agent
+  - AI Infrastructure
+  - Open Source
+  - Research
+  - Companies
+  - AI Applications
+
+categories:
+  "AI Models":
+    emoji: "🤖"
+    description: 模型发布、能力、评测、价格
+    keywords: [model, gpt, claude, gemini, llama, deepseek, qwen, mistral, grok, weights, benchmark, sota, context window, moe, reasoning, api pricing, frontier model]
+    subcategories:
+      GPT: [gpt-4, gpt-4o, gpt-5, chatgpt, o1, o3, codex]
+      Claude: [claude, anthropic, sonnet, opus, haiku]
+      Gemini: [gemini, deepmind, gemma, tpu]
+      DeepSeek: [deepseek, deepseek-r1, deepseek-v3]
+      Qwen: [qwen, tongyi, qwq]
+      Llama: [llama, meta ai, llamafile]
+      "Other Models": []
+
+  "AI Agent":
+    emoji: "🧠"
+    description: Agent 框架、工具调用、自主执行
+    keywords: [agent, agentic, tool use, function calling, mcp, computer use, browser use, autonomous, workflow, copilot, assistant]
+    subcategories:
+      "Coding Agent": [coding agent, code agent, cursor, copilot, claude code, codex cli, aider, windsurf, devin, sWE-bench]
+      MCP: [mcp, model context protocol, tool server]
+      "Browser Agent": [browser agent, web agent, openai operator, browsing]
+      "Computer Use": [computer use, screen shot agent, osworld]
+      "Autonomous Agent": [autonomous, multi-agent, planner, long horizon, memory]
+
+  "AI Infrastructure":
+    emoji: "⚙️"
+    description: 算力、推理引擎、 Serving
+    keywords: [gpu, cuda, nvidia, amd, tpu, inference, serving, vllm, sglang, tensorrt, quantization, kv cache, cluster, datacenter, data center, h100, h200, b200, mi300]
+    subcategories:
+      GPU: [gpu, nvidia, h100, h200, b200, mi300, rtx, vram]
+      CUDA: [cuda, cudnn, triton]
+      vLLM: [vllm]
+      SGLang: [sglang]
+      Inference: [inference, latency, throughput, tokens per second, quantization]
+      Serving: [serving, deployment, kubernetes, autoscaling, endpoint]
+
+  "Open Source":
+    emoji: "🧑‍💻"
+    description: 开源项目、权重、数据集、工具链
+    keywords: [open source, open-source, github, hugging face, huggingface, weights released, dataset, apache-2.0, mit license, wisp, repo]
+    subcategories:
+      GitHub: [github, trending, repository, stars, release]
+      "Hugging Face": [hugging face, huggingface, hub, model card]
+      "Open Models": [open weights, open model, released weights]
+      Tools: [sdk, library, toolkit, cli, framework]
+
+  "Research":
+    emoji: "📚"
+    description: 论文、新方法、评测基准
+    keywords: [paper, arxiv, research, study, benchmark, state of the art, method, evaluation, dataset]
+    subcategories:
+      LLM: [language model, llm, reasoning, alignment, rlhf, tokenizer]
+      Multimodal: [multimodal, vision language, image generation, video generation, audio]
+      Agent: [agent, tool use, reinforcement learning agent]
+      "Reinforcement Learning": [rl, reinforcement learning, policy, reward]
+      "Computer Vision": [cv, detection, segmentation, diffusion, video understanding]
+
+  "Companies":
+    emoji: "🏢"
+    description: 公司层面：融资、组织、合作、政策
+    keywords: [funding, raises, acquisition, hires, partnership, lawsuit, regulation, valuation, ipo, datacenter deal, revenue]
+    subcategories:
+      OpenAI: [openai, sam altman]
+      Google: [google, alphabet, deepmind, sundar pichai]
+      Anthropic: [anthropic, dario amodei]
+      NVIDIA: [nvidia, jensen huang]
+      Meta: [meta, fair, zuckerberg]
+      Microsoft: [microsoft, satya nadella, azure]
+
+  "AI Applications":
+    emoji: "🎯"
+    description: 产品与应用场景
+    keywords: [launches, app, product, feature, search, writing, design, enterprise, healthcare, education, robot]
+    subcategories:
+      Coding: [coding, developer, ide, codegen]
+      Image: [image, art, design, photo]
+      Video: [video, film, animation, sora, veo]
+      Audio: [audio, voice, tts, speech, music, transcription]
+      Productivity: [productivity, notes, office, meeting, search assistant]
+
+fallback_category: "Other"

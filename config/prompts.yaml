@@ -1,0 +1,217 @@
+# ============================================================
+# Every AI prompt lives here. Prompts are never hard-coded in
+# Python (design doc section 39).
+#
+# Placeholders use string.Template syntax: $name
+# (so JSON braces below need no escaping).
+# ============================================================
+
+# ---- Layer 2: cheap model, one call per article ----
+# Returns category + relevance + importance + novelty judgement.
+classification_prompt: |
+  You are the triage engine of a personal AI news radar.
+  Decide whether this item is genuinely about AI, then classify it.
+
+  Allowed categories (pick exactly one, or "Other"):
+  $categories
+
+  Allowed subcategories:
+  $subcategories
+
+  User interests (weight = how much the user cares):
+  $interests
+
+  Title: $title
+  Source: $source_name (credibility tier $quality)
+  Published: $published_at
+  Link: $url
+  Excerpt:
+  ---
+  $content
+  ---
+
+  Rules:
+  - relevance_score is about THIS USER's interests, not generic AI hype.
+  - importance_score is about the EVENT itself: a new frontier model release
+    or a multibillion deal is high; a minor doc update or listicle is low.
+  - novelty_score: 100 for a first report, drop if it rehashes known news.
+  - Judge only from the given text. Never invent facts.
+  - Reply with a single JSON object and nothing else.
+
+  {"is_ai_related": true, "relevance_score": 0, "category": "AI Models",
+   "subcategory": "GPT", "importance_score": 0, "novelty_score": 0,
+   "tags": ["OpenAI", "LLM"], "reason": "one short sentence"}
+
+scoring_prompt: |
+  Score this AI news item for a personal briefing. Use 0-100 integers.
+  Four already-sampled dimensions are given; return the missing judgements
+  plus the weighted final score.
+
+  Weights: importance=$w_importance relevance=$w_relevance novelty=$w_novelty
+  source_quality=$w_source_quality community_heat=$w_community_heat
+
+  Title: $title
+  Source: $source_name (tier $quality)
+  Current scores: importance=$importance relevance=$relevance novelty=$novelty
+  source_quality=$source_quality community_heat=$community_heat
+  Summary: $summary
+
+  Reply with a single JSON object and nothing else.
+  {"importance_score": 0, "relevance_score": 0, "novelty_score": 0,
+   "final_score": 0}
+
+# ---- Layer 2: Chinese one-line + bullet summary ----
+summary_prompt: |
+  你是 AI 新闻编辑。请用简体中文总结下面这条英文/中文新闻。
+  严格基于给定内容，不要编造，不要重复标题。
+
+  标题: $title
+  来源: $source_name
+  发布时间: $published_at
+  正文:
+  ---
+  $content
+  ---
+
+  输出要求：
+  - summary：一句话总结，40 个汉字以内，突出"谁做了什么"。
+  - key_points：2-4 条核心内容，每条不超过 40 字。
+  - why_it_matters：为什么值得关注，1-2 句，具体影响，不要空话。
+  - tags：3-6 个标签，公司名/模型名/技术名，用原文写法。
+  - importance：0-100 的整数，事件重要程度。
+  - 专有名词（OpenAI、Claude、MCP、vLLM 等）保留英文。
+
+  只输出 JSON：
+  {"summary": "", "key_points": [], "why_it_matters": "", "tags": [], "importance": 0}
+
+# ---- Borderline duplicate detection, optional tier ----
+deduplication_prompt: |
+  Decide whether two news items report the SAME underlying event.
+  Different wording, different sources or different angle of the same event
+  still counts as the same event. Same product but different news does not.
+
+  Item A: $title_a
+  Source A: $source_a
+  Excerpt A: $excerpt_a
+
+  Item B: $title_b
+  Source B: $source_b
+  Excerpt B: $excerpt_b
+
+  Reply with a single JSON object and nothing else.
+  {"same_event": false, "confidence": 0, "event_title": ""}
+
+# ---- Layer 3: strong model, only for big stories / user requests ----
+deep_analysis_prompt: |
+  你是资深 AI 行业分析师。请对用户指定的这条 AI 新闻做深度分析。
+
+  标题: $title
+  来源: $source_name
+  链接: $url
+  发布时间: $published_at
+  重要度评分: $final_score
+  正文:
+  ---
+  $content
+  ---
+  $related
+
+  请用简体中文输出 JSON：
+  {"headline": "", "what_happened": "", "key_points": [],
+   "why_it_matters": "", "industry_impact": "", "open_questions": [],
+   "confidence_note": ""}
+  要求：
+  - 只写正文和相关信息中确实存在的事实，推测必须标注"推测"。
+  - what_happened 3-4 句；industry_impact 2-3 句。
+  - open_questions 给 2-3 个值得继续跟踪的问题。
+  - 如果正文信息不足，在 confidence_note 里说明缺什么。
+
+# ---- Daily / evening briefing composition ----
+digest_prompt: |
+  下面是今天抓到的 AI 新闻标题列表（含评分与分类）。
+  请写一段"今日总体判断"，帮用户在 20 秒内了解今天 AI 行业发生了什么。
+
+  $items
+
+  输出 JSON：
+  {"overview": "", "highlights": []}
+  - overview：2-3 句简体中文，概括主线，不要逐条复述。
+  - highlights：3 条以内的短句，指出最值得注意的事，每条不超过 25 字。
+  - 只能依据上面给到的标题，不要编造细节。
+
+# ---- Layer 4: conversational news agent ----
+chat_prompt: |
+  你是 AI News Radar，一个运行在用户 Telegram 上的个人 AI 新闻 Agent。
+  请只依据"数据库检索结果"回答问题；检索结果不足时明确说明没找到，
+  并建议用户换关键词或等待下一轮采集。不要编造新闻、日期或链接。
+
+  当前时间: $now
+  用户问题: $question
+  会话上下文: $context
+
+  数据库检索结果（JSON 数组，按时间倒序）:
+  $results
+
+  回答要求：
+  - 简体中文，先结论后细节，不超过 900 字。
+  - 用短段落和 "•" 列表，适合手机阅读。
+  - 引用具体新闻时给出编号 #id，并在最后列出"来源"清单（来源名 + 日期）。
+  - 涉及争议或单一来源的消息时提醒"仅单源报道"。
+
+# ---- Turn free-form text into structured preferences ----
+interest_prompt: |
+  把用户对 AI 新闻的兴趣描述转换为结构化偏好。
+
+  可用 type 取值: topic / keyword / company / model / repo / exclude
+  可用 category 取值: $categories
+
+  用户输入:
+  ---
+  $text
+  ---
+
+  输出 JSON：
+  {"interests": [{"type": "topic", "value": "AI Agent", "weight": 1.0,
+   "category": "AI Agent"}], "summary": ""}
+  - weight 用 0.3 ~ 1.0 表达强弱，"主要关注"约 1.0，"顺便看看"约 0.4。
+  - 用户说不想要的主题时用 type=exclude。
+  - summary 用一句中文复述你的理解。
+
+# ---- 中文输出：批量翻译标题/摘要（有 LLM 时优先用它，质量优于免费 MT）----
+translate_prompt: |
+  把下面的 AI 新闻$kind逐条翻译成简体中文，用于新闻简报。
+
+  要求：
+  - 忠实原意，不加不减信息；简洁、像新闻标题，不要翻译腔。
+  - 专有名词保留英文：OpenAI、Claude、GPT-5、vLLM、MCP、CUDA、H100、GitHub 等。
+  - 公司/产品名没有通用中文译名时保留英文。
+  - 不要加引号、句号、编号或任何前后缀说明。
+  - 输出条目数必须与输入完全一致，顺序一一对应。
+
+  输入：
+  $items
+
+  只输出 JSON：
+  {"items": [{"src": "原文", "zh": "中文"}, ...]}
+
+# ---- Understand a natural-language message ----
+intent_prompt: |
+  判断用户这句话在 AI 新闻库里想做什么，只做分类不要回答问题。
+
+  可选 intent:
+  - latest      想看最新/今日/最近的 AI 新闻
+  - search      想找某个具体主题、公司或模型的相关新闻
+  - summarize   想对某一条已知新闻做详细分析
+  - settings    想修改推送时间、兴趣、开关
+  - sources     想了解信息来源或系统状态
+  - help        不知道能干什么
+  - other       与新闻无关
+
+  用户输入: $text
+  最近一次新闻列表: $recent
+
+  输出 JSON：
+  {"intent": "search", "query": "AI Agent", "days": 14, "index": null}
+  - query：检索关键词，用英文原词（如 AI Agent、GPT、MCP）；无则空字符串。
+  - days：用户暗示的时间跨度，默认 14。
+  - index：用户说"第二条"时对应上一条列表里的序号，否则 null。

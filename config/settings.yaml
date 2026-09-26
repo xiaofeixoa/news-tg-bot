@@ -1,0 +1,273 @@
+# ============================================================
+# AI News Radar - main tunables. Secrets live in .env, not here.
+# ============================================================
+
+app:
+  name: AI News Radar
+  # 输出语言：zh = 标题/摘要尽量给中文（见下面 translate 段）；en = 保持原文
+  language: zh
+  # Days of history kept before articles are archived/trimmed (0 = keep forever)
+  retention_days: 120
+
+# ---------------------------------------------------------------------------
+# /免费 命令
+# ---------------------------------------------------------------------------
+free:
+  days_default: 30
+  limit: 12
+  # 检测到免费资讯时，额外提高一点分数，让它更容易进入早报
+  score_bonus: 6
+  # 实时"哪些模型现在免费"：直接查网关的定价接口，比等新闻靠谱。
+  # provider 接口挂了会自动跳过，不影响 /免费 输出采集到的限免资讯。
+  models:
+    enabled: true
+    name: OpenRouter
+    url: https://openrouter.ai/api/v1/models
+    # 同一个 bot 会话内多久重新拉一次（分钟）
+    ttl_minutes: 360
+    max_items: 8
+    # 只排掉"路由器"这种聚合项。alpha / preview 别排：
+    # 它们确实是此刻可用的免费模型，而且新闻标题里点名的往往就是它们。
+    exclude:
+      - openrouter/free
+    state_file: free_models.json
+  # 主动推送：发现新的限免/新出现的免费模型时通知一次，不用人来回问。
+  # 沿用突发新闻的克制策略：每人每日上限 + 冷却，暂停的用户不发。
+  alert:
+    enabled: true
+    within_days: 7          # 只推送最近入库的
+    min_confidence: 0.6     # 低于这个置信度的猜测不打扰人
+    max_items: 3            # 一条消息里最多列几条
+    cooldown_minutes: 90
+    max_per_day: 4
+    require_title_subject: true  # 主体只在正文里露过面的，不值得打断你
+    new_models: true        # 定价接口里新出现的 0 价模型也一起报
+    max_models: 5
+
+# ---------------------------------------------------------------------------
+# 中文输出
+# 上游几乎全是英文源，所以要么让 LLM 出中文摘要（质量最好），
+# 要么走免密钥的机器翻译（MyMemory 免费额度）。
+# provider: auto = 有 LLM 用 LLM，没有就用 MyMemory；off 关闭翻译
+# ---------------------------------------------------------------------------
+translate:
+  enabled: true
+  provider: auto
+  # 免费额度保护：每轮翻多少条、每天最多多少次请求（标题+摘要各算一次）
+  per_run_limit: 60
+  daily_budget: 400
+  concurrency: 3
+  # 每轮处理结束后连续翻译几批（把积压的英文标题尽快补齐）
+  rounds_per_run: 2
+  # 列表/简报里优先显示中文标题；缺失时回落到原文
+  prefer_translated_title: true
+
+llm:
+  provider: openai-compatible
+  # base_url / api_key / models come from .env (LLM_BASE_URL, LLM_API_KEY, ...)
+  # Two tiers keep token cost under control (design doc section 23).
+  tiers:
+    light:
+      temperature: 0.1
+      max_tokens: 700
+    strong:
+      temperature: 0.3
+      max_tokens: 1600
+  # Max characters of article content handed to the model
+  max_content_chars: 6000
+  # Batch size per pipeline run (caps tokens per run)
+  process_batch_size: 40
+  # Batches drained per scheduled run: a cold-start backlog must surface today's
+  # news within one round, not one batch per interval.
+  max_batches_per_run: 6
+  # When false the whole AI pipeline is skipped: news still flows to Telegram
+  enabled: true
+
+enrich:
+  # Fetch the article page when the feed only shipped a stub (design doc 6:
+  # BeautifulSoup4 正文提取). Measured reason: Google DeepMind and Hugging Face
+  # deliver 36-288 characters, so 100 first-party announcements in seven days
+  # produced zero briefing-eligible rows while 3.7 KB Reddit threads cleared it.
+  enabled: true
+  # Below this many characters the stored text counts as a stub.
+  min_chars: 600
+  # Fetch attempts per processing round, so a slow host cannot stall the pass.
+  max_per_round: 5
+  max_chars: 12000
+  # Recent stub rows are re-queued for a second look, this many rounds deep;
+  # without it the 300+ stubs already stored would age out still under-scored.
+  backfill_hours: 36
+
+scoring:
+  # Weights are configuration, not code (design doc section 11).
+  weights:
+    importance: 0.35
+    relevance: 0.30
+    novelty: 0.15
+    source_quality: 0.10
+    community_heat: 0.10
+  # Personalised boost applied on top of the weights (user_interests)
+  interest_bonus_max: 15
+  # Community heat (HN points / Reddit upvotes) is squashed into 0..100
+  community_heat_max_signal: 500
+
+filters:
+  # Layer 1 of the cost control design: pure rules, no tokens spent.
+  # A candidate must hit at least one keyword to reach the LLM.
+  min_keyword_hits: 1
+  keywords:
+    - ai
+    - a.i.
+    - artificial intelligence
+    - llm
+    - gpt
+    - claude
+    - gemini
+    - llama
+    - deepseek
+    - qwen
+    - mistral
+    - grok
+    - transformer
+    - diffusion
+    - machine learning
+    - deep learning
+    - neural
+    - inference
+    - training
+    - fine-tun
+    - rag
+    - mcp
+    - agent
+    - agentic
+    - prompt
+    - embedding
+    - benchmark
+    - gpu
+    - cuda
+    - nvidia
+    - vllm
+    - sglang
+    - ollama
+    - hugging face
+    - huggingface
+    - copilot
+    - cursor
+    - chatbot
+    - multimodal
+    - text-to-image
+    - text-to-video
+    - reasoning
+    - openai
+    - anthropic
+    - deepmind
+    - meta ai
+    - mistral ai
+    - xai
+  # Titles matching these never reach storage.
+  title_blocklist:
+    - weekly roundup of everything
+    - deal of the day
+    - newsletter archive
+  # Domains never collected (ads / pure marketing).
+  url_blocklist:
+    - doubleclick.net
+
+dedup:
+  # Title similarity threshold, 0..1 (design doc section 10.3).
+  # Blends token order, literal order and set coverage; clashing version
+  # numbers ("4.5" vs "4.6") halve the score so they never merge.
+  title_similarity: 0.79
+  # Token-set (Jaccard) threshold, catches reordered titles
+  token_similarity: 0.75
+  # Only compare inside this time window
+  window_hours: 72
+  # Ask the LLM only for borderline pairs (between the two bounds)
+  ai_review_enabled: false
+  ai_review_low_bound: 0.60
+  # Cap AI dedup review calls per pipeline run
+  ai_review_max_per_run: 10
+
+events:
+  # Merge same-story articles from different sources into one event (§10.5, §41)
+  enabled: true
+  # How long an event stays open for new members
+  open_hours: 48
+
+digest:
+  # Headlines shown under 🔥 今日重点 before the category sections start
+  top_count: 3
+  # Cap on how many lines one source may take in a single briefing. Without it
+  # the feed that polled last owns the whole digest; a thin day backfills past
+  # the cap anyway. 0 disables it.
+  max_per_source: 3
+  # Show the one-line AI summary under each headline
+  show_summary: true
+  # Ask the strong model for a "今日总体判断" paragraph at the top
+  use_llm_overview: true
+  morning:
+    enabled: true
+    top_items: 10
+    min_score: 55
+    header: "☀️ AI Morning Briefing"
+  evening:
+    enabled: true
+    top_items: 8
+    min_score: 55
+    header: "🌙 AI Evening Briefing"
+  # Sections rendered in this order; unknown categories go to "Other"
+  section_order:
+    - AI Models
+    - AI Agent
+    - AI Infrastructure
+    - Open Source
+    - Research
+    - Companies
+    - AI Applications
+  section_emoji:
+    "AI Models": "🤖"
+    "AI Agent": "🧠"
+    "AI Infrastructure": "⚙️"
+    "Open Source": "🧑‍💻"
+    "Research": "📚"
+    "Companies": "🏢"
+    "AI Applications": "🎯"
+    "Other": "📰"
+    "Top": "🔥"
+  per_message_limit: 3800
+  # Telegram sends an article as its own message beyond this count
+  list_page_size: 10
+
+breaking:
+  enabled: true
+  threshold: 90
+  max_per_day: 5
+  cooldown_minutes: 60
+  header: "🚨 AI BREAKING NEWS"
+
+bot:
+  news_limit: 10
+  search_limit: 10
+  # Natural-language answers may look back this many days
+  chat_lookback_days: 14
+  chat_context_size: 12
+  deep_analysis_min_content: 200
+
+sources_quality:
+  # Credibility tiers, design doc section 40. Feeds source_quality score.
+  A: 95
+  B: 80
+  C: 65
+  D: 45
+  # Maximum final_score per tier: community chatter (HN/r/repo) can rank high
+  # inside its tier but can never out-announce an official source.
+  tier_caps:
+    A: 100
+    B: 100
+    C: 78
+    D: 68
+
+logging:
+  level: INFO
+  max_bytes: 5242880
+  backup_count: 5

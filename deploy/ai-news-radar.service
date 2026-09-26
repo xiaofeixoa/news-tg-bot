@@ -1,0 +1,58 @@
+# /etc/systemd/system/ai-news-radar.service
+#
+# 安装（在项目里执行，需要 root）：
+#   sudo mkdir -p /opt/ai-news-radar
+#   sudo rsync -a --exclude .venv --exclude data --exclude logs ./ /opt/ai-news-radar/
+#   sudo cp deploy/ai-news-radar.service /etc/systemd/system/
+#   sudo useradd -r -s /usr/sbin/nologin -d /opt/ai-news-radar news || true
+#   sudo -u news python3 -m venv /opt/ai-news-radar/.venv
+#   sudo -u news /opt/ai-news-radar/.venv/bin/pip install -r /opt/ai-news-radar/requirements.txt
+#   sudo install -o news -g news -m 600 -D .env /etc/ai-news-radar/env
+#   sudo -u news /opt/ai-news-radar/.venv/bin/python /opt/ai-news-radar/scripts/init_db.py
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ai-news-radar
+#   journalctl -u ai-news-radar -f
+
+[Unit]
+Description=AI News Radar - personal AI news agent (Telegram)
+Documentation=file:///opt/ai-news-radar/README.md
+After=network-online.target
+Wants=network-online.target
+# Give up (instead of restarting forever) if it keeps failing at startup
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=news
+Group=news
+WorkingDirectory=/opt/ai-news-radar
+EnvironmentFile=/etc/ai-news-radar/env
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/ai-news-radar/.venv/bin/python -m app.main
+ExecReload=/bin/kill -HUP $MAINPID
+
+# 异常自动重启；但退出码 3 = 配置缺失（没有 bot token 等），
+# 这类错误需要人工处理，重启一万次也不会自己好，所以直接停住并留下日志。
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=3
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# 日志进入 journald（应用自身的滚动日志在 logs/）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-news-radar
+
+# 只依赖自己的目录，权限收紧
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ai-news-radar/data /opt/ai-news-radar/logs
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

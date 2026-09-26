@@ -1,0 +1,316 @@
+"""Configuration: env vars via pydantic-settings, tunables via YAML.
+
+Secrets only ever come from the environment (.env), never from YAML or code.
+"""
+
+from __future__ import annotations
+
+import os
+import string
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import Field, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _env_files() -> tuple[str, ...]:
+    """Config files loaded for direct (non-systemd) runs.
+
+    Under systemd the unit's EnvironmentFile supplies everything, but an
+    operator running `scripts/telegram_smoke.py` by hand would otherwise get an
+    empty allowlist and a confusing "ALLOWED_CHAT_IDS 为空" message.
+
+    Only paths this process may actually read are listed: the deployment keeps
+    /etc/ai-news-radar/env at mode 600 owned by root, and PID 1 can read it as
+    EnvironmentFile while the unprivileged service user cannot - asking
+    pydantic-settings to open it anyway would turn every service start into a
+    permission error.
+    """
+    explicit = os.getenv("ENV_FILE")
+    if explicit:
+        return (explicit,)
+    candidates = (PROJECT_ROOT / ".env", Path("/etc/ai-news-radar/env"))
+    return tuple(str(path) for path in candidates if path.is_file() and os.access(path, os.R_OK))
+
+
+class Settings(BaseSettings):
+    """Environment-driven settings (design doc section 33)."""
+
+    model_config = SettingsConfigDict(
+        env_file=_env_files(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    app_env: str = "development"
+    log_level: str = "INFO"
+
+    telegram_bot_token: str = ""
+    allowed_chat_ids: str = ""
+    # Telegram's API is blocked from some networks; aiogram accepts an http(s)
+    # proxy here (socks5:// needs the optional aiohttp_socks dependency).
+    telegram_proxy: str = ""
+
+    database_url: str = "sqlite:///data/news.db"
+    data_dir: str = "data"
+    config_dir: str = "config"
+    log_dir: str = "logs"
+
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_light_model: str = ""
+    llm_strong_model: str = ""
+    llm_timeout: float = 60.0
+    llm_max_retries: int = 2
+
+    timezone: str = "Asia/Shanghai"
+    rss_fetch_interval: int = 600
+    hn_fetch_interval: int = 600
+    github_fetch_interval: int = 1800
+    reddit_fetch_interval: int = 1800
+    arxiv_fetch_interval: int = 10800
+    youtube_fetch_interval: int = 1800
+    process_interval: int = 600
+
+    daily_digest_time: str = "08:00"
+    evening_digest_time: str = "20:00"
+    min_article_score: float = 45
+
+    breaking_news_enabled: bool = True
+    breaking_news_threshold: float = 90
+    max_breaking_news_per_day: int = 5
+    breaking_cooldown_minutes: int = 60
+
+    github_token: str = ""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def chat_id_whitelist(self) -> set[int]:
+        return {int(x) for x in self.allowed_chat_ids.replace(";", ",").split(",") if x.strip().lstrip("-").isdigit()}
+
+    def is_allowed_chat(self, chat_id: int | None) -> bool:
+        """Fail closed: an unset allowlist means nobody may use the bot."""
+        return chat_id is not None and chat_id in self.chat_id_whitelist
+
+    @property
+    def project_root(self) -> Path:
+        return PROJECT_ROOT
+
+    @property
+    def config_path(self) -> Path:
+        return self._resolve(self.config_dir)
+
+    @property
+    def data_path(self) -> Path:
+        return self._resolve(self.data_dir)
+
+    @property
+    def log_path(self) -> Path:
+        return self._resolve(self.log_dir)
+
+    def _resolve(self, value: str) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        """Normalise sqlite:///relative.db into an absolute file URL.
+
+        Relative paths resolve against the project root, so `sqlite:///data/news.db`
+        means <project>/data/news.db and not <project>/data/data/news.db.
+        """
+        url = self.database_url
+        if url.startswith("sqlite:///") and ":memory:" not in url:
+            raw = url[len("sqlite:///") :]
+            if raw and not Path(raw).is_absolute():
+                url = "sqlite:///" + str((PROJECT_ROOT / raw).resolve()).replace("\\", "/")
+        return url
+
+    def llm_model_for(self, tier: str) -> str:
+        if tier == "strong":
+            return self.llm_strong_model or self.llm_model
+        if tier == "light":
+            return self.llm_light_model or self.llm_model
+        return self.llm_model
+
+    @property
+    def llm_configured(self) -> bool:
+        return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
+
+
+@dataclass
+class AppConfig:
+    """Everything the app needs: env settings + parsed YAML files."""
+
+    settings: Settings
+    raw: dict[str, Any]
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    categories: dict[str, Any] = field(default_factory=dict)
+    prompts: dict[str, str] = field(default_factory=dict)
+    free: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def free_terms(self) -> dict[str, Any]:
+        """Vocabulary for the /免费 detector (config/free_offers.yaml)."""
+        return self.free or {}
+
+    def register_model_names(self, names: Iterable[str]) -> int:
+        """Merge runtime-known model names into the /免费 vocabulary.
+
+        The pricing gateway's list changes weekly; asking anybody to keep
+        config/free_offers.yaml in step with it would never actually happen, so
+        the live snapshot feeds the detector instead.
+        """
+        models = self.free.setdefault("models", [])
+        if not isinstance(models, list):
+            return 0
+        added = 0
+        for name in names:
+            token = str(name).strip().lower()
+            if len(token) >= 4 and token not in models:
+                models.append(token)
+                added += 1
+        return added
+
+    def get(self, path: str, default: Any = None) -> Any:
+        node: Any = self.raw
+        for key in path.split("."):
+            if not isinstance(node, dict) or key not in node:
+                return default
+            node = node[key]
+        return node
+
+    # ---- convenience views -------------------------------------------
+    @property
+    def enabled_sources(self) -> list[dict[str, Any]]:
+        return [s for s in self.sources if s.get("enabled", True)]
+
+    def sources_of_type(self, type_name: str) -> list[dict[str, Any]]:
+        return [s for s in self.enabled_sources if s.get("type", "rss") == type_name]
+
+    def source_by_name(self, name: str) -> dict[str, Any] | None:
+        return next((s for s in self.sources if s.get("name") == name), None)
+
+    # ---- taxonomy views (config/categories.yaml) ----------------------
+    @property
+    def category_names(self) -> list[str]:
+        return list(self.categories.get("top_categories") or [])
+
+    @property
+    def fallback_category(self) -> str:
+        return self.categories.get("fallback_category", "Other")
+
+    def category_meta(self, name: str) -> dict[str, Any]:
+        return (self.categories.get("categories") or {}).get(name, {}) or {}
+
+    def subcategories(self, name: str) -> list[str]:
+        return list((self.category_meta(name).get("subcategories") or {}).keys())
+
+    @property
+    def all_subcategories(self) -> list[str]:
+        out: list[str] = []
+        for cat in self.category_names:
+            out.extend(self.subcategories(cat))
+        return out
+
+    def keywords(self, name: str) -> list[str]:
+        return [k.lower() for k in self.category_meta(name).get("keywords", [])]
+
+    @property
+    def filter_keywords(self) -> list[str]:
+        return [k.lower() for k in self.get("filters.keywords", [])]
+
+    @property
+    def scoring_weights(self) -> dict[str, float]:
+        weights = self.get("scoring.weights", {}) or {}
+        total = sum(float(v) for v in weights.values()) or 1.0
+        return {k: float(v) / total for k, v in weights.items()}
+
+    def prompt(self, key: str) -> str:
+        try:
+            return self.prompts[key]
+        except KeyError:  # pragma: no cover - config file is missing a key
+            raise KeyError(f"prompt '{key}' not found in config/prompts.yaml") from None
+
+    def render(self, key: str, **variables: Any) -> str:
+        """Render a prompt with string.Template so JSON braces stay literal."""
+        return string.Template(self.prompt(key)).safe_substitute(
+            {k: ("null" if v is None else v) for k, v in variables.items()}
+        )
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"missing config file: {path}")
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"config file must contain a mapping: {path}")
+    return data
+
+
+def load_config(settings: Settings | None = None) -> AppConfig:
+    settings = settings or Settings()
+    cfg_dir = settings.config_path
+    for folder in (settings.data_path, settings.log_path):
+        folder.mkdir(parents=True, exist_ok=True)
+    return AppConfig(
+        settings=settings,
+        raw=_load_yaml(cfg_dir / "settings.yaml"),
+        sources=_load_yaml(cfg_dir / "sources.yaml").get("sources", []) or [],
+        categories=_load_yaml(cfg_dir / "categories.yaml"),
+        prompts=_load_yaml(cfg_dir / "prompts.yaml"),
+        free=_load_yaml(cfg_dir / "free_offers.yaml") if (cfg_dir / "free_offers.yaml").exists() else {},
+    )
+
+
+def _config_log(message: str, *args: Any) -> None:
+    """Log a config problem without importing the logger at module scope (circular)."""
+    try:
+        from app.logging_setup import get_logger
+
+        get_logger("app").warning(message, *args)
+    except Exception:  # pragma: no cover - config must load even before logging
+        pass
+
+
+def as_int(value: Any, default: int) -> int:
+    """int() that respects a configured 0.
+
+    `int(cfg.get("x", 5) or 5)` silently turns "off" back into the default, which
+    is how a cooldown of 0 minutes kept blocking alerts on a live server.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        _config_log("config value %r is not an integer, using %s", value, default)
+        return default
+
+
+def as_float(value: Any, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        _config_log("config value %r is not a number, using %s", value, default)
+        return default
+
+@lru_cache
+def get_config() -> AppConfig:
+    return load_config()
+
+
+def reload_config() -> AppConfig:
+    get_config.cache_clear()
+    return get_config()
