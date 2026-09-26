@@ -133,9 +133,13 @@ class SearchService:
                 fallback=True, intent=intent, query=query,
             )
         if not service.enabled:
+            # `display_line` on purpose: `ensure_chinese` above just paid for the
+            # Chinese, and this used to render `a.summary or a.title` - so the
+            # answer he actually gets (no model configured) listed English headlines
+            # with a Chinese version sitting in the database.
             lines = [f"未配置 AI 模型，以下是数据库里与 “{F.esc(F.plain(query, 40))}” 相关的 {len(results)} 条新闻："]
             lines += [
-                f"{i + 1}. {F.link(a.summary or a.title, a.url)} <i>({F.esc(a.source_name)} · "
+                f"{i + 1}. {F.link(F.shorten(a.display_line, 120), a.url)} <i>({F.esc(a.source_name)} · "
                 f"{F.short_date(a.published_at, self.config.settings.timezone)} · {a.final_score:.0f})</i>"
                 for i, a in enumerate(results[:8])
             ]
@@ -151,7 +155,7 @@ class SearchService:
         except Exception as exc:
             log.warning("agent answer fell back to list: %s", exc)
             lines = [f"AI 暂时不可用，先给你 {len(results)} 条相关新闻："]
-            lines += [f"{i + 1}. {F.link(a.title, a.url)}" for i, a in enumerate(results[:8])]
+            lines += [f"{i + 1}. {F.link(F.shorten(a.display_line, 120), a.url)}" for i, a in enumerate(results[:8])]
             return AgentAnswer(F.clip("\n".join(lines)), [a.id for a in results],
                                fallback=True, intent=intent, query=query)
         return AgentAnswer(F.clip(text, 3600), [a.id for a in results], intent=intent, query=query)
@@ -216,6 +220,16 @@ def _candidates(terms: list[str], raw: str) -> list[str]:
     return [o for o in out if o][:5]
 
 
+# "关注" is what he types in both directions: "我想关注 NVIDIA" (a setting) and
+# "最近 AI Agent 有什么值得关注的？" (a question). Triggering on the word alone sent
+# the question to the settings reply, which is a dead end in a rule-mode deployment
+# where nothing else interprets the sentence. A question marker therefore wins.
+_QUESTION_MARKERS = ("？", "?", "什么", "哪些", "多少", "怎么", "如何", "为什么", "有没有",
+                     "最近", "今天", "昨天", "本周", "这周", "值得")
+_CONFIG_MARKERS = ("设置", "提醒时间", "推送时间", "改成", "改为", "设为", "调整", "暂停",
+                   "恢复推送", "兴趣", "interest", "notify")
+
+
 def rule_intent(text: str, recent: list[dict[str, Any]]) -> dict[str, Any]:
     lowered = (text or "").lower()
     index = None
@@ -224,7 +238,8 @@ def rule_intent(text: str, recent: list[dict[str, Any]]) -> dict[str, Any]:
         index = _to_int(match.group(1))
     if any(k in lowered for k in ("summary", "详细", "深度", "分析")) and index:
         return {"intent": "summarize", "query": "", "days": 14, "index": index}
-    if any(k in lowered for k in ("设置", "关注", "interest", "提醒时间", "暂停")):
+    asks = any(k in text for k in _QUESTION_MARKERS)
+    if any(k in lowered for k in _CONFIG_MARKERS) or ("关注" in text and not asks):
         return {"intent": "settings", "query": "", "days": 14, "index": None}
     if any(k in lowered for k in ("来源", "source", "数据源", "状态")):
         return {"intent": "sources", "query": "", "days": 14, "index": None}

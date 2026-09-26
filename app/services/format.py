@@ -66,7 +66,7 @@ def score_emoji(score: float, config: AppConfig | None = None) -> str:
 
 def digest_header(kind: str, config: AppConfig | None = None, *, date: str | None = None) -> str:
     config = config or get_config()
-    header = config.get(f"digest.{kind}.header") or config.get(f"digest.{kind}.title") or "AI Briefing"
+    header = config.get(f"digest.{kind}.header") or config.get(f"digest.{kind}.title") or "AI 简报"
     lines = [header]
     if date:
         lines.append(f"📅 {esc(date)}")
@@ -280,7 +280,7 @@ def free_offer_list(items: Sequence[ArticleView], *, config: AppConfig | None = 
         kind = offer.get("kind") or "其他"
         # 关键词回落出来的条目不是限免，别再挂 🎁 误导人
         emoji = "📰" if unverified else kind_emoji(kind, config)
-        tool_name = offer.get("tool") or item.title[:30]
+        tool_name = offer.get("tool") or item.display_title[:30]
         models = offer.get("models") or []
         signals = offer.get("signals") or []
         head = item.display_summary or item.display_title

@@ -334,6 +334,34 @@ async def test_natural_language_question_answers_from_database(seeded, fake_llm)
     assert "answer_question" in fake_llm.calls
 
 
+@pytest.mark.asyncio
+async def test_no_model_answers_with_the_chinese_it_already_has(seeded, session):
+    """没有 LLM 时的问答走规则列表路径——它曾经直接打印英文标题。
+
+    `ensure_chinese` 就调在上一行，中文已经在库里，渲染却用 `a.summary or a.title`，
+    所以他每天看到的问答列表是英文的。
+    """
+    from sqlalchemy import select
+
+    from app.database.models import Article
+    from app.services.search import SearchService
+
+    class NoModel:
+        enabled = False
+
+    for row in session.scalars(select(Article)):
+        row.title_zh = f"中文标题{row.id}"
+        row.summary_zh = "中文一句话总结"
+    session.commit()
+
+    search = SearchService(get_config(), get_news_service(), NoModel())
+    answer = await search.answer("最近 AI Agent 有什么值得关注的？", chat_id=ALLOWED)
+    assert "未配置 AI 模型" in answer.text
+    # display_line 优先中文摘要（与简报同一套规则），所以这里出现的是中文总结行
+    assert "中文一句话总结" in answer.text, answer.text[:300]
+    assert "releases" not in answer.text.lower(), "库里已有中文时不该再出现英文标题"
+
+
 def test_refusal_message_is_polite_and_informative():
     assert "ALLOWED_CHAT_IDS" in REFUSAL
 
