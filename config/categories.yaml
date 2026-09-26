@@ -32,7 +32,7 @@ categories:
     label: 智能体
     emoji: "🧠"
     description: Agent 框架、工具调用、自主执行
-    keywords: [agent, agentic, tool use, function calling, mcp, computer use, browser use, autonomous, workflow, copilot, assistant]
+    keywords: [agent, agents, agentic, agency, tool use, function calling, mcp, computer use, browser use, autonomous, workflow, copilot, assistant, coding agent, claude code, codex, operator, subagent, multi-agent]
     subcategories:
       "Coding Agent": [coding agent, code agent, cursor, copilot, claude code, codex cli, aider, windsurf, devin, sWE-bench]
       MCP: [mcp, model context protocol, tool server]
@@ -44,7 +44,7 @@ categories:
     label: 算力与推理
     emoji: "⚙️"
     description: 算力、推理引擎、 Serving
-    keywords: [gpu, cuda, nvidia, amd, tpu, inference, serving, vllm, sglang, tensorrt, quantization, kv cache, cluster, datacenter, data center, h100, h200, b200, mi300]
+    keywords: [gpu, gpus, cuda, nvidia, amd, tpu, ipu, volta, ampere, hopper, blackwell, pascal, server, servers, cpu, cpus, train, trains, training, compute, accelerator, memory bandwidth, throughput, latency, cost per token, inference, serving, vllm, sglang, tensorrt, triton, quantization, kv cache, cluster, hyperpod, datacenter, data center, rack, nvlink, interconnect, jetson, dgx, mlperf, benchmarking, h100, h200, b200, mi300, rtx, vram, gguf]
     subcategories:
       GPU: [gpu, nvidia, h100, h200, b200, mi300, rtx, vram]
       CUDA: [cuda, cudnn, triton]
@@ -57,7 +57,7 @@ categories:
     label: 开源生态
     emoji: "🧑‍💻"
     description: 开源项目、权重、数据集、工具链
-    keywords: [open source, open-source, github, hugging face, huggingface, weights released, dataset, apache-2.0, mit license, wisp, repo]
+    keywords: [open source, open-source, opensource, hugging face, huggingface, weights released, open weights, dataset, apache-2.0, mit license, repo, repository, library, sdk, toolkit]
     subcategories:
       GitHub: [github, trending, repository, stars, release]
       "Hugging Face": [hugging face, huggingface, hub, model card]
@@ -68,7 +68,7 @@ categories:
     label: 论文与方法
     emoji: "📚"
     description: 论文、新方法、评测基准
-    keywords: [paper, arxiv, research, study, benchmark, state of the art, method, evaluation, dataset]
+    keywords: [paper, arxiv, research, study, studies, benchmark, state of the art, method, evaluation, dataset, findings, suggests, researchers, novel, measured, measures]
     subcategories:
       LLM: [language model, llm, reasoning, alignment, rlhf, tokenizer]
       Multimodal: [multimodal, vision language, image generation, video generation, audio]
@@ -80,7 +80,7 @@ categories:
     label: 公司动态
     emoji: "🏢"
     description: 公司层面：融资、组织、合作、政策
-    keywords: [funding, raises, acquisition, hires, partnership, lawsuit, regulation, valuation, ipo, datacenter deal, revenue]
+    keywords: [funding, raises, raise, acquisition, acquires, hires, hiring, partnership, lawsuit, litigat, regulation, regulator, policy, valuation, ipo, datacenter deal, revenue, court, courts, ruling, ruled, judge, judges, appeals, appeal, antitrust, feds, federal, government, company, businesses, startup, breach, breaches, hacked, hack, leak, leaks, whistleblower, lawsuit, nsa, pentagon, congress, senate, sanction, tariffs, ban, banned, embargo, censorship, takes down, billion, billions, million, spending, pays, paying, taxpayer, contract, subsidy, layoffs, restructuring, ceo, cfo, co-founder, founder, board, investor, shareholders, stock, shares, merger, probe, investigation, settlement, fine, fined]
     subcategories:
       OpenAI: [openai, sam altman]
       Google: [google, alphabet, deepmind, sundar pichai]
@@ -93,7 +93,7 @@ categories:
     label: 产品与应用
     emoji: "🎯"
     description: 产品与应用场景
-    keywords: [launches, app, product, feature, search, writing, design, enterprise, healthcare, education, robot]
+    keywords: [launches, app, apps, product, products, feature, search, writing, design, enterprise, healthcare, education, robot, customer, users, consumer, production-ready, quality assurance, transcription, tutoring, teachers, parents, doctors, legal, finance, games, gaming]
     subcategories:
       Coding: [coding, developer, ide, codegen]
       Image: [image, art, design, photo]

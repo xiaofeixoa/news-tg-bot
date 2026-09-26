@@ -1,0 +1,223 @@
+# 规则模式分类的评测集（design doc §12 的第一层）
+#
+# 每一条都是 2026-09-26 从线上库里真实抓到的标题（带来源名，因为 source_hint 用它）。
+# `expect` 允许列多个可接受答案：分类本来就有合理的多解（一条 SageMaker 部署文
+# 既算算力也算应用），只有全都不命中才算错。没有多解的条目就是硬判断。
+#
+# 这个文件存在的理由：2026-09-26 实测 54 条在线标题里约 20 条被规则分错栏目——
+# "U.S. appeals court upholds designation of Anthropic…"进了 AI Applications，
+# GitHub Trending 的仓库进了 AI Models/AI Agent，arXiv 论文进了 AI Models。
+# 之前只有几条零散断言，没人能量化这件事。
+
+- title: "U.S. appeals court upholds designation of Anthropic as supply chain risk"
+  source: Hacker News
+  expect: [Companies]
+
+- title: "Meta takes down a critical video about meta AI Glasses after filming at Meta"
+  source: Hacker News
+  expect: [Companies]
+
+- title: "Feds Target AI Critics as \"Foreign Agents\""
+  source: Hacker News
+  expect: [Companies]
+
+- title: "CEO of Mistral: AI is software. It can be controlled"
+  source: Hacker News
+  expect: [Companies]
+
+- title: "Classified Estimates Show the NSA Is Paying Billions to Test AI Models"
+  source: Hacker News
+  expect: [Companies]
+
+- title: "OpenAI breaches Medicare, Albanese reveals"
+  source: Hacker News
+  expect: [Companies]
+
+- title: "Australia says OpenAI agent hacked into government website"
+  source: Hacker News
+  expect: [AI Agent, Companies]
+
+- title: "Revealing the details of how OpenAI agents hacked Hugging Face"
+  source: Hacker News
+  expect: [AI Agent]
+
+- title: "Early rogue AI agent activity and attempts to hack found on urlquery.net"
+  source: Hacker News
+  expect: [AI Agent]
+
+- title: "One company is at the center of a wave of rogue AI attacks"
+  source: The Verge AI
+  expect: [AI Agent, Companies]
+
+- title: "Claude Code reads AGENTS.md only when telemetry is on [fixed]"
+  source: Hacker News
+  expect: [AI Agent]
+
+- title: "Build a multi-account AI agent with AgentCore Gateway and MCP"
+  source: AWS ML
+  expect: [AI Agent]
+
+- title: "AI-powered fuzzing with the GitHub Security Lab Taskflow Agent"
+  source: GitHub Blog
+  expect: [AI Agent]
+
+- title: "How to Use AI Agents to Prepare 3D Scenes for Simulation"
+  source: NVIDIA Developer
+  expect: [AI Agent]
+
+- title: "TensorRT Edge-LLM Completes the MLPerf Edge Agentic Benchmark 6.4x Faster on Jetson AGX Thor"
+  source: NVIDIA Developer
+  expect: [AI Infrastructure]
+
+- title: "Accelerating Dropless MoE Training in JAX with NVIDIA Transformer Engine"
+  source: NVIDIA Developer
+  expect: [AI Infrastructure]
+
+- title: "Benchmarking LLM Inference at Scale with AIPerf"
+  source: NVIDIA Developer
+  expect: [AI Infrastructure]
+
+- title: "How NVIDIA NVLink 6 Delivers Multi-Layer Resiliency for AI Factories"
+  source: NVIDIA Developer
+  expect: [AI Infrastructure]
+
+- title: "Introducing CUDA Rust: Two Tracks for Writing GPU Kernels"
+  source: NVIDIA Developer
+  expect: [AI Infrastructure]
+
+- title: "Translating CUDA Tile Operations from Python to Rust Using Agentic AI"
+  source: NVIDIA Developer
+  expect: [AI Infrastructure]
+
+- title: "Accelerate multimodal RL training with SkyRL on Amazon SageMaker HyperPod"
+  source: AWS ML
+  expect: [AI Infrastructure]
+
+- title: "Multi-Region training with Amazon SageMaker HyperPod and Qumulo"
+  source: AWS ML
+  expect: [AI Infrastructure]
+
+- title: "Hugging Face Models on Foundry Managed Compute"
+  source: Hugging Face
+  expect: [AI Infrastructure, AI Models, Open Source]
+
+- title: "What to run, on the 'idle' local LLM server?"
+  source: Reddit LocalLLaMA RSS
+  expect: [AI Infrastructure]
+
+- title: "Qwen3.8-27B Q4_K_M on 2x3060"
+  source: Reddit LocalLLaMA RSS
+  expect: [AI Infrastructure, AI Models]
+
+- title: "Make Volta Fast Again"
+  source: Reddit LocalLLaMA RSS
+  expect: [AI Infrastructure]
+
+- title: "Instrumental Monitor Evasion Emerges Under Ordinary Task Pressure"
+  source: arXiv AI
+  expect: [Research]
+
+# arXiv 的每一条都是论文：栏目归属由来源决定，标题里那些 agent/benchmark 只是题材。
+- title: "GRASP: Generating, Revising, and Assessing for Strategic Planning with Agentic AI"
+  source: arXiv AI
+  expect: [Research]
+
+- title: "LLM Agents Can Easily Tamper With Their Own Traces"
+  source: arXiv AI
+  expect: [Research]
+
+- title: "A Living Benchmark for Information Retrieval from Electronic Health Records"
+  source: arXiv AI
+  expect: [Research]
+
+- title: "Screen Before You Serve: Simulation for Production Customer Experience AI Agents at 140M Scale"
+  source: arXiv AI
+  expect: [Research]
+
+- title: "Using LLMs to trace alchemical knowledge and decode 17th century letters"
+  source: Hacker News
+  expect: [Research, AI Applications]
+
+- title: "yukitorido/short-video-generator-AI (612 stars)"
+  source: GitHub Trending
+  expect: [Open Source]
+
+- title: "chelinho139/wow-ai (92 stars)"
+  source: GitHub Trending
+  expect: [Open Source]
+
+- title: "bigknoxy/j-harness (0 stars)"
+  source: GitHub Trending
+  expect: [Open Source]
+
+- title: "amitshekhariitbhu/ai-system-design (156 stars)"
+  source: GitHub Trending
+  expect: [Open Source]
+
+- title: "Show HN: Whiteboard (YC W26) – An open-source IDE for thoughtful software design"
+  source: Hacker News Free
+  expect: [Open Source]
+
+- title: "v2.10.0 released in google/adk-python"
+  source: GitHub Releases
+  expect: [AI Agent, Open Source]
+
+- title: "v2.1.283 released in anthropics/claude-code"
+  source: GitHub Releases
+  expect: [AI Agent, Open Source]
+
+- title: "0.157.0 released in openai/codex"
+  source: GitHub Releases
+  expect: [AI Agent, Open Source]
+
+- title: "Meta's Muse appears to use an OpenAI model labeled muse-special"
+  source: Hacker News
+  expect: [AI Models]
+
+- title: "Meta's AI Tamagotchi bet is...working?"
+  source: TechCrunch AI
+  expect: [AI Applications, Companies]
+
+- title: "NarrateAI: production-ready LLM quality assurance on Amazon Bedrock"
+  source: AWS ML
+  expect: [AI Applications]
+
+- title: "Deploying real-time personalized speech with Qwen3-TTS on Amazon SageMaker AI"
+  source: AWS ML
+  expect: [AI Applications, AI Infrastructure]
+
+- title: "Speaker-labeled transcription with WhisperX on SageMaker AI"
+  source: AWS ML
+  expect: [AI Applications, AI Infrastructure]
+
+- title: "Tutoring company tells parents to save their money and 'use AI instead'"
+  source: Hacker News
+  expect: [AI Applications, Companies]
+
+- title: "xAI's Grok 4.6 is now available in Amazon Bedrock"
+  source: AWS ML
+  expect: [AI Models, AI Infrastructure]
+
+- title: "GPT-6 Astra has gained the ability to drive a car"
+  source: Hacker News
+  expect: [AI Models, AI Agent]
+
+- title: "Claude discovers a novel enzyme system with CRISPR-like repeats"
+  source: Hacker News
+  expect: [AI Models, Research]
+
+- title: "internlm/Intern-Decision 4B and 0.8B"
+  source: Reddit LocalLLaMA RSS
+  expect: [AI Models, Open Source]
+
+- title: "Qwen3.8-27B: Using KV Cache Transplants to Boost Output Quality"
+  source: Reddit LocalLLaMA RSS
+  expect: [AI Models, AI Infrastructure]
+
+- title: "Once Claude can measure something, it can make it faster"
+  source: Hacker News
+  expect: [AI Models, Research]
+
+- title: "Efficient MoE Training for Biological Foundation Models"
+  source: NVIDIA Developer
+  expect: [AI Models, AI Infrastructure]

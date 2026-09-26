@@ -298,6 +298,16 @@ digest:
   # Telegram sends an article as its own message beyond this count
   list_page_size: 10
 
+# 规则模式栏目归属的三个先验权重（tests/data/category_eval.yaml 是评测集）
+# 关键词命中数本身不够：列表长短会偏袒词多的栏目，标题里的实词要被正文的闲词盖过。
+classify:
+  # 厂商博客只是"题材倾向"，权重必须低到不盖过标题里的实词
+  source_hint_weight: 0.35
+  # 场域型来源基本决定栏目：arXiv 每条都是论文，GitHub 榜单/发布页每条都是仓库
+  venue_hint_weight: 1.2
+  model_size_weight: 0.6       # 标题里出现 27B / 0.8B 这类参数量
+  repo_title_weight: 1.0       # 标题就是 owner/name 形态的仓库条目
+
 breaking:
   enabled: true
   threshold: 90

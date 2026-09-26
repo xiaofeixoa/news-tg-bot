@@ -645,6 +645,41 @@ aiogram Bot（`/新闻 /来源 /订阅 /设置 /免费`）→ SQLite(WAL) + syst
 336 passed。上一轮没能确认的 CI 徽章这次从 anr-jump 的出口 IP 查到了：`148ee9c` = success
 （anr-vps 的出口 IP 匿名配额被采集器用光了，换一台即可）。
 
+### v1.12 栏目归属：从 36.7% 到 92.5%（2026-09-26）
+之前"栏目名是中文了，但归属不准"这条是有数字的：**53 条线上真实标题的评测集上，
+规则模式原来只对 18/49（36.7%）**——GitHub Trending 的仓库 0/4 全错，法务/监管新闻
+几乎全进了 AI Applications 或"其他"，厂商博客的部署文乱窜。现在 **49/53（92.5%）**。
+
+评测集：`tests/data/category_eval.yaml`（每条都带来源名，标题原文照抄线上）。
+允许 `expect` 列多个可接受答案——一条 SageMaker 部署文既算算力也算应用，
+硬要单一答案就是在教分类器猜我的口味，不是在测它。
+
+四处改动，按贡献排：
+1. **整词匹配**。原子串匹配下 `ipo` 命中 pivot、`app` 命中 happen、`ban` 命中 company，
+   而词表本来就该有 ban/ipo 这种词。
+2. **分数按词表长度归一**（除以 √len）：AI Models 有 22 个词、AI Infrastructure 有 40 个，
+   原写法等于让词多的栏目更容易赢，跟内容无关。
+3. **标题命中算两倍**：栏目是标题决定的，正文前 1200 字符里一个闲词不该翻盘。
+4. **`source_hint` 终于参与规则模式**，并分两档：场域型来源（arXiv 每条都是论文、
+   GitHub 榜单/发布页每条都是仓库）权重 1.2，厂商博客只是 0.35 的倾向——
+   0.8 的单一权重实测会把 NVIDIA 博客上的 agent 教程塞进算力栏。
+   另外两条结构性先验：标题里的参数量（`27B`/`0.8B`，`$11.6B` 这种钱不算）判 AI Models，
+   `owner/name` / `(12 stars)` / `v1.2.3 released in` 判开源。
+- Reddit 原来被硬提示成 "AI Agent"，把 r/LocalLLaMA 一族的分数全带跑，已取消。
+- 词表补齐：Companies 之前**一个**法务/监管/钱的词都没有（court/ruling/feds/antitrust/
+  billion/layoffs…），AI Infrastructure 缺 training/compute/latency（只在子分类里），
+  AI Agent 缺复数 agents 与 claude code/codex。"github" 从开源词表里删掉了——
+  它让每条 GitHub 来源的新闻都算开源。
+
+线上 574 条已处理行按新规则重算，**311 条（54%）换了栏目**：AI Models 217→151（它原先是
+垃圾场）、开源生态 22→117、论文与方法 33→68、公司动态 4→26、智能体 131→64、其他 60→34。
+点名的两条已归位：*U.S. appeals court upholds designation of Anthropic…* → 公司动态，
+*Revealing how OpenAI agents hacked Hugging Face* → 智能体。
+`/topics` 现在显示 模型发布 99 · 开源生态 89 · 智能体 49 · 论文与方法 52 · 公司动态 24。
+
+341 passed。剩下 4 条错的是关键词真分不了的（"Meta's AI Tamagotchi bet is...working?"
+标题里没有任何栏目词；"Feds Target AI Critics as Foreign Agents" 里 "Agents" 又被智能体抢走）。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -652,6 +687,4 @@ aiogram Bot（`/新闻 /来源 /订阅 /设置 /免费`）→ SQLite(WAL) + syst
 免费翻译日配额几乎每天入夜用尽；突发门槛的事件词是正则，换语种标题（如纯中文来源）需要另配词表；
 `key_points_zh` 只给真正要展示的那几条补翻（后台翻译轮不处理要点），所以 /搜索 的历史结果里
 仍可能看到英文要点；含品牌名的句子会先被 MyMemory 拒一次再由 Google 接手，多一次往返；
-规则模式的分类是关键词计数，2026-09-26 实测把"上诉法院裁定 Anthropic…"标成`产品与应用`
-（应为`公司动态`）、把"OpenAI 代理入侵 Hugging Face"标成`开源生态`——
-栏目名现在是中文了，但栏目**归属**还不准。
+规则模式栏目仍有约 7% 判错（标题里没有栏目词的那些，见 v1.12），要再往上走只能靠 `LLM_*`。

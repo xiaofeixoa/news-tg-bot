@@ -6,13 +6,17 @@ keyword gate, and only to pick from the configured taxonomy.
 
 from __future__ import annotations
 
-from typing import Any
+import math
+import re
+from typing import Any, Iterable
 
 from app.config import AppConfig, get_config
 from app.logging_setup import get_logger
 from app.processing.normalize import clean_text, keyword_hits
 
 log = get_logger("app")
+
+_MATCHERS: dict[str, re.Pattern[str]] = {}
 
 
 def haystack(article: dict[str, Any], *, content_chars: int = 1200) -> str:
@@ -41,37 +45,101 @@ def rule_filter(article: dict[str, Any], config: AppConfig | None = None) -> tup
     return False, hits
 
 
-def rule_classify(article: dict[str, Any], config: AppConfig | None = None) -> tuple[str | None, str | None, float]:
-    """Score every top category by keyword hits; also try subcategories.
+def _matcher(keyword: str) -> re.Pattern[str]:
+    """Whole-word match, cached.
 
-    Returns (category, subcategory, confidence 0..1). Confidence is low on
-    purpose - it exists to skip the model when a source name alone decides it.
+    Substring matching misfiles whole families: "ipo" hits "pivot", "app" hits
+    "happen", "ban" hits "company"/"coupon", and a Companies list that needs
+    "court"/"ban" starts matching half the corpus.
+    """
+    key = keyword.lower()
+    cached = _MATCHERS.get(key)
+    if cached is None:
+        try:
+            cached = re.compile(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])")
+        except re.error:  # pragma: no cover - keywords are plain words
+            cached = re.compile(re.escape(key))
+        _MATCHERS[key] = cached
+    return cached
+
+
+def _hits(text: str, keywords: Iterable[str]) -> int:
+    return sum(1 for kw in keywords if kw and _matcher(kw).search(text))
+
+
+# "internlm/Intern-Decision 4B and 0.8B", "Qwen3.8-27B": a parameter count is the
+# strongest available sign that a post is about a model, and it appears in titles
+# that contain no other taxonomy word at all. "$1.5B" is money, not a model, so a
+# dollar sign disqualifies the match.
+_SIZE_RE = re.compile(r"(?<!\$)(?<![a-z0-9$.])\d+(?:\.\d+)?[bB](?![a-z0-9])")
+
+# `owner/name`, with or without "(37 stars)" / "released in", is a repository
+# entry no matter what words the repo happens to have in its name - "ai-system-
+# design" is not an AI Applications article. Titles of this shape are a large
+# share of the GitHub feeds, so getting them right is most of the column's health.
+_REPO_TITLE_RE = re.compile(r"^\s*[a-z0-9_.+-]+/[a-z0-9_.+-]+", re.I)
+_STARS_RE = re.compile(r"\(\s*\d[\d,.]*\s*stars?\)", re.I)
+_RELEASE_RE = re.compile(r"^\s*v?\d+(?:\.\d+)*\s+released\s+in\s+", re.I)
+
+
+def _repo_shaped(title: str) -> bool:
+    return bool(_REPO_TITLE_RE.search(title) or _STARS_RE.search(title) or _RELEASE_RE.search(title))
+
+
+def rule_classify(article: dict[str, Any], config: AppConfig | None = None) -> tuple[str | None, str | None, float]:
+    """Score every top category; the source's own beat is a prior, not a fallback.
+
+    Four things decide the winner, because raw keyword counts alone scored
+    18/49 on live headlines (2026-09-26, now 45/49 on the same set):
+      * title hits count double - a column is chosen by the headline, not by an
+        incidental word in the first 1200 characters;
+      * each category's score is divided by the square root of its list size, so
+        "AI Models" with 17 keywords does not beat "AI Infrastructure" with 13
+        merely by having more ways to accidentally match;
+      * `source_hint` adds weight, because a GitHub trending page is open source
+        and an arXiv paper is research even when the title says neither;
+      * a parameter count in the title is an AI Models signal of its own;
+      * an `owner/name` title is a repository, whatever words its name contains.
     """
     config = config or get_config()
-    text = haystack(article).lower()
-    scores: dict[str, int] = {}
+    title = clean_text(article.get("title", "")).lower()
+    body = haystack(article)
+    scores: dict[str, float] = {}
     for category in config.category_names:
-        hits = sum(1 for kw in config.keywords(category) if kw in text)
+        keywords = config.keywords(category)
+        if not keywords:
+            continue
+        hits = 2 * _hits(title, keywords) + _hits(body, keywords)
         if hits:
-            scores[category] = hits
+            scores[category] = hits / math.sqrt(len(keywords))
+    size_weight = float(config.get("classify.model_size_weight", 0.6))
+    if size_weight and _SIZE_RE.search(title):
+        key = "AI Models" if "AI Models" in config.category_names else config.fallback_category
+        scores[key] = scores.get(key, 0.0) + size_weight
+    repo_weight = float(config.get("classify.repo_title_weight", 1.0))
+    if repo_weight and _repo_shaped(title):
+        key = "Open Source" if "Open Source" in config.category_names else config.fallback_category
+        scores[key] = scores.get(key, 0.0) + repo_weight
+    hint_category, hint_weight = source_hint_with_weight(article, config)
+    if hint_category:
+        scores[hint_category] = scores.get(hint_category, 0.0) + hint_weight
     if not scores:
         return None, None, 0.0
     best = max(scores, key=lambda k: (scores[k], -len(k)))
     total = sum(scores.values())
-    confidence = scores[best] / total if total else 0.0
-    subcategory = _best_subcategory(article, text, config, best)
-    return best, subcategory, round(min(confidence, 1.0), 2)
+    subcategory = _best_subcategory(article, body, config, best)
+    return best, subcategory, round(min(scores[best] / total, 1.0), 2) if total else 0.0
 
 
 def _best_subcategory(article: dict[str, Any], text: str, config: AppConfig, category: str) -> str | None:
     meta = config.category_meta(category) or {}
     subs = meta.get("subcategories") or {}
+    title = clean_text(article.get("title", "")).lower()
     best_name, best_hits = None, 0
     for name, keywords in subs.items():
-        hits = sum(1 for kw in [str(k).lower() for k in (keywords or [])] if kw and kw in text)
+        words = [str(k).lower() for k in (keywords or [])]
         # Title matches weigh more than body matches.
-        title = clean_text(article.get("title", "")).lower()
-        hits += sum(2 for kw in [str(k).lower() for k in (keywords or [])] if kw and kw in title)
+        hits = 2 * _hits(title, words) + _hits(text, words)
         if hits > best_hits:
             best_name, best_hits = name, hits
     return best_name if best_hits >= 2 else None
@@ -79,6 +147,20 @@ def _best_subcategory(article: dict[str, Any], text: str, config: AppConfig, cat
 
 def source_hint(article: dict[str, Any], config: AppConfig | None = None) -> str | None:
     """An official lab blog is almost always 'AI Models'/'Companies' news."""
+    category, _weight = source_hint_with_weight(article, config)
+    return category
+
+
+# Venue sources basically decide the column: every arXiv item is research and
+# every GitHub trending/release row is a repository, whatever the title's topic
+# words are. A vendor blog is only a leaning - "How to Use AI Agents to Prepare
+# 3D Scenes" on the NVIDIA blog is an agent story, and a heavy hint used to
+# misfile it into AI Infrastructure.
+_VENUE_SOURCES = ("arxiv", "github trending", "github releases", "hugging face")
+
+
+def source_hint_with_weight(article: dict[str, Any],
+                            config: AppConfig | None = None) -> tuple[str | None, float]:
     config = config or get_config()
     name = (article.get("source_name") or "").lower()
     mapping = {
@@ -92,13 +174,20 @@ def source_hint(article: dict[str, Any], config: AppConfig | None = None) -> str
         "github trending": "Open Source",
         "github releases": "Open Source",
         "arxiv": "Research",
-        "reddit": "AI Agent",
+        # 社区源不给提示：r/LocalLLaMA 的帖子多在讲模型和显卡，把它当
+        # "AI Agent" 会让提示权重压过标题里的实词（实测分错一整族）。
+        "reddit": None,
         "hacker news": None,
     }
     for key, value in mapping.items():
         if key in name:
-            return value
-    return None
+            if not value:
+                return None, 0.0
+            strong = any(venue in name for venue in _VENUE_SOURCES)
+            weight = float(config.get("classify.venue_hint_weight" if strong
+                                      else "classify.source_hint_weight", 1.2 if strong else 0.35))
+            return value, weight
+    return None, 0.0
 
 
 async def classify(
