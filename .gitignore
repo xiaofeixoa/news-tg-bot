@@ -3,8 +3,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-data/
-logs/
+/data/
+/logs/
 .deploy_stamp
 .mypy_cache/
 .ruff_cache/

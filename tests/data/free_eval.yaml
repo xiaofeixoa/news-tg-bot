@@ -1,0 +1,78 @@
+# Ground-truth labels for the /免费 detector.
+#
+# Chinese cases are verbatim from the live linux.do / Reddit / Hacker News
+# corpus (2026-09-25). English positives are synthesised from the phrasings
+# vendors actually use, because the corpus held no English promo that day -
+# the English negatives below are real, and they are the harder half.
+#
+# `offer: true` means "somebody can get something for nothing right now, and a
+# reader would act on it". Lottery-only posts, questions, and non-AI giveaways
+# are false on purpose: the command is about free AI tooling, not 抽奖 in general.
+#
+# Recall/precision are asserted in tests/test_free_eval.py. Change this file,
+# not the test, when the vocabulary evolves.
+
+items:
+  # ---------- real offers (positives) ----------
+  - {title: "交✌️免费Qoder CN一年", offer: true, tool: Qoder}
+  - {title: "【RelayFor】限免100刀DeepSeekv4.1Flash", offer: true, tool: DeepSeek}
+  - {title: "智谱登录送积分x10,使用积分100%返还", offer: true, tool: Zhipu}
+  - {title: "Kiro白嫖首月额度的银行卡问题", offer: true, tool: Kiro}
+  - {title: "免费12小时Qwen-Image-2.1", offer: true, tool: Qwen}
+  - {title: "hermes 官方提供了免费的 stealth/space-bunny-alpha", offer: true}
+  - {title: "利用katabump的免费容器搭建muse的中转", offer: true}
+  - {title: "中秋快乐!本次咕咕嘎嘎站发放300个50刀兑换码+150个注册码~", offer: true}
+  - {title: "StepFun 开放试用，注册即送免费额度", offer: true, tool: StepFun}
+  - {title: "OpenRouter: DeepSeek R1 is free for a limited time", offer: true, tool: OpenRouter}
+  - {title: "Cursor offers a free Pro week for all students", offer: true, tool: Cursor}
+
+  # ---------- must stay quiet (negatives) ----------
+  - {title: "这个月有人薅kiro pro max羊毛了吗?", offer: false}
+  - {title: "花1分钱与40天有效期将stepfun的plan从plus升级到pro值得吗?", offer: false}
+  - {title: "中国移动2元话费 最近1周每天早上10:00抢(本周限一次)", offer: false}
+  - {title: "中秋快乐,送上5000个http节点,可用于代理池/注册机(境外访问)", offer: false}
+  - {title: "站内合适的公益站", offer: false}
+  - {title: "【RelayFor】0925开闸", offer: false}
+  - {title: "[抽奖]voxi二维码", offer: false}
+  - {title: "今晚畅嗨!Qwen3.8-Flash-Next", offer: false}
+  - {title: "muse charm but local and free", offer: false}
+  - {title: "My attempt at running a model: A short story.", offer: false}
+  - {title: "Is Qwen Flash Next at like Q2 better than 27B at Q4?", offer: false}
+  - {title: "Qwen 3.8 27b be like...", offer: false}
+  - {title: "Show HN: Radix – Visual UI for agentic programming", offer: false}
+  - {title: "What underrated AI tools have actually made you more productive in 2026?", offer: false}
+  - {title: "F-Droid 2.0", offer: false}
+
+  # ---------- English: verbatim negatives from the live corpus (2026-09-25) ----------
+  # These are the seven English headlines that carried a "free"-ish word and all
+  # had to stay quiet. They are the false-friend list, in the wild.
+  - {title: "Accelerating Video Diffusion via Training-Free Trajectory Routing", offer: false}
+  - {title: "F-Droid 2.0", offer: false}
+  - {title: "FreedomIntelligence/HuatuoGPT-3-27B · Hugging Face", offer: false}
+  - {title: "muse charm but local and free", offer: false}
+  - {title: "Meta introduces camera-free AI glasses", offer: false}
+  - {title: "Introducing Google Antigravity 2.0", offer: false}
+  - {title: "Introducing Gemma 4 12B: a unified, encoder-free multimodal model", offer: false}
+
+  # ---------- English positives: phrasings vendors actually use ----------
+  # Synthesised rather than mined: the corpus held no English promo on the
+  # sampling day, so recall here is measured against the idiom set, not luck.
+  - {title: "OpenAI is now free for students", offer: true, tool: OpenAI}
+  - {title: "We're making Cursor available at no cost for the next month", offer: true, tool: Cursor}
+  - {title: "Anthropic gives every new user $25 in free credits", offer: true, tool: Anthropic}
+  - {title: "Gemini API free tier now includes 1M tokens per day", offer: true}
+  - {title: "DeepSeek is free to use until Friday", offer: true, tool: DeepSeek}
+  - {title: "Claude Code is free for the first 30 days, no credit card required", offer: true, tool: "Claude Code"}
+  - {title: "Qoder offers a free Pro week for all users", offer: true, tool: Qoder}
+  - {title: "GLM-5 is free during the open beta", offer: true}
+  - {title: "Zcode: unlimited completions on us this week", offer: true, tool: Zcode}
+  - {title: "Cursor is complimentary for all students until June", offer: true, tool: Cursor}
+  - {title: "Codex is on the house this week", offer: true, tool: Codex}
+  - {title: "Gemini is free of charge during the beta", offer: true}
+
+  # ---------- English negatives that a naive matcher would take ----------
+  - {title: "Llama 4 is released under a free commercial license", offer: false}
+  - {title: "The model weights are free for commercial use", offer: false}
+  - {title: "Free software movement welcomes the new editor", offer: false}
+  - {title: "The dataset is available for free download", offer: false}
+  - {title: "Free speech for all, says the new chatbot policy", offer: false}
