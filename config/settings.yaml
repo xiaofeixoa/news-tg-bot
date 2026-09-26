@@ -234,6 +234,11 @@ dedup:
   # Ask the LLM only for borderline pairs (between the two bounds)
   ai_review_enabled: false
   ai_review_low_bound: 0.60
+  # 灰区（0.60-0.79）里两条标题共享多少个"故事词"就直接判定为同一件事。
+  # 这个规则存在的原因：灰区原本只有接了 LLM 才会合并，而本机没有 key——
+  # 于是重复新闻从来不会被合掉（2026-09-26 实测：3 天里 9 对灰区、7 对是同一件事，
+  # 当晚晚报把"OpenAI 特工入侵 Hugging Face"发了两遍）。设 0 可关掉，退回只靠 AI。
+  rule_merge_shared_terms: 3
   # Cap AI dedup review calls per pipeline run
   ai_review_max_per_run: 10
 

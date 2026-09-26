@@ -1,0 +1,94 @@
+# 跨来源去重的评测集（design doc §14 第 3 层）
+#
+# 每一对都是 2026-09-26 从线上库里真实抓到的跨来源标题对，`same` 是我逐条读过的判断。
+# 存在的理由：当天 20:00 晚报里"OpenAI 特工入侵 Hugging Face"这条新闻出现了两次
+# （Hacker News 一条、The Verge 一条），而线上 574 行里只有 10 次合并。
+#
+# 关键事实：真正的重复对分数落在 0.61-0.73，而"0.157.1 released in openai/codex" vs
+# "两个codex邀请码自取" 这对完全不同的标题打到 0.700。**光调阈值是分不开的**，
+# 所以这里同时评"合并率"和"错合并"。
+
+# ---- 同一件事，不同媒体报道（应当合并）
+- same: true
+  a: "Gemini 3.8 text-to-speech says hello"
+  b: "Gemini 3.8 text-to-speech"
+  note: DeepMind 官方博客与 HN 转载
+- same: true
+  a: "Australia to investigate if OpenAI hack of government health website broke the law"
+  b: "Australia says OpenAI agent hacked into government website"
+- same: true
+  a: "Australia to investigate if OpenAI hack of government health website broke the law"
+  b: "OpenAI agent hacked Australian government website, PM says"
+- same: true
+  a: "OpenAI agent \"didn't accept no for an answer\" in Australian government breach"
+  b: "Australia says OpenAI agent hacked into government website"
+- same: true
+  a: "OpenAI agent \"didn't accept no for an answer\" in Australian government breach"
+  b: "OpenAI agent hacked Australian government website, PM says"
+- same: true
+  a: "Introducing Gemini 3.8 Live with Live Avatar"
+  b: "Gemini 3.8 Live with Live Avatar gives Google's AI a face"
+- same: true
+  a: "Google tests letting Gemini call businesses for you"
+  b: "Gemini can now call businesses for you so you don't have to wait on hold"
+- same: true
+  a: "Anthropic releases Claude Opus 5.5 with a 1M token window"
+  b: "Anthropic launches Claude Opus 5.5, now with 1M token context"
+  note: 合成对（不是线上抓的）——"releases" 与 "launches" 是同一件事的两种写法
+
+# ---- 完全不同的两件事（绝不能合并）
+- same: false
+  a: "0.157.1 released in openai/codex"
+  b: "两个codex邀请码自取"
+  note: 0.700 分——历史上最高的假阳性，只共享一个 "codex"
+- same: false
+  a: "RAPID: Robot Agentic Programming from Demonstrations"
+  b: "Show HN: Radix – Visual UI for agentic programming"
+- same: false
+  a: "Efficient MoE Training for Biological Foundation Models"
+  b: "I'm trying to post-train AliceAI-Foundation-80B-A3B-Base myself"
+- same: false
+  a: "Gemini can now call businesses for you so you don't have to wait on hold"
+  b: "Show HN: PlaceCall (YC W26) – agentic API to call businesses and get things done"
+- same: false
+  a: "Microsoft thinks its new Copilot 'super app' will be as influential as Office"
+  b: "Microsoft stops insisting you need a \"Copilot+ PC\""
+  note: 同一实体、两件事——只靠专名重叠会错并
+- same: false
+  a: "Towards Practical Compression of 3D Gaussian Splatting"
+  b: "Qwen3.8 27b practical modeling for 3d printing"
+- same: false
+  a: "Meta is putting its muscle behind Muse as the AI app takes off"
+  b: "Meta's Muse appears to use an OpenAI model labeled muse-special"
+- same: false
+  a: "Meta's Muse just stole the AI spotlight from OpenAI and Anthropic"
+  b: "Meta's Muse appears to use an OpenAI model labeled muse-special"
+- same: false
+  a: "Court rules Trump can blacklist Anthropic for refusing to enable Claude feature"
+  b: "v2.1.283 released in anthropics/claude-code"
+- same: false
+  a: "Airbnb widens access to GPT-6 Astra and OpenAI frontier models"
+  b: "Use open weight models as your AI coding agent with Amazon Bedrock"
+- same: false
+  a: "Once Claude can measure something, it can make it faster"
+  b: "Using uncensored models makes working less of a headache"
+- same: false
+  a: "Everything new coming to Meta's AI agent Muse"
+  b: "OpenAI agent hacked Australian government website, PM says"
+- same: false
+  a: "What IDE to use for local models"
+  b: "Mocas-12/ai-model-rankings (16 stars)"
+- same: false
+  a: "Jensen Huang talks about AI and climate change like a supervillain"
+  b: "Ask HN: I just talked to an AI-obsessed client, and I need a shower afterwards"
+- same: false
+  a: "How do you use subagents & multiple agent with local models, and how many?"
+  b: "Meta's Muse appears to use an OpenAI model labeled muse-special"
+- same: false
+  a: "OpenAI announces GPT-6"
+  b: "Google announces Gemini 3.8"
+  note: 结构完全相同、内容毫无关系——只比句式会错并
+- same: true
+  a: "Anthropic 发布 Claude Opus 5.5"
+  b: "Anthropic launches Claude Opus 5.5"
+  note: 中英文同一条发布，应当合并——v1.10 的品牌名守护让这种配对第一次有可能对上

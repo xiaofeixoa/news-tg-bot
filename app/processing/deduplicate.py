@@ -28,6 +28,11 @@ log = get_logger("app")
 
 # Mirror of dedup.title_similarity in config/settings.yaml; the YAML wins.
 DEFAULT_TITLE_SIMILARITY = 0.79
+DEFAULT_AI_REVIEW_LOW = 0.60
+# How many story terms two headlines must share to merge without asking a model.
+# Measured on 25 labeled live pairs: 3 gives 9/9 recall with no false merge; 2 lets
+# "RAPID: Robot Agentic Programming…" merge with "Show HN: Radix…".
+DEFAULT_RULE_MERGE_TERMS = 3
 
 
 @dataclass
@@ -118,15 +123,58 @@ def title_similarity(title_a: str, title_b: str) -> float:
     return round(score, 4)
 
 
+# Words that carry no news identity: function words, and domain words so common
+# that "两个codex邀请码自取" and "0.157.1 released in openai/codex" would otherwise
+# look like the same story through "released"/"open"/"source".
+STOP_TERMS = frozenset("""a an the and or but if while with without for from to in on at by as of is are was
+were be been being this that these those it its their his her your our they them he she we you one two three
+more most much very just now says said say saying say into onto about over under after before also too than
+then so such no not nor all any each other same what how why when where who whose vs via per
+""".split())
+GENERIC_TERMS = frozenset("""ai art app apps api code data dev engine open source model models llm news app
+released release releases launch launches update updates version tool tools company companies work working
+""".split())
+
+
+def content_tokens(title: str) -> set[str]:
+    """Tokens that identify the story, not the grammar around it."""
+    return {t for t in tokens_of(title)
+            if len(t) >= 3 and t not in STOP_TERMS and t not in GENERIC_TERMS}
+
+
+def shared_content_terms(title_a: str, title_b: str) -> set[str]:
+    return content_tokens(title_a) & content_tokens(title_b)
+
+
 def is_same_headline(title_a: str, title_b: str, config: AppConfig | None = None) -> tuple[bool, float]:
-    """The single decision point used by both the index scan and the tests."""
+    """The single decision point used by both the index scan and the tests.
+
+    Two independent ways in:
+      * score >= `title_similarity` (0.79) - basically a re-posted headline;
+      * score inside the review band and >= 3 shared story terms - the shape of
+        "same event, two newsrooms": "Australia to investigate if OpenAI hack of
+        government health website…" vs "OpenAI agent hacked Australian government
+        website, PM says" score 0.66 and share australia/government/openai/website.
+
+    The second one exists because the 0.60-0.79 band used to be merged *only* by an
+    LLM (`dedup.ai_review_enabled`), so in this rule-mode deployment duplicate
+    stories were never merged at all: 9 borderline pairs in three days, 7 of them
+    the same news, all kept separate - and the 2026-09-26 evening briefing duly
+    printed the OpenAI/Hugging Face intrusion story twice.
+    """
     config = config or get_config()
-    threshold = float((config.get("dedup", {}) or {}).get("title_similarity", DEFAULT_TITLE_SIMILARITY))
+    dedup_cfg = config.get("dedup", {}) or {}
+    threshold = float(dedup_cfg.get("title_similarity", DEFAULT_TITLE_SIMILARITY))
+    review_low = float(dedup_cfg.get("ai_review_low_bound", DEFAULT_AI_REVIEW_LOW))
+    needed = int(dedup_cfg.get("rule_merge_shared_terms", DEFAULT_RULE_MERGE_TERMS))
     score = title_similarity(title_a, title_b)
     shared = len(tokens_of(title_a) & tokens_of(title_b))
     # One-word headlines need a higher bar: "AI" vs "AI" is not a duplicate.
-    confident = score >= threshold and (shared >= 3 or score >= 0.95)
-    return confident, score
+    if score >= threshold and (shared >= 3 or score >= 0.95):
+        return True, score
+    if needed >= 1 and review_low <= score < threshold and len(shared_content_terms(title_a, title_b)) >= needed:
+        return True, score
+    return False, score
 
 
 def find_url_duplicate(session: Session, url_hash: str) -> Article | None:
@@ -197,7 +245,9 @@ async def resolve_duplicate(
         index, title=data["title"], published_at=data["published_at"], config=config
     )
     matched = session.get(Article, match_id) if match_id is not None else None
-    if matched is not None and score >= high:
+    # One decision function for both layers: it knows the confident band and the
+    # shared-story-term rule, so nothing here can disagree with `find_title_duplicate`.
+    if matched is not None and is_same_headline(data["title"], matched.title, config)[0]:
         return DedupResult(True, matched.id, matched.title, score, "title")
 
     if (

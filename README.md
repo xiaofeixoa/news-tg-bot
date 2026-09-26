@@ -374,6 +374,8 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
 `tests/data/category_eval.yaml` + `tests/test_classifier_eval.py` 是规则分类的评测集：
 53 条线上真实标题（带来源名），允许多个可接受答案，门槛 0.88，2026-09-26 实测 92.5%；
+`tests/data/dedup_eval.yaml` + `tests/test_dedup_eval.py` 是跨来源去重的评测集：
+25 对线上真实标题，要求真重复 100% 合并、不同事 0 误并；
 URL 与标题去重（tracking 参数、同标题、改写标题、跨来源、版本号差异）；
 评分（权重可配置、可信度分级、热度归一、兴趣加权、突发门槛）；
 突发判定（规则模式的事件词/一手来源/时效三重门槛，AI 模式仍按分数，🔥⭐🔹 阶梯按模式给）；
@@ -681,6 +683,37 @@ aiogram Bot（`/新闻 /来源 /订阅 /设置 /免费`）→ SQLite(WAL) + syst
 
 341 passed。剩下 4 条错的是关键词真分不了的（"Meta's AI Tamagotchi bet is...working?"
 标题里没有任何栏目词；"Feds Target AI Critics as Foreign Agents" 里 "Agents" 又被智能体抢走）。
+
+### v1.13 跨来源去重在没 key 的机器上从来就没生效过（2026-09-26）
+**症状**：20:00 晚报里"OpenAI 特工入侵 Hugging Face"出现了两遍（Hacker News 一条、
+The Verge 一条）。**根因**不是相似度算法：`dedup` 的 0.60–0.79 灰区**只在接了 LLM 时**才合并
+（`ai_review_enabled` + `llm.enabled`），本机没有 key，于是灰区整段永不合并。
+实测 3 天内 9 对灰区标题里 7 对就是同一件事，全被当成两条新闻推给了用户。
+
+**做法**（延续 v1.12 的评测先行）：`tests/data/dedup_eval.yaml` 25 对线上真实标题，
+我逐对判断"同一件事/两件不同的事"。规则：**灰区里两条标题共享 ≥3 个"故事词"**
+（去掉介词冠词等停用词、以及 model/ai/released 这类到处都是的通用词）就判为同一件事。
+在这 25 对上：`same: true` 10/10 合并，`same: false` 0 误并。
+为什么不用阈值下降解决：假阳性对 "0.157.1 released in openai/codex" vs "两个codex邀请码自取"
+打到 **0.700**，而真重复对只有 0.61–0.73——**光调阈值分不开**，必须换信号。
+也不引入语料词频（试过 rare(df≤8)，召回 8/9 但会把 RAPID/Radix 那种错并），
+最简的 V1 反而是全对。`rule_merge_shared_terms: 0` 可以整条关掉，退回只靠 AI 的旧行为。
+
+顺带修掉两处相关缺陷：
+- `query_articles` 早就是**按 event_id 在读取时折叠**多来源的，但 event_id 来自
+  `sha1(title_key)` —— 标题一改写就不是同一个 key，所以这套折叠对转述稿永远无效。
+  现在入站判定会命中，兄弟行会挂到同一事件上。
+- 回填：把 3 天内已入库的 6 条转述稿并到各自事件的原始行上（保留原始行，
+  `event_id` 可随时用 `make_event_key(title)` 复原，不销毁任何数据）；
+  事件入选规则从"分数最高"改成"**一手来源优先 → 最早 → 分数**"，
+  所以 GPT-6 那条留的是 OpenAI 的发布而不是 AWS 的上架文。
+  同时清掉 5 个被搬空/统计失真的事件行。真实验证：多来源事件从改前 9 个 → 回填后 13 个
+  → 统计校正后 12 个，其中最大一组 4 成员跨 3 个来源（澳大利亚入侵政府网站那条）；
+  两份简报里 Hugging Face 事件各占 1 条，10 条与 8 条链接全部互不相同。
+
+已知边界：标题写得毫无重合的同一事件（"Revealing how OpenAI agents hacked Hugging Face"
+vs "Irregular: rogue AI cyberattacks…"）任何标题法都合不上，那需要 `same_event` 的模型判断。
+345 passed。
 
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
