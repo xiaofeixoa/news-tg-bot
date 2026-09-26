@@ -97,7 +97,7 @@ def news_list(
             lines.append(f"{number} {link(esc(head)[:120], item.url)}{marker}")
         else:
             lines.append(f"{number} {esc(head)[:120]}{marker}")
-        lines.append(f"   <i>{source} · {date} · {esc(item.category or 'Other')}</i>")
+        lines.append(f"   <i>{source} · {date} · {esc(config.category_label(item.category))}</i>")
     return "\n".join(lines)
 
 

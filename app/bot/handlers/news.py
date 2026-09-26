@@ -114,7 +114,7 @@ async def cmd_topics(message: Message, news: NewsService) -> None:
         await message.answer("还没有分类数据，先等一轮采集完成。")
         return
     lines = ["📚 <b>新闻分类</b>", ""]
-    lines += [f"{t['emoji']} <b>{fmt.esc(t['category'])}</b> · {t['count']} 条"
+    lines += [f"{t['emoji']} <b>{fmt.esc(t['label'])}</b> · {t['count']} 条"
               + (f"\n   <i>{fmt.esc(t['description'])}</i>" if t.get("description") else "")
               for t in topics]
     lines += ["", "点击分类查看该方向的新闻："]
@@ -194,10 +194,11 @@ async def cb_topic(callback: CallbackQuery, news: NewsService, app_config: AppCo
     items = news.by_category(category, limit=PER_PAGE, days=7)
     if callback.message is not None:
         if not items:
-            await callback.message.answer(f"{category} 分类最近 7 天还没有新闻。")
+            await callback.message.answer(f"{app_config.category_label(category)} 分类最近 7 天还没有新闻。")
         else:
             await show_list(callback.message, chat_id=chat_id, items=items,
-                            title=f"{fmt.esc(category)} 分类", news=news, config=app_config)
+                            title=f"{fmt.esc(app_config.category_label(category))} 分类",
+                            news=news, config=app_config)
     await callback.answer()
 
 

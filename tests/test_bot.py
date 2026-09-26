@@ -244,9 +244,20 @@ async def test_topics_and_sources_commands(seeded):
     message = FakeMessage(ALLOWED, "/topics")
     await cmd_topics(message, get_news_service())
     assert "分类" in message.last
+    assert "模型发布" in message.last, "栏目名给用户看的是中文"
+    assert "AI Models" not in message.last, "taxonomy 的英文键不该露出来"
     keyboard = message.last_kwargs["reply_markup"]
+    labels = [b.text for row in keyboard.inline_keyboard for b in row if b.text]
+    assert any("模型发布" in text for text in labels), labels
+    assert not any("AI Models" in text for text in labels), labels
     data = [b.callback_data for row in keyboard.inline_keyboard for b in row if b.callback_data]
-    assert any(d.startswith("t:") for d in data)
+    assert any(d.startswith("t:") for d in data), "回调仍然带英文键"
+
+    topic_page = FakeCallback("t:AI Models")
+    from app.bot.handlers.news import cb_topic
+    from app.config import get_config
+    await cb_topic(topic_page, get_news_service(), get_config())
+    assert "AI Models" not in topic_page.message.last, topic_page.message.last
 
     other = FakeMessage(ALLOWED, "/sources")
     await cmd_sources(other, get_news_service())

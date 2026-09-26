@@ -333,6 +333,8 @@ class NewsService:
         return [
             {
                 "category": name,
+                # 中文栏目名给人看；`category` 仍然是英文键（数据库列与 prompt 都用它）。
+                "label": self.config.category_label(name),
                 "count": count,
                 "emoji": self.config.get(f"digest.section_emoji.{name}", "📰"),
                 "description": self.config.category_meta(name).get("description", ""),

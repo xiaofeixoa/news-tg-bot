@@ -72,7 +72,7 @@ def topics_keyboard(topics: Sequence[dict], *, page: int = 1) -> InlineKeyboardM
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for topic in topics[:20]:
-        label = f"{topic['emoji']} {topic['category']} ({topic['count']})"
+        label = f"{topic['emoji']} {topic['label']} ({topic['count']})"
         row.append(_cb(label[:48], cb(TOPIC, topic["category"])))
         if len(row) == 2:
             rows.append(row)

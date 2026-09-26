@@ -422,6 +422,8 @@ def test_rendering_prefers_chinese_everywhere():
     assert zh.display_line == "推理更便宜，上下文更大"
     list_text = fmt.news_list([zh], config=config, title="🤖 最新 AI 新闻")
     assert "推理更便宜" in list_text and "OpenAI releases GPT-5" not in list_text
+    assert "AI Models" not in list_text, "每行末尾的分类也是我们自己写的文案"
+    assert "模型发布" in list_text
 
     card = fmt.article_card(zh, config=config)
     assert "OpenAI 发布 GPT-5" in card and "一句话总结" in card
