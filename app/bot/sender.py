@@ -11,7 +11,7 @@ every CLI script - none of which need Telegram.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING
 
 from app.config import AppConfig, get_config
 from app.logging_setup import get_logger
@@ -47,7 +47,12 @@ class TelegramSender:
                    parse_mode: str | None = "HTML") -> bool:
         """Deliver one message. The formatters emit HTML, so this is the path that
         has to ask Telegram to parse it - interactive replies set it themselves."""
-        text = (text or "")[:MAX_MESSAGE]
+        # The formatters already fit messages to this limit; a raw slice here would
+        # cut a briefing line mid-word without saying so, so the ellipsis stays.
+        if len(text or "") > MAX_MESSAGE:
+            text = text[: MAX_MESSAGE - 1] + "…"
+        else:
+            text = text or ""
         if not text.strip():
             return False
         from aiogram.exceptions import (TelegramAPIError, TelegramBadRequest,
@@ -90,16 +95,25 @@ class TelegramSender:
         return False
 
     async def send_digest(self, chat_id: int, digest: Digest) -> int:
+        """Messages delivered, or 0 unless every part landed.
+
+        The caller uses the result to decide whether today's briefing was sent,
+        and `if sent:` is true for `1` - so counting a half-delivered digest as
+        delivered would mark the day done and lose the tail of the briefing for
+        good. Reporting 0 instead lets the watcher try again inside its grace
+        window; the worst case there is a repeated first page, which is a much
+        smaller harm than a missing one.
+        """
         sent = 0
         for index, text in enumerate(digest.messages):
-            if await self.send(chat_id, text):
-                sent += 1
+            if not await self.send(chat_id, text):
+                log.error("digest for chat_id=%s stopped at message %d/%d; not marking it delivered",
+                          chat_id, index + 1, len(digest.messages))
+                return 0
+            sent += 1
             if index < len(digest.messages) - 1:
                 await asyncio.sleep(0.6)  # stay well clear of rate limits
         return sent
-
-    async def send_many(self, chat_ids: Sequence[int], text: str, **kwargs: Any) -> int:
-        return sum(1 for chat_id in chat_ids if await self.send(chat_id, text, **kwargs))
 
     async def close(self) -> None:
         await self.bot.session.close()
