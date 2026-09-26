@@ -313,6 +313,24 @@ classify:
   model_size_weight: 0.6       # 标题里出现 27B / 0.8B 这类参数量
   repo_title_weight: 1.0       # 标题就是 owner/name 形态的仓库条目
 
+# 内部枚举值给人看时的中文说法（/sources、--self-check 都会用到）。
+# 键是数据库与配置里的真实取值，不要改键，只改说法。
+labels:
+  source_types:
+    rss: RSS 新闻源
+    atom: Atom 新闻源
+    hackernews: Hacker News
+    github: GitHub
+    reddit: Reddit
+    arxiv: arXiv 论文
+    youtube: YouTube
+  # 可信度分级：A 一手官方 / B 主流科技媒体 / C 社区 / D 个人
+  quality:
+    A: A 级（一手官方）
+    B: B 级（主流科技媒体）
+    C: C 级（社区）
+    D: D 级（个人）
+
 breaking:
   enabled: true
   threshold: 90

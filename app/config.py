@@ -238,6 +238,13 @@ class AppConfig:
             return str(self.categories.get("fallback_label") or "其他")
         return name
 
+    def source_type_label(self, type_name: str | None) -> str:
+        """/sources 与 --self-check 里的采集器类型：内部取值不该直接印给他看。"""
+        return str(self.get(f"labels.source_types.{(type_name or '').lower()}") or type_name or "?")
+
+    def quality_label(self, tier: str | None) -> str:
+        return str(self.get(f"labels.quality.{(tier or 'C').upper()}") or f"{(tier or 'C').upper()} 级")
+
     def subcategories(self, name: str) -> list[str]:
         return list((self.category_meta(name).get("subcategories") or {}).keys())
 

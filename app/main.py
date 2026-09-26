@@ -69,7 +69,7 @@ async def self_check(config: AppConfig) -> int:
     print(f"Collector 类型 : {', '.join(known_types())}")
     print(f"启用数据源     : {len(collectors)} / {len(config.sources)}")
     for collector in collectors:
-        print(f"  · {collector.source_name:<28} {collector.type}")
+        print(f"  · {collector.source_name:<28} {config.source_type_label(collector.type)}")
     llm = LLMService(config)
     print(f"LLM            : {'可用 ' + config.settings.llm_model if llm.enabled else '不可用（规则模式）'}")
     print(f"早报/晚报      : {config.settings.daily_digest_time} / {config.settings.evening_digest_time}")

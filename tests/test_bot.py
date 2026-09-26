@@ -8,6 +8,7 @@ scripts/telegram_smoke.py.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -260,8 +261,11 @@ async def test_topics_and_sources_commands(seeded):
     assert "AI Models" not in topic_page.message.last, topic_page.message.last
 
     other = FakeMessage(ALLOWED, "/sources")
-    await cmd_sources(other, get_news_service())
+    await cmd_sources(other, get_news_service(), get_config())
     assert "信息来源" in other.last and "OpenAI" in other.last
+    assert "RSS 新闻源" in other.last and "A 级（一手官方）" in other.last
+    # 旧格式是内部取值直接拼接："rss · A 级"
+    assert not re.search(r"\brss\b ·", other.last), "采集器类型的内部取值不该直接印出来"
 
 
 @pytest.mark.asyncio

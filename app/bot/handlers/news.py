@@ -122,7 +122,7 @@ async def cmd_topics(message: Message, news: NewsService) -> None:
 
 
 @router.message(Command("sources"))
-async def cmd_sources(message: Message, news: NewsService) -> None:
+async def cmd_sources(message: Message, news: NewsService, app_config: AppConfig) -> None:
     configured = news.configured_sources()
     live = {s["name"]: s for s in news.sources()}
     lines = ["🔌 <b>信息来源</b>", ""]
@@ -136,7 +136,7 @@ async def cmd_sources(message: Message, news: NewsService) -> None:
             flag = "🟢"
         else:
             flag = "🟡"
-        detail = f"{fmt.esc(source['type'])} · {source['quality']} 级"
+        detail = f"{fmt.esc(app_config.source_type_label(source['type']))} · {fmt.esc(app_config.quality_label(source['quality']))}"
         if state.get("last_success_at"):
             detail += f" · 上次成功 {state['last_success_at']:%m-%d %H:%M}"
         if state.get("items"):
