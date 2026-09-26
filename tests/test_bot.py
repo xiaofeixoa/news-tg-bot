@@ -370,18 +370,47 @@ def test_refusal_message_is_polite_and_informative():
     assert "ALLOWED_CHAT_IDS" in REFUSAL
 
 
-def test_every_documented_command_has_a_handler():
-    """Wiring check: aiogram only fails at the first update if a router is missing."""
-    from app.bot.bot import COMMANDS, create_dispatcher
+def test_every_documented_command_has_a_handler_and_its_services_are_injected():
+    """接线检查：路由缺一个 handler，aiogram 要到第一条 update 才报错。
 
+    顺带检查服务注入：aiogram 是按参数名注入的，/sources 这次多了 `app_config`
+    形参——单元测试都直接调 handler 并显式传参，拼错了也全绿，线上却是死按钮。
+    两者共用一个 Dispatcher：aiogram 的 Router 只能挂一次，建两次会直接抛错。
+    """
+    import inspect
+
+    from app.bot.bot import COMMANDS, create_dispatcher
+    from app.config import AppConfig
+    from app.services.digest import DigestService
+    from app.services.llm import LLMService
+    from app.services.news import NewsService
+    from app.services.search import SearchService
+
+    service_types = (AppConfig, NewsService, SearchService, DigestService, LLMService)
+    # 处理器模块都是 `from __future__ import annotations`，注解在运行时是字符串，
+    # 所以只能按名字比对，不能 isinstance。
+    service_names = {t.__name__ for t in service_types}
     dp = create_dispatcher(get_config())
+    available = set(dp.workflow_data)
     names: set[str] = set()
+    injected: list[str] = []
+
+    def annotation_name(param: inspect.Parameter) -> str:
+        ann = param.annotation
+        return ann.__name__ if isinstance(ann, type) else str(ann).rsplit(".", 1)[-1]
 
     def walk(router):
-        for handler in router.message.handlers:
-            names.add(handler.callback.__name__)
-        for handler in router.callback_query.handlers:
-            names.add(handler.callback.__name__)
+        for observer in (router.message, router.callback_query):
+            for handler in observer.handlers:
+                callback = getattr(handler, "callback", None)
+                if callback is None:
+                    continue
+                names.add(getattr(callback, "__name__", str(callback)))
+                for param_name, param in inspect.signature(callback).parameters.items():
+                    if annotation_name(param) in service_names:
+                        assert param_name in available, \
+                            f"{callback.__name__} 需要 {param_name!r}，dispatcher 没注册"
+                        injected.append(param_name)
         for child in router.sub_routers:
             walk(child)
 
@@ -395,6 +424,8 @@ def test_every_documented_command_has_a_handler():
     assert expected <= names, f"missing handlers: {sorted(expected - names)}"
     assert {c.command for c in COMMANDS} >= {"start", "news", "search", "summary", "digest",
                                              "topics", "sources", "settings", "pause", "resume"}
+    assert len(injected) >= 5, f"只检查到 {len(injected)} 处服务注入，检查本身可能失效"
+    assert {"app_config", "news", "search", "digest", "llm"} <= available
 
 
 def test_scheduler_only_registers_enabled_source_types():
