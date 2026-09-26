@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import store
 from app.bot.keyboards import inline as K
-from app.config import AppConfig
+from app.config import AppConfig, as_int
 from app.logging_setup import get_logger
 from app.processing import breaking
 from app.services import format as fmt
@@ -28,51 +30,41 @@ EVENING_SLOTS = ["17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, news: NewsService) -> None:
     user = news.user_for(message.chat.id)
-    lines = [
-        "⚙️ <b>你的推送设置</b>",
-        "",
-        f"☀️ 早报：{'开' if user['daily_enabled'] else '关'} · {user['daily_time']}（{fmt.esc(user['timezone'])}）",
-        f"🌙 晚报：{'开' if user['evening_enabled'] else '关'} · {user['evening_time']}",
-        f"🚨 突发新闻：{'开' if user['breaking_enabled'] else '关'} · {breaking.describe()}",
-        f"📊 最低评分：{user['min_score']:.0f}",
-        f"⏸ 自动推送：{'已暂停' if user['paused'] else '运行中'}",
-        "",
-        "<b>兴趣：</b>" + (
-            "、".join(f"{i['value']}" for i in user["interests"][:12]) if user["interests"]
-            else "未设置（默认按全局 AI 关键词）"
-        ),
-        "",
-        "点按钮调整，或用 <code>/setinterest</code> 直接描述你想看什么。",
-    ]
-    await message.answer(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=K.settings_keyboard(
-            paused=user["paused"], breaking=user["breaking_enabled"],
-            daily=user["daily_time"], evening=user["evening_time"],
-        ),
-    )
+    await message.answer(_panel(user), parse_mode="HTML", reply_markup=_keyboard(user))
 
 
 @router.callback_query(F.data.startswith(f"{K.ACT}:"))
-async def cb_settings(callback: CallbackQuery, news: NewsService) -> None:
+async def cb_settings(callback: CallbackQuery, news: NewsService, app_config: AppConfig) -> None:
     action = (callback.data or "").split(":", 1)[1]
-    chat_id = callback.message.chat.id if callback.message else 0
+    if callback.message is None:
+        # 没有可回写的面板时，写库就等于把设置存进一个查不到主人的抽屉
+        await callback.answer("这条设置消息已失效，请再用 /settings 打开一次")
+        return
+    chat_id = callback.message.chat.id
     user = news.user_for(chat_id)
     note = "已更新"
     if action == "daily":
         user = news.update_user(chat_id, daily_time=_next(user["daily_time"], DAILY_SLOTS))
+        note = f"☀️ 早报时间 {user['daily_time']}"
     elif action == "evening":
         user = news.update_user(chat_id, evening_time=_next(user["evening_time"], EVENING_SLOTS))
+        note = f"🌙 晚报时间 {user['evening_time']}"
+    elif action == "daily_on":
+        user = news.update_user(chat_id, daily_enabled=not user["daily_enabled"])
+        note = "🔔 早报已开" if user["daily_enabled"] else "🔕 早报已关，只剩晚报和突发"
+    elif action == "evening_on":
+        user = news.update_user(chat_id, evening_enabled=not user["evening_enabled"])
+        note = "🔔 晚报已开" if user["evening_enabled"] else "🔕 晚报已关，只剩早报和突发"
     elif action == "breaking":
         user = news.update_user(chat_id, breaking_enabled=not user["breaking_enabled"])
+        note = "🚨 突发新闻已开" if user["breaking_enabled"] else "🚨 突发新闻已关"
     elif action == "pause":
         user = news.update_user(chat_id, paused=not user["paused"])
         note = "自动推送已暂停" if user["paused"] else "自动推送已恢复"
-    elif action == "score+":
-        user = news.update_user(chat_id, min_score=min(90.0, user["min_score"] + 5))
-    elif action == "score-":
-        user = news.update_user(chat_id, min_score=max(0.0, user["min_score"] - 5))
+    elif action in ("score+", "score-"):
+        floor = min(90.0, max(0.0, user["min_score"] + (5 if action == "score+" else -5)))
+        user = news.update_user(chat_id, min_score=floor)
+        note = _floor_note(news, app_config, floor)
     elif action == "interest":
         await _answer(callback, "用 <code>/setinterest</code> 加一句话描述，例如：\n"
                                 "<code>/setinterest 我主要关注 AI Agent、开源模型、GPU 和 Claude</code>",
@@ -81,8 +73,7 @@ async def cb_settings(callback: CallbackQuery, news: NewsService) -> None:
         return
     else:
         note = "未知操作"
-    await cmd_settings(callback.message, news)
-    await callback.answer(note)
+    await _refresh(callback, user, note)
 
 
 @router.message(Command("pause"))
@@ -134,16 +125,80 @@ async def cmd_setinterest(message: Message, command: CommandObject, news: NewsSe
 
 
 # ------------------------------------------------------------------ helpers
+def _panel(user: dict[str, Any]) -> str:
+    lines = [
+        "⚙️ <b>你的推送设置</b>",
+        "",
+        f"☀️ 早报：{'开' if user['daily_enabled'] else '关'} · {user['daily_time']}（{fmt.esc(user['timezone'])}）",
+        f"🌙 晚报：{'开' if user['evening_enabled'] else '关'} · {user['evening_time']}",
+        f"🚨 突发新闻：{'开' if user['breaking_enabled'] else '关'} · {breaking.describe()}",
+        f"📊 最低评分：{user['min_score']:.0f}",
+        f"⏸ 自动推送：{'已暂停' if user['paused'] else '运行中'}",
+        "",
+        "<b>兴趣：</b>" + (
+            # 兴趣词是从他打字的那句话里解析出来的，可能带 < 或 &：不转义的话
+            # Telegram 会拒掉整个面板，他连"改回默认"的按钮都点不到。
+            "、".join(fmt.esc(str(i["value"])) for i in user["interests"][:12])
+            if user["interests"] else "未设置（默认按全局 AI 关键词）"
+        ),
+        "",
+        "点按钮调整，或用 <code>/setinterest</code> 直接描述你想看什么。",
+    ]
+    return "\n".join(lines)
+
+
+def _keyboard(user: dict[str, Any]):
+    return K.settings_keyboard(
+        paused=user["paused"], breaking=user["breaking_enabled"],
+        daily=user["daily_time"], evening=user["evening_time"],
+        daily_on=user["daily_enabled"], evening_on=user["evening_enabled"],
+    )
+
+
+async def _refresh(callback: CallbackQuery, user: dict[str, Any], note: str) -> None:
+    """就地改写面板，而不是再发一份。
+
+    按钮上写的是当前状态（⏸ 暂停推送 / 🚨 突发 开），旧面板留在聊天里就是一个
+    还挂着假状态的入口：再点一下会把刚设置好的东西原样改回去。
+    """
+    if callback.message is not None:
+        try:
+            await callback.message.edit_text(_panel(user), parse_mode="HTML",
+                                             reply_markup=_keyboard(user))
+        except TelegramBadRequest as exc:
+            # "message is not modified"（未知操作那一支）以及坏掉的 markup 都只
+            # 影响这一条消息：设置已经落库，提示照发。
+            log.warning("settings panel not edited: %s", exc)
+    await callback.answer(note)
+
+
+def _floor_note(news: NewsService, config: AppConfig, floor: float) -> str:
+    """门槛后面跟着"这个窗口里还剩几条"，否则 🔼 点到 90 的结果只能等到早上发现。
+
+    简报在候选为空时是直接不发（`Digest(empty=True)`），所以这一档一旦抬过当天
+    最高分，唯一的预告就是这条提示。
+    """
+    hours = as_int(config.get("digest.morning.window_hours", 24), 24)
+    kept = news.count_eligible(hours=hours, min_score=floor)
+    if not kept:
+        return f"⚠️ 门槛 {floor:.0f}：近 {hours} 小时 0 条达标，这样会收不到简报"
+    return f"门槛 {floor:.0f}：近 {hours} 小时 {kept} 条达标"
+
+
 async def _answer(callback: CallbackQuery, text: str, *, html: bool = False) -> None:
     if callback.message is not None:
         await callback.message.answer(text, parse_mode="HTML" if html else None)
 
 
 def _next(current: str, slots: list[str]) -> str:
+    """按面板给的顺序往后一档。库里存的时间不在档位里时，取它之后的第一档 -
+    直接跳回 slots[0] 会把一个自定义的 07:15 一把拉回 06:00。
+    """
     try:
         index = slots.index(current)
     except ValueError:
-        return slots[0]
+        later = [slot for slot in slots if slot > current]
+        return later[0] if later else slots[0]
     return slots[(index + 1) % len(slots)]
 
 

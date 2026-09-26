@@ -251,6 +251,12 @@ class NewsService:
             )
             return _views(session, articles[:limit])
 
+    def count_eligible(self, *, hours: int = 24, min_score: float | None = None) -> int:
+        """Rows a briefing could choose from right now, without building views."""
+        since = datetime.utcnow() - timedelta(hours=hours)
+        with session_scope() as session:
+            return repo.count_eligible(session, since=since, min_score=min_score)
+
     def day(self, *, offset_days: int = 0, limit: int = 20, min_score: float | None = None,
             tz_name: str | None = None) -> tuple[list[ArticleView], str]:
         tz_name = tz_name or self.config.settings.timezone

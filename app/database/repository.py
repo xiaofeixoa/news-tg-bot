@@ -479,6 +479,22 @@ def count_since(session: Session, since: datetime) -> int:
     return session.scalar(select(func.count(Article.id)).where(Article.published_at >= since)) or 0
 
 
+def count_eligible(session: Session, *, since: datetime, min_score: float | None = None) -> int:
+    """How many rows a briefing could actually pick in this window.
+
+    The gates are copied from query_articles on purpose: this number is shown to
+    the user as "这一档还剩几条", so it has to describe the same pool the digest
+    draws from.
+    """
+    stmt = select(func.count(Article.id)).where(
+        Article.is_archived.is_(False), Article.filtered_out.is_(False),
+        Article.is_processed.is_(True), Article.published_at >= since,
+    )
+    if min_score is not None:
+        stmt = stmt.where(Article.final_score >= min_score)
+    return int(session.scalar(stmt) or 0)
+
+
 def trending(session: Session, hours: int = 48, limit: int = 10) -> list[Article]:
     since = datetime.utcnow() - timedelta(hours=hours)
     return query_articles(session, since=since, order_by_score=True, limit=limit, min_score=1)

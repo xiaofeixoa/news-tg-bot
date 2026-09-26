@@ -83,11 +83,17 @@ def topics_keyboard(topics: Sequence[dict], *, page: int = 1) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def settings_keyboard(*, paused: bool, breaking: bool, daily: str, evening: str) -> InlineKeyboardMarkup:
+def settings_keyboard(*, paused: bool, breaking: bool, daily: str, evening: str,
+                      daily_on: bool = True, evening_on: bool = True) -> InlineKeyboardMarkup:
+    """时间按钮只换时间，提醒开关按钮只管开关 - 两者放一行会互相踩。"""
     rows = [
         [
             _cb("☀️ 早报 " + daily, cb(ACT, "daily")),
+            _cb(("🔔 早报提醒 开" if daily_on else "🔕 早报提醒 关"), cb(ACT, "daily_on")),
+        ],
+        [
             _cb("🌙 晚报 " + evening, cb(ACT, "evening")),
+            _cb(("🔔 晚报提醒 开" if evening_on else "🔕 晚报提醒 关"), cb(ACT, "evening_on")),
         ],
         [
             _cb("🚨 突发 " + ("开" if breaking else "关"), cb(ACT, "breaking")),
