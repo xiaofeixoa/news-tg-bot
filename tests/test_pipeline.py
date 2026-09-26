@@ -735,3 +735,68 @@ async def test_evening_briefing_does_not_repeat_the_morning_one(session):
     assert evening.article_ids, "24 小时窗口不该空手"
     assert not set(evening.article_ids) & set(morning.article_ids), \
         "早报发过的内容不能再出现在晚报里"
+
+
+@pytest.mark.asyncio
+async def test_one_poison_row_does_not_abort_the_whole_round(session, monkeypatch):
+    """线上真实炸法（scheduler.log 里 5 次）：一行 flush 失败之后，except 分支没有先
+    rollback 就去碰 ORM 属性 → PendingRollbackError 冒出整个 job，后面每行都被跳过，
+    注释里写的"三次之后放弃"根本没机会生效。"""
+    from sqlalchemy import insert
+    from app.database.models import Tag, article_tags
+
+    poison_row = repo.save_article(session, feed_item("OpenAI ships a reasoning router",
+                                                      "https://openai.com/router"))
+    next_row = repo.save_article(session, feed_item("Meta releases an open weight model",
+                                                     "https://meta.com/open"))
+    tag = Tag(name="router")
+    session.add(tag)
+    session.commit()
+    real = repo.attach_tags
+
+    def explode(_session, article, names):
+        if article.id == poison_row.id:
+            # 和生产事故同一形状：往中间表插两次同一条链接，失败发生在 flush 里，
+            # 于是会话被标记为需要回滚。
+            _session.execute(insert(article_tags).values(article_id=article.id, tag_id=tag.id))
+            _session.execute(insert(article_tags).values(article_id=article.id, tag_id=tag.id))
+            _session.flush()
+            return
+        real(_session, article, names)
+
+    monkeypatch.setattr(repo, "attach_tags", explode)
+    stats = await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=5)
+    session.commit()
+    assert stats.failed == 1 and stats.processed == 1, \
+        "中毒的那一行要记一次失败，但它后面那行必须照常被处理"
+    first = session.get(Article, poison_row.id)
+    assert first.process_attempts == 1 and "IntegrityError" in (first.process_error or "")
+    assert not first.is_processed, "还该再试两次，不是一举标完成"
+
+
+@pytest.mark.asyncio
+async def test_attach_tags_ignores_a_link_another_session_already_wrote(session):
+    """并发采集下关系集合会过期：以库里的链接表为准，才不会插重第二条。"""
+    from sqlalchemy import insert
+    from app.database.models import Tag, article_tags
+
+    stored = repo.save_article(session, feed_item("Anthropic opens an agent protocol",
+                                                  "https://anthropic.com/protocol"))
+    tag = Tag(name="agents")
+    session.add(tag)
+    session.commit()
+    assert stored.tags == []                      # 集合在这里被加载：此刻还没有链接
+
+    from app.database.database import get_session_factory
+
+    other = get_session_factory()()               # 另一个会话（另一轮采集）插好了链接
+    try:
+        other.execute(insert(article_tags).values(article_id=stored.id, tag_id=tag.id))
+        other.commit()
+    finally:
+        other.close()
+
+    repo.attach_tags(session, stored, ["Agents"])  # 同一个标签，另一种大小写
+    session.commit()
+    links = session.execute(select(article_tags).where(article_tags.c.article_id == stored.id))
+    assert len(links.all()) == 1

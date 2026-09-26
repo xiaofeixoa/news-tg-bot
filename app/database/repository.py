@@ -172,8 +172,17 @@ def attach_tags(session: Session, article: Article, names: Iterable[str]) -> Non
     A second pass over the same row - the degraded-row AI re-run, or a requeued
     article - used to append links that were already there and die on an
     IntegrityError deep inside the processing loop.
+
+    The already-linked tag ids come from the link table, not from
+    `article.tags`: a long-lived scheduler session can hold a collection that a
+    concurrent collector has moved on, and then the append duplicates a row the
+    database already has. Live boxes hit exactly that five times in one day and
+    each hit took the whole processing round down with it (see `process_pending`).
     """
     attached = {tag.id for tag in article.tags}
+    if article.id is not None:
+        attached |= set(session.scalars(
+            select(article_tags.c.tag_id).where(article_tags.c.article_id == article.id)))
     seen: set[int] = set()
     for raw in names:
         name = str(raw).strip()[:64]

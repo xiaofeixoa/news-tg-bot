@@ -914,6 +914,38 @@ v1.18 部署后第一次跑端到端问句，暴露两件事——都是只有�
 原"卡片只显中文要点"的用例保留，因为那是中英混合的行，新策略只在整行都没有中文时回落。
 三次变异验证：删掉要点段 → 2 红；还原空队列早退 → 2 红；显示层改回只留中文 → 1 红。
 
+### v1.21 一行处理失败会把整轮带走：两处会话级事故（2026-09-26）
+部署 v1.20 之后例行看日志，`logs/scheduler.log` 里有 Traceback。顺着查出来两个真问题，
+都在"处理轮"这条最不该断的链路上（统计窗口 = 两台机器各自最近约 30 小时、
+各 202/203 轮成功处理之后仍然发生的事故）：
+
+**事故 A：`UNIQUE constraint failed: article_tags`（anr-vps 5 次）。**
+`attach_tags()` 判断"这条链接是否已存在"读的是 ORM 的关系集合
+（`{tag.id for tag in article.tags}`）。调度器的会话活得比一轮长，中间表被另一个
+会话（并发采集/上一轮）写过之后，这个集合就是过期的 —— 于是同一个
+`(article_id, tag_id)` 被插第二次，错误在 flush 里爆出来。
+现在改成以链接表为准（集合 + `SELECT tag_id FROM article_tags WHERE article_id=?` 取并集）。
+
+**事故 B：`PendingRollbackError` 冒出整个 job（两台各 1 次）。**
+`process_pending()` 的 `except` 分支在会话已经被 flush 失败污染之后，第一件事是
+`article.process_attempts = (article.process_attempts or 0) + 1` —— 读一个被 expire 的
+列又要走数据库，直接抛 PendingRollbackError，异常从 except 里逃出去，
+整轮剩下的文章全部没被处理，`finally` 里的 `session.commit()` 同样失败。
+代码注释写着"三次之后放弃，不让一颗毒行堵住队列"，但那道保险永远轮不到执行。
+anr-jump 上第一次事故的原始异常是 `database is locked`（`busy_timeout` 已经是 30 秒，
+说明是长写事务/checkpoint 撞上的，另案），同一个 handler 缺陷把它也放大成整轮失败。
+
+修法：except 里先 `session.rollback()`，再 `session.get()` 重新取那行来记
+`process_attempts/process_error/is_processed`；提交从 `finally` 挪出来单独 try/except
+（失败发生在 commit 时也是同一类事故），一行最多拖掉它自己。
+
+测试：两个复现用例都先跑出与线上完全相同的错误串再修
+（`test_attach_tags_ignores_a_link_another_session_already_wrote` 用第二个会话插链接、
+`test_one_poison_row_does_not_abort_the_whole_round` 在 flush 里制造重复键）；
+两处修复各做一次变异验证，还原后分别报
+`sqlite3.IntegrityError: UNIQUE constraint failed: article_tags...` 和 `PendingRollbackError`。
+401 passed。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；

@@ -268,11 +268,29 @@ async def process_pending(
 
     budget = enrich.Budget(as_int(config.get("enrich.max_per_round", 5), 5))
     for article in articles:
+        article_id = article.id
         try:
             outcome = await _process_one(
                 session, article, config=config, llm=llm,
                 interests=interests or [], ai_enabled=ai_enabled, enrich_budget=budget,
             )
+        except Exception as exc:  # noqa: BLE001 - one bad row must not end the round
+            # Roll back *first*. The old handler touched `article.process_attempts`
+            # while the session was still poisoned by the failed flush, which raised
+            # PendingRollbackError inside the except block, escaped `process_pending`
+            # and skipped every article left in the batch - five times on the live
+            # box on 2026-09-26. The "give up after 3 tries" rule below never got to
+            # run because the round died before reaching it.
+            session.rollback()
+            stats.failed += 1
+            row = session.get(Article, article_id)
+            if row is not None:
+                row.process_attempts = (row.process_attempts or 0) + 1
+                row.process_error = f"{type(exc).__name__}: {exc}"[:400]
+                row.is_processed = row.process_attempts >= 3
+                log.warning("processing failed for #%s (%s): %s",
+                            row.id, (row.title or "")[:60], exc)
+        else:
             if outcome == "filtered":
                 stats.filtered += 1
             elif outcome == "failed":
@@ -281,15 +299,12 @@ async def process_pending(
                 stats.processed += 1
                 if outcome == "breaking" and breaking_enabled:
                     stats.breaking.append(article.id)
-        except Exception as exc:
-            stats.failed += 1
-            article.process_attempts = (article.process_attempts or 0) + 1
-            article.process_error = f"{type(exc).__name__}: {exc}"[:400]
-            # Give up after 3 tries so one poison row cannot block the queue.
-            article.is_processed = article.process_attempts >= 3
-            log.warning("processing failed for #%s (%s): %s", article.id, article.title[:60], exc)
-        finally:
+        try:
             session.commit()
+        except Exception as exc:  # noqa: BLE001 - the flush can also fail at commit
+            session.rollback()
+            stats.failed += 1
+            log.warning("commit failed after article #%s: %s", article_id, exc)
     if budget.used:
         log.info("fetched %d article page(s) for full text", budget.used)
     return stats
