@@ -133,3 +133,70 @@ def test_tier_cap_is_configurable():
     config = get_config()
     assert scorer.tier_cap("C", config) == config.get("sources_quality.tier_caps.C")
     assert scorer.tier_cap(None, config) <= 100
+
+
+# --------------------------------------------------- 突发：热度破例（v1.22）
+def hn_row(**over):
+    """线上真实形状：OpenAI agent 黑进政府那条，heat 645、评分 76、来源质量 65。"""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    base = {
+        "source_name": "Hacker News",
+        "source_quality": 65,
+        "final_score": 76,
+        "community_heat": 645,
+        "title": "Revealing the details of how OpenAI agents hacked Hugging Face",
+        "published_at": datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30),
+    }
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_community_heat_rescues_a_real_event_from_a_community_surface():
+    from app.processing import breaking
+
+    ok, why = breaking.gate(hn_row(), config=get_config(), ai_enabled=False)
+    assert ok, f"heat 645 的大事件不该只因为来源是 HN 就被挡：{why}"
+    assert "热度" in why
+
+
+def test_heat_does_not_buy_in_without_an_event():
+    from app.processing import breaking
+
+    ok, why = breaking.gate(hn_row(title="Show HN: an agent framework I built"),
+                            config=get_config(), ai_enabled=False)
+    assert not ok and "no event" in why
+
+
+def test_heat_does_not_buy_in_when_the_news_is_old():
+    from datetime import datetime, timedelta, timezone
+
+    from app.processing import breaking
+
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)
+    ok, why = breaking.gate(hn_row(published_at=old), config=get_config(), ai_enabled=False)
+    assert not ok and "older than" in why
+
+
+def test_a_blocklisted_source_stays_blocklisted_however_hot():
+    from app.processing import breaking
+
+    ok, why = breaking.gate(hn_row(source_name="Reddit LocalLLaMA RSS", community_heat=9000),
+                            config=get_config(), ai_enabled=False)
+    assert not ok and "not a publisher" in why
+
+
+def test_heat_below_the_bar_still_needs_a_first_hand_source():
+    from app.processing import breaking
+
+    bar = float(get_config().get("breaking.rule.min_community_heat"))
+    ok, why = breaking.gate(hn_row(community_heat=bar - 1), config=get_config(), ai_enabled=False)
+    assert not ok and "source quality" in why
+
+
+def test_the_settings_text_describes_the_gate_that_is_actually_in_force():
+    from app.processing import breaking
+
+    text = breaking.describe(get_config(), ai_enabled=False)
+    assert "热度" in text and "250" in text, f"/设置 说的门必须就是代码里的门：{text}"

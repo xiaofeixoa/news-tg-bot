@@ -946,6 +946,46 @@ anr-jump 上第一次事故的原始异常是 `database is locked`（`busy_timeo
 `sqlite3.IntegrityError: UNIQUE constraint failed: article_tags...` 和 `PendingRollbackError`。
 401 passed。
 
+### v1.22 突发漏掉的正是最大的那条：给"全站都在看"开一道门（2026-09-26）
+按 v1.21 立的规矩（部署后先 grep 日志）顺着查突发，把近 7 天的门重新算了一遍：
+431 行里事件词命中 21 行，而** heat 最高的四条全被挡在门外** ——
+
+| 标题 | heat | 评分 | 来源质量 | 判定 |
+|---|---|---|---|---|
+| Revealing the details of how OpenAI agents hacked Hugging Face | 645 | 76 | 65 | ❌ source quality 65 < 80 |
+| U.S. appeals court upholds designation of Anthropic as supply-chain risk | 480 | 78 | 65 | ❌ 同上 |
+| OpenAI agent hacked Australian government website, PM says | 254 | 70 | 65 | ❌ 同上（且采集时已 34h） |
+| Australia says OpenAI agent hacked into government website | 253 | 70 | 50 | ❌ 同上（35h） |
+
+一手媒体发的六条（Akamai $11.6 billion、Court rules…）能过，
+唯独"整个社区都在看"的两条大新闻过不了 —— 因为它们是从 Hacker News 进来的。
+`min_source_quality: 80` 的设计动机（同样的词出现在 Show HN 自荐里）是对的，
+但它把"事件 + 645 赞 + 采集后 1 小时内"这种行一起挡住了。
+
+于是加一道**只破"来源质量/评分"两道门**的例外：`breaking.rule.min_community_heat: 250`。
+事件词、24 小时时效、`exclude_sources` 黑名单一概不放松，所以 Reddit/GitHub Trending/arXiv
+不会因为高票混进来，Show HN 也进不来（`exclude_titles` 仍然先拦）。定在 250 的依据：
+同一周 431 行里 418 行 heat=0、只有 13 行 ≥100，一周多放行 2-4 条，冲不破每天 5 条的上限。
+
+线上复算（同一窗口、同一套数据，只换代码）：**通过门的行 6 → 8**，
+新进来的正是上面 heat 645 与 480 两条；两条 34-35 小时后才采集到的澳洲新闻仍然被
+时效挡住（正确行为——真到了那个时候再叫醒他没意义）。
+`/设置` 里的说明同步改成"标题里有大事件 + 一手来源 + 24 小时内，**或全站热度 ≥250 的大事件
+（社区来源也可破例）**"，显示的门与代码的门再次一致。
+
+排查过程中也记一次自己的错判：我先用 `updated_at - created_at` 算"处理延迟"，得出
+"322/708 行处理晚于 20 小时"，据此以为突发是被队列积压拖死的。实际量下来
+`unprocessed_articles` 当前 0 行、近 48 小时入库的 708 行全部已处理 ——
+`updated_at` 会被翻译、正文提取、`is_sent` 等后续写入不断推后，**它不是处理时钟**。
+剩下的差额（今天复算 8 条会过门，线上只有 1 条 `is_breaking=1`）方向是清楚的但没法逐条
+归因：v1.9 之前处理的那些行当时面对的还是"评分 ≥90"那扇打不开的死门，而库里没有
+"这条是什么时候被处理的"这一列。已记进"仍未解决"：要么加 `articles.processed_at`，
+要么这类问题永远只能靠日志时间戳反推。
+
+407 passed（新增 6 个门用例：破例放行、无事件词不放行、过期不放行、黑名单不放行、
+热度差 1 不放行、/设置 文案与门一致）。两处变异验证：完全去掉破例 → 2 红；
+破例忽略门槛值 → 1 红。另修一处自己写出来的重复分支（`if not trigger` 被写了两次）。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -963,3 +1003,7 @@ anr-jump 上第一次事故的原始异常是 `database is locked`（`busy_timeo
 没进表的说法（例如"矿难"之于"挖矿"）仍然搜不到；精度地板（`MIN_MATCH_WEIGHT=2`）换来的是
 `最近有哪些模型发布` 只回 1 条——召回与精度这一次站在精度这边，没有问过他。
 概念 AND 的上限故意停在 2：三个概念的问句很少有一行全含，要求全中只会把答案清零。
+**库里没有 `articles.processed_at`**：`updated_at` 会被翻译/正文提取/`is_sent` 反复推后，
+所以"这条什么时候被处理的"无法回答，突发与翻译的历史归因只能靠日志时间戳反推（见 v1.22）。
+`database is locked` 本身还没查（`busy_timeout` 已经是 30 秒，说明撞上的是长写事务或
+WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump 上）。
