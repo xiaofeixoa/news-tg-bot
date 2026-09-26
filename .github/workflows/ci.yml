@@ -1,0 +1,81 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the servers run, 3.13 what the dev box runs.
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # requirements.txt is the whole story on a server, so a missing entry has
+      # to fail here rather than show up as a dead collector at 08:00.
+      - name: Every runtime import is declared
+        run: python -m pytest tests/test_deployment.py -q --tb=short
+
+      - name: Test suite
+        run: python -m pytest -q --tb=short
+
+  hygiene:
+    name: no secrets or runtime state in the repo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repo documents a live personal deployment, so the guard is about
+      # credentials and identifiers, not code style.
+      - name: Runtime state must not be tracked
+        run: |
+          set -e
+          bad=$(git ls-files | grep -E '^\.env$|^data/|^logs/|\.db$|__pycache__|^\.deploy_stamp$' || true)
+          if [ -n "$bad" ]; then
+            echo "tracked runtime state:"; echo "$bad"; exit 1
+          fi
+
+      - name: Credential shapes must not appear in tracked text
+        run: |
+          set -e
+          hits=$(git grep -nIE \
+            '[0-9]{9,10}:[A-Za-z0-9_-]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9]{20,}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY' \
+            -- ':!*.png' || true)
+          if [ -n "$hits" ]; then
+            echo "possible credentials in tracked files:"; echo "$hits"; exit 1
+          fi
+
+      # The docs deliberately use RFC-reserved placeholder addresses/ids; if a
+      # real one slips back in, that is the leak this check exists for.
+      - name: Docs keep placeholder identifiers
+        run: |
+          set -e
+          test -f tests/data/free_eval.yaml || { echo "eval set missing from the repo"; exit 1; }
+          if git grep -nE '2001:db8|your_news_bot|999999999' -- docs README.md >/dev/null; then
+            echo "placeholder identifiers present: ok"
+          else
+            echo "expected the documented placeholders in docs/README"; exit 1
+          fi
