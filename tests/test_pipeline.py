@@ -738,6 +738,90 @@ async def test_evening_briefing_does_not_repeat_the_morning_one(session):
 
 
 @pytest.mark.asyncio
+async def test_rule_mode_writes_a_why_it_matters_line_from_real_signals(session):
+    """没 key 的机器上这句话从来没有过：线上实测近 14 天 423 行可见行里 0 行有值。"""
+    saved = repo.save_article(session, feed_item(
+        "OpenAI announces a cheaper reasoning model for agents",
+        "https://openai.com/index/cheaper-reasoning"))
+    session.commit()
+    await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=10)
+    session.commit()
+    row = session.get(Article, saved.id)
+    assert row.why_it_matters and "OpenAI" in row.why_it_matters
+    assert "事件性消息" in row.why_it_matters, "一手来源 + 标题里有事件，才写这一句"
+
+
+@pytest.mark.asyncio
+async def test_multi_source_coverage_is_named_in_the_why_line(session):
+    first = repo.save_article(session, feed_item(
+        "Anthropic signs a $10 billion compute deal", "https://anthropic.com/news/deal"))
+    second = repo.save_article(session, feed_item(
+        "Anthropic signs a $10 billion compute deal", "https://techcrunch.com/deal",
+        source="TechCrunch AI"))
+    session.commit()
+    await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=10)
+    session.commit()
+    row = session.get(Article, first.id)
+    assert row.why_it_matters and "另有" in row.why_it_matters, \
+        f"同一事件多家报道是最值钱的信号，得说出来源名：{row.why_it_matters}"
+    assert "TechCrunch AI" in row.why_it_matters
+    assert second is not None
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_row_gets_no_why_line_instead_of_padding(session):
+    """真的处理过、但没有硬信号：社区来源 + 单家报道 + 没有事件词 + heat 0。"""
+    saved = repo.save_article(session, feed_item(
+        "Why transformer evaluation needs better benchmarks",
+        "https://reddit.com/r/LocalLLaMA/comments/evaluation",
+        source="Reddit LocalLLaMA RSS",
+        body="Transformers and LLM evaluation benchmarks are discussed here."))
+    session.commit()
+    await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=10)
+    session.commit()
+    row = session.get(Article, saved.id)
+    assert row.is_processed and not row.filtered_out, "这一行要真的走过处理，断言才有意义"
+    assert not row.why_it_matters, "没有真信号就留空：诚实的空比凑出来的中文好"
+
+
+def test_community_heat_alone_is_not_a_reason():
+    """热度只能加强一句有锚点的话，不能自己充当"为什么值得关注"。"""
+    from types import SimpleNamespace
+
+    from app.processing import summarizer
+
+    row = SimpleNamespace(title="Show HN: a whiteboard tool for design reviews",
+                          source_name="Hacker News Free", source_quality=50, community_heat=407)
+    assert summarizer.compose_why_it_matters(row, None, config=get_config()) == ""
+
+
+def test_an_event_plus_heat_writes_the_reason_in_chinese():
+    from types import SimpleNamespace
+
+    from app.processing import summarizer
+
+    row = SimpleNamespace(title="OpenAI announces an agent that broke into a government site",
+                          source_name="Hacker News", source_quality=65, community_heat=481)
+    line = summarizer.compose_why_it_matters(row, None, config=get_config())
+    assert "社区热度 481" in line, line
+    assert "自己发布" not in line, "质量 65 的二手转载不能自称一手来源"
+
+
+@pytest.mark.asyncio
+async def test_processed_at_records_when_the_row_was_decided(session):
+    """`updated_at` 会被翻译/正文提取/is_sent 反复推后，它不是处理时钟。"""
+    saved = repo.save_article(session, feed_item(
+        "Google DeepMind introduces a weather model", "https://deepmind.google/weather"))
+    session.commit()
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=10)
+    session.commit()
+    row = session.get(Article, saved.id)
+    assert row.processed_at is not None and row.processed_at >= before
+    assert (row.processed_at - row.created_at) < timedelta(hours=1)
+
+
+@pytest.mark.asyncio
 async def test_one_poison_row_does_not_abort_the_whole_round(session, monkeypatch):
     """线上真实炸法（scheduler.log 里 5 次）：一行 flush 失败之后，except 分支没有先
     rollback 就去碰 ORM 属性 → PendingRollbackError 冒出整个 job，后面每行都被跳过，

@@ -81,6 +81,7 @@ _LATE_COLUMNS = (
     ("articles", "free_offer_tool", "VARCHAR(64)"),
     ("articles", "free_offer", "JSON"),
     ("articles", "free_offer_sent_at", "TIMESTAMP"),
+    ("articles", "processed_at", "TIMESTAMP"),
 )
 
 

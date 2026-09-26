@@ -172,6 +172,9 @@ class Article(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     process_error: Mapped[str | None] = mapped_column(Text)
     process_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # 这一列是"这条什么时候被处理完"的唯一真答案：`updated_at` 会被翻译、正文提取、
+    # is_sent 等后续写入不断推后，用它推算处理延迟得到过 45% 的假积压。
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     filtered_out: Mapped[bool] = mapped_column(Boolean, default=False)
 
     source: Mapped[Source | None] = relationship(back_populates="articles")

@@ -333,8 +333,17 @@ class NewsJobs:
             # he switched off can no longer be reported as broken every six hours.
             failing = [s for s in repo.all_sources(session)
                        if s.enabled and (s.error_count or 0) >= 5]
+            pending = repo.unprocessed_articles(session, limit=200)
         if archived:
             log.info("archived %d old article(s)", archived)
+        if pending:
+            # Waiting is what silently kills 突发: the gate expires 24h after
+            # publishing, and `updated_at` cannot show this because later writes
+            # (translation, enrichment, is_sent) keep pushing it forward.
+            oldest = min(row.created_at for row in pending if row.created_at)
+            hours = (datetime.utcnow() - oldest).total_seconds() / 3600.0
+            line = "processing backlog: %d row(s), oldest waiting %.1fh" % (len(pending), hours)
+            (log.warning if hours >= 6 else log.info)(line)
         for source in failing:
             log.warning("source %s has failed %s times in a row (last error: %s)",
                         source.name, source.error_count, (source.last_error or "")[:120])

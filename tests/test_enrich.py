@@ -298,6 +298,6 @@ async def test_rewriting_a_summary_invalidates_its_translation(session, fake_llm
 
     _apply(session, row, category="AI Models", subcategory=None,
                     scores={"final_score": 70.0}, summary={"summary": "a different summary"},
-                    tags=[], method="rule")
+                    tags=[], method="rule", config=get_config())
     session.commit()
     assert row.summary_zh is None and row.translated_by is None

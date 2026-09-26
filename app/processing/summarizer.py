@@ -37,6 +37,41 @@ def _sentences(body: str) -> list[str]:
     return out
 
 
+def compose_why_it_matters(article: Any, event: Any = None, *, config: AppConfig | None = None) -> str:
+    """One Chinese line on why this row earned a place, built only from facts.
+
+    Rule mode returned `why_it_matters: ""` for every article, so the card's
+    为什么值得关注 heading had never once appeared on a key-less box (measured: 0 of
+    423 visible rows in a 14-day window). Rather than translate a template about
+    nothing, this writes a line only when there is a real anchor - the story is
+    being reported by several sources, or a first-hand publisher made an
+    announcement - and community heat may then strengthen that line but never
+    stands on its own. Without an anchor the field stays empty: an honest blank
+    beats padding, and "社区热度 407" as a justification for a Show HN self-promo
+    post was exactly the filler this rule now refuses.
+    """
+    config = config or get_config()
+    from app.processing import breaking
+
+    trigger = breaking.event_trigger(getattr(article, "title", None), config)
+    clauses: list[str] = []
+    members = int(getattr(event, "member_count", 0) or 0) if event is not None else 0
+    others = [str(name) for name in (getattr(event, "source_names", None) or [])
+              if name and name != getattr(article, "source_name", None)][:3] if members else []
+    if members > 1 and others:
+        clauses.append(f"同一事件另有 {members - 1} 家来源报道（{'、'.join(others)}）")
+    if not trigger and not clauses:
+        return ""
+    heat = float(getattr(article, "community_heat", 0) or 0)
+    heat_bar = float(config.get("breaking.rule.min_community_heat", 250) or 250) / 2
+    if heat >= max(50.0, heat_bar):
+        clauses.append(f"社区热度 {heat:.0f}（{getattr(article, 'source_name', '') or '社区'}）")
+    quality = float(getattr(article, "source_quality", 0) or 0)
+    if trigger and quality >= float(config.get("breaking.rule.min_source_quality", 80)):
+        clauses.append(f"由 {getattr(article, 'source_name', '') or '一手来源'} 自己发布的事件性消息")
+    return "；".join(clauses)[:280]
+
+
 def fallback_summary(article: dict[str, Any], *, language: str = "en") -> dict[str, Any]:
     # A summary is display text and never a URL, so entities are decoded here
     # even though `clean_text` deliberately leaves them alone: feeds ship

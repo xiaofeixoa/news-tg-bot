@@ -363,7 +363,7 @@ async def _process_one(
         )
         summary = summarizer.fallback_summary(data, language=data["language"])
         _apply(session, article, category=category or config.fallback_category, subcategory=subcategory,
-               scores=scores, summary=summary, tags=data["tags"], method="rule")
+               scores=scores, summary=summary, tags=data["tags"], method="rule", config=config)
     else:
         cls = await classifier.classify(data, interests=interests, config=config, llm=llm)
         if not cls.get("is_ai_related", True) and float(cls.get("relevance_score") or 0) < 30:
@@ -382,7 +382,8 @@ async def _process_one(
             config=config,
         )
         _apply(session, article, category=cls["category"], subcategory=cls.get("subcategory"),
-               scores=scores, summary=summ, tags=data["tags"], method=cls.get("method", "ai"))
+               scores=scores, summary=summ, tags=data["tags"], method=cls.get("method", "ai"),
+               config=config)
         degraded = summ.get("error") or cls.get("error")
         if degraded:
             # Stored and pushed, but flagged: the AI pass was degraded.
@@ -404,6 +405,7 @@ async def _process_one(
 def _settle_filtered(article: Article, reason: str, config: AppConfig, *, relevance: float = 0) -> None:
     article.filtered_out = True
     article.is_processed = True
+    article.processed_at = datetime.utcnow()
     article.process_error = reason
     article.relevance_score = relevance
     article.final_score = 0
@@ -422,6 +424,7 @@ def _apply(
     summary: dict[str, Any],
     tags: Iterable[str],
     method: str,
+    config: AppConfig,
 ) -> None:
     article.category = category
     article.subcategory = subcategory
@@ -448,11 +451,19 @@ def _apply(
     article.is_processed = True
     article.process_error = None
     article.process_attempts = (article.process_attempts or 0) + 1
+    article.processed_at = datetime.utcnow()
     extra_tags = list(tags)
     if annotate_free_offer(article):
         extra_tags += ["免费", article.free_offer_tool or ""]
     repo.attach_tags(session, article, [t for t in extra_tags if t])
     _link_event(session, article)
+    if not article.why_it_matters:
+        # Rule mode never writes this field, so the card's 为什么值得关注 heading has
+        # never appeared on a key-less box. Filled from the event link above, which
+        # is why it runs after `_link_event` and not in `_process_one`.
+        event = repo.event_for(session, article.event_id) if article.event_id else None
+        article.why_it_matters = summarizer.compose_why_it_matters(
+            article, event, config=config) or None
 
 
 def annotate_free_offer(article: Article, *, config: AppConfig | None = None) -> bool:
