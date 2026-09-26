@@ -201,3 +201,40 @@ async def test_the_watcher_records_delivery_only_for_a_whole_digest(session, mon
     jobs._sender = WholeSender()
     await jobs.run_digests()
     assert ledger_count() == 1
+
+
+async def test_a_successful_send_leaves_a_line_the_audit_can_read(monkeypatch):
+    """账本说"我们决定发"，日志说"Telegram 收了"：少一只眼睛就只剩一条腿的证据。
+
+    `scripts/delivery_report.py` 是 grep `chat_id=` 的，成功路径不打日志的话，
+    它对任何一次正常投递都只能回答"账上有"，答不出"对面收了"。
+    """
+    from app.bot import sender as module
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.records: list[tuple[str, tuple]] = []
+
+        def _any(self, level):
+            def emit(msg, *args):
+                self.records.append((str(msg), args))
+            return emit
+
+        def __getattr__(self, level: str):
+            return self._any(level)
+
+    log = Recorder()
+    monkeypatch.setattr(module, "log", log)
+    sender = TelegramSender(Bot(), get_config())
+
+    assert await sender.send(111111111, "早报正文") is True
+    delivered = [(m, a) for m, a in log.records if "delivered" in m]
+    assert len(delivered) == 1, delivered
+    message, args = delivered[0]
+    assert "chat_id=%s" in message and args[1] == 111111111
+    assert args[0] == len("早报正文") and args[2] == "HTML"
+
+    log.records.clear()
+    bot = Bot(errors=[forbidden()])
+    assert await TelegramSender(bot, get_config()).send(111111111, "发不出去") is False
+    assert not [m for m, _ in log.records if "delivered" in m], "没送成不能留下送成的行"

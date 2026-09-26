@@ -317,6 +317,9 @@ scripts/deploy.sh anr-vps
 # 手动补一轮 / 看效果
 .venv/bin/python -m app.main --once
 .venv/bin/python scripts/preview.py ask "最近有什么值得关注的开源 AI 项目？"
+
+# 投递对账（只读）：某个订阅者的简报到底发没发、账上有没有、发送层日志怎么说
+.venv/bin/python scripts/delivery_report.py --hours 168 --kind morning
 .venv/bin/python scripts/preview.py free --days 30        # /免费 会输出什么
 .venv/bin/python scripts/telegram_smoke.py --free         # 把 /免费 的真实结果发给自己
 .venv/bin/python scripts/telegram_smoke.py --free --query glm
@@ -368,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 461 个用例
+.venv/bin/python -m pytest            # 473 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -406,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 461 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 473 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1242,6 +1245,32 @@ v1.29 之后回头读了一遍真实面板，"☀️ 早报：开 · 08:00（**A
 `.py.bak` 立即用于恢复，`git diff HEAD` 确认只剩本轮预期的改动（format.py +33、settings.py 3 行），
 全绿 463 之后才部署。教训：一次性脚本不许对源文件调 `unlink`，恢复路径要用显式文件名而不是"顺手清一下"。
 
+### v1.31 投递要有两只眼睛：账本之外，成功发送也得留下一行（2026-09-27）
+08:00 的取证每次都得手工拼三样东西（`push_logs`、订阅者设置行、`logs/telegram.log`），而拼到一半
+就会发现第三样**根本没有行**：`TelegramSender.send()` 只在失败时打日志，成功投递一条都不留。
+于是「Telegram 到底收没收到」这一问，全凭账本那一条腿站着——而 v1.28 才刚证明这条腿会撒谎。
+
+1. 新增 `scripts/delivery_report.py`（只读，不写库不发消息）：按订阅者 × `morning`/`evening`
+   并排给出「窗口内几次 / 最后一次的 UTC 与本地时间 / 计划时间 / 是否被 /pause 或 v1.29 的
+   简报开关挡住 / 发送层日志里这个 chat 的最后几行」。四种「今天没有 morning 这一行」的原因
+   （没到点、他自己关了、按了暂停、真的该发而没有）在输出里是四句不同的话，不用人来推。
+2. `send()` 成功时补一行 `delivered N chars to chat_id=… as HTML`，这条审计才有第二条腿；
+   失败路径不会留下这行（用例锁住：`forbidden()` 之后不能有 `delivered`）。
+3. 时间口径写在输出第一行（**日志=北京时间，账本=naive UTC，差 8 小时**），因为这个读错一次
+   就会把「昨晚 20:01 的晚报」当成「今早」。
+
+473 passed（+10：9 个脚本分支用例 + 1 个发送日志用例）。四处变异验证全红：去掉「是否到点」的
+比较、不认 `/pause`、不认简报开关、日志行不按 `chat_id=` 过滤。
+线上实测（部署后 `stamp=20260926T224927Z`，两台 active、`schema=ok`、Traceback 数与部署前一致）：
+`--hours 168 --kind morning` 对真实订阅者报 `窗口内 3 次 · ⏳ 今天还没到点（计划 08:00）·
+上一份是本地 09-26 06:22:50`，对那行测试残留报 `❓ 库里从来没有 morning 的账本行`。
+
+**顺手发现、下一件要查的事**：那份「上一份早报」的账本时间是**本地 06:22:50**，比计划的 08:00
+早了 1 小时 38 分——早报不应该在点之前发。要么那天他真的在 06:22 收到过一份（那 08:00 那次
+仍然是漏掉的），要么 `record_push` 的时刻与真正的发送时刻不是一回事。这一问还没有答案，已经写进
+「仍未解决」；08:00 那一次之后，这条脚本 + `logs/scheduler.log` 就能对齐它。
+**「成功投递日志行」目前没有线上样本**（不拿测试消息吵他），第一个真实样本就是今天 08:00。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -1276,6 +1305,10 @@ CLI 启动路径与新闻列表这两类"他第一时间会撞到、出事最难
 v1.24 只关住了新水：库里**已经存下的 30 条 `meta.stars=0` 仓库行还在**（它们会出现在
 `/搜索` 的 14-30 天结果里，只是再也挤不进简报，因为都过了 24 小时窗口）。
 把它们统一标 `filtered_out=1` 是一次批量写他库的操作，没有替他做决定 —— 一句话就能做，等他发话。
+**早报可以出现在计划时间之前**：真实订阅者的 morning 账本行落在本地 06:22:50，而
+`daily_time` 是 08:00（早 1 小时 38 分）。v1.26 的 `_digest_due` 窗口矩阵里没有这一格，所以现在
+还不能判断是「提前发」还是「记账时刻≠发送时刻」。08:00 之后用 `scripts/delivery_report.py` 与
+`logs/scheduler.log` 对齐一次就有答案，这一步还没做。
 真库 `users` 里还留着一行 `chat_id=111111111` 的订阅者（0 次推送，创建于 2026-09-26 18:59 UTC）：
 这是测试用的假 chat id 写进了生产库，而且它**不在 `ALLOWED_CHAT_IDS` 里**（线上 env 实测），
 所以永远不会收到任何东西，只会让"订阅者数"多 1。删它同样是一次写他库的操作，等他发话。

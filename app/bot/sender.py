@@ -68,6 +68,11 @@ class TelegramSender:
                     disable_web_page_preview=not preview,
                     parse_mode=parse_mode,
                 )
+                # The ledger says "we decided to send"; this is the other witness -
+                # that Telegram actually accepted the message. scripts/delivery_report.py
+                # greps this line, so a silent success path would leave one-leg evidence.
+                log.info("delivered %d chars to chat_id=%s as %s", len(text), chat_id,
+                         parse_mode or "plain text")
                 return True
             except TelegramBadRequest as exc:
                 if parse_mode is None or "can't parse" not in str(exc).lower():
