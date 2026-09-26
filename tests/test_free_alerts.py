@@ -68,7 +68,9 @@ async def test_new_offer_is_pushed_once_and_marked(config, session, tmp_path):
     assert "限免" in sender.sent[0][1] and "刚发现的限免" in sender.sent[0][1]
     with session_scope() as s:
         assert s.get(repo.Article, article_id).free_offer_sent_at is not None
-        assert repo.pushes_since(s, user=None, kind=KIND,
+        reader = repo.get_user(s, 111)
+        assert reader is not None, "推送账本必须落在具体读者身上，而不是 user_id 为空"
+        assert repo.pushes_since(s, user=reader, kind=KIND,
                                  since=datetime.utcnow() - timedelta(minutes=5)) == 1
     # the same offer must never be announced twice
     assert await service.run([111]) == 0
@@ -98,10 +100,16 @@ async def test_cooldown_and_daily_cap_are_respected(config, session, tmp_path):
     ok, _ = service._may_send(111)
     assert ok
     with session_scope() as s:
-        repo.record_push(s, user=None, kind=KIND)
+        repo.record_push(s, user=repo.get_or_create_user(s, 111), kind=KIND)
         s.commit()
     ok, reason = service._may_send(111)
     assert not ok and "cooldown" in reason
+    # 另一个读者不该被这条冷却挡住：账本是每个人的，不是全局的。
+    with session_scope() as s:
+        other = repo.get_or_create_user(s, 222)
+        assert repo.pushes_since(s, user=other, kind=KIND,
+                                 since=datetime.utcnow() - timedelta(minutes=5)) == 0
+        assert repo.last_push_of(s, user=other, kind=KIND) is None
 
 
 async def test_paused_user_is_not_disturbed(config, session, tmp_path):

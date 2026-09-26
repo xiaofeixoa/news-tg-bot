@@ -293,7 +293,7 @@ class NewsJobs:
         if (local_now - scheduled) > timedelta(minutes=DIGEST_GRACE_MINUTES):
             return False, "window closed"
         with session_scope() as session:
-            user = repo.get_user(session, chat_id)
+            user = repo.ledger_user(session, chat_id, timezone=tz_name)
             midnight_local = scheduled.replace(hour=0, minute=0, second=0, microsecond=0)
             start_utc = midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
             count = repo.pushes_since(session, user=user, kind=kind, since=start_utc)

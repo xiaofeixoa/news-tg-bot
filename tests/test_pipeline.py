@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 
 from app.config import get_config
 from app.database import repository as repo
+from app.database.database import session_scope
 from app.database.models import Article
 from app.processing import classifier, summarizer
 from app.processing.normalize import build_article
@@ -884,3 +885,105 @@ async def test_attach_tags_ignores_a_link_another_session_already_wrote(session)
     session.commit()
     links = session.execute(select(article_tags).where(article_tags.c.article_id == stored.id))
     assert len(links.all()) == 1
+
+
+# ------------------------------------------------ 简报窗口：08:00 到底会不会发
+class _FrozenDatetime:
+    """`_digest_due` 读 `datetime.now(zone(tz))`；把钟交给我们。"""
+
+    def __init__(self, moment):
+        self._moment = moment
+
+    def now(self, tz=None):
+        return self._moment.astimezone(tz) if tz else self._moment
+
+    def __getattr__(self, name):          # datetime.min / datetime(...) 照常可用
+        return getattr(datetime, name)
+
+
+def shanghai(hour: int, minute: int = 0, *, days_ago: int = 0):
+    """The frozen clock: today (or N days back) at HH:MM in his own timezone."""
+    from zoneinfo import ZoneInfo
+    local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
+    local = local.replace(hour=hour, minute=minute, second=0, microsecond=0) - timedelta(days=days_ago)
+    return local.astimezone(timezone.utc)
+
+
+def naive_stamp(hour: int, minute: int = 0, *, days_ago: int = 0) -> datetime:
+    """库里 PushLog.created_at 是 naive UTC；这就是"本地某天 HH:MM"的那个值。"""
+    return shanghai(hour, minute, days_ago=days_ago).replace(tzinfo=None)
+
+
+def digest_jobs(monkeypatch, hour: int, minute: int = 0):
+    from app.scheduler import jobs as jobs_mod
+    monkeypatch.setattr(jobs_mod, "datetime", _FrozenDatetime(shanghai(hour, minute)))
+    return jobs_mod.NewsJobs(get_config())
+
+
+@pytest.mark.parametrize("hour,minute,expected", [
+    (7, 59, "not yet due"),
+    (8, 0, "due"),
+    (8, 20, "due"),
+    (8, 45, "due"),                      # 宽限期是"不超过 45 分钟"
+    (8, 46, "window closed"),
+])
+def test_the_morning_window_is_a_real_window(monkeypatch, hour, minute, expected):
+    jobs = digest_jobs(monkeypatch, hour, minute)
+    ok, note = jobs._digest_due(111, "morning", "08:00", "Asia/Shanghai")
+    assert note == expected, f"{hour:02d}:{minute:02d} 判定成 {note!r}，期望 {expected!r}"
+    assert ok is (expected == "due")
+
+
+def test_a_bad_clock_string_is_reported_not_crashed(monkeypatch):
+    jobs = digest_jobs(monkeypatch, 8, 0)
+    ok, note = jobs._digest_due(111, "morning", "morning", "Asia/Shanghai")
+    assert not ok and "bad time" in note
+
+
+def test_yesterdays_send_does_not_silence_today(monkeypatch, session):
+    from app.database import repository as repo
+    from app.database.models import PushLog
+
+    jobs = digest_jobs(monkeypatch, 8, 5)
+    with session_scope() as s:
+        user = repo.get_or_create_user(s, 111)
+        s.add(PushLog(user_id=user.id, kind="morning",
+                      created_at=naive_stamp(8, 5, days_ago=1)))
+        s.commit()
+    ok, note = jobs._digest_due(111, "morning", "08:00", "Asia/Shanghai")
+    assert ok and note == "due", f"昨天发过不该影响今天：{note}"
+
+
+def test_another_readers_send_does_not_silence_this_one(monkeypatch):
+    """账本曾经是全局的：第二个订阅者会因为别人收到过而永远收不到。"""
+    from app.database import repository as repo
+    from app.database.models import PushLog
+
+    jobs = digest_jobs(monkeypatch, 8, 5)
+    with session_scope() as s:
+        other = repo.get_or_create_user(s, 222, timezone="Asia/Shanghai")
+        s.add(PushLog(user_id=other.id, kind="morning", created_at=naive_stamp(8, 0)))
+        s.commit()
+    ok, note = jobs._digest_due(111, "morning", "08:00", "Asia/Shanghai")
+    assert ok and note == "due", f"别人的推送记录不该挡住他：{note}"
+
+    with session_scope() as s:
+        mine = repo.get_or_create_user(s, 111, timezone="Asia/Shanghai")
+        s.add(PushLog(user_id=mine.id, kind="morning", created_at=naive_stamp(8, 0)))
+        s.commit()
+    ok, note = jobs._digest_due(111, "morning", "08:00", "Asia/Shanghai")
+    assert not ok and note == "already sent today"
+
+
+def test_evening_is_not_blocked_by_the_morning_send(monkeypatch):
+    from app.database import repository as repo
+    from app.database.models import PushLog
+
+    jobs = digest_jobs(monkeypatch, 20, 5)
+    with session_scope() as s:
+        user = repo.get_or_create_user(s, 111, timezone="Asia/Shanghai")
+        s.add(PushLog(user_id=user.id, kind="morning", created_at=naive_stamp(8, 0)))
+        s.commit()
+    ok, note = jobs._digest_due(111, "evening", "20:00", "Asia/Shanghai")
+    assert ok and note == "due", f"早报发过不该挡住晚报：{note}"
+

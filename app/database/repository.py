@@ -485,6 +485,20 @@ def trending(session: Session, hours: int = 48, limit: int = 10) -> list[Article
 
 
 # ------------------------------------------------------------------- users
+def ledger_user(session: Session, chat_id: int | None, *,
+                timezone: str = "Asia/Shanghai") -> User | None:
+    """The row the push ledger is keyed on - never a global fall-through.
+
+    `pushes_since(user=None)` means "no user filter", which is the last thing a
+    per-chat "already sent today" check or a daily cap should ever fall back to:
+    one reader's pushes would silence another's briefing. A chat without a row
+    yet gets one, so the ledger always belongs to somebody.
+    """
+    if chat_id is None:
+        return None
+    return get_or_create_user(session, chat_id, timezone=timezone)
+
+
 def get_or_create_user(session: Session, chat_id: int, *, user_id: int | None = None,
                        display_name: str | None = None, timezone: str = "Asia/Shanghai",
                        language: str = "zh") -> User:
@@ -566,24 +580,38 @@ def record_push(session: Session, *, user: User | None = None, kind: str,
 
 
 def pushes_since(session: Session, *, user: User | None, kind: str, since: datetime) -> int:
+    """How often this reader has been pushed `kind` since `since`.
+
+    A missing user is not "count everybody": that default is how one reader's
+    sends can silently satisfy another reader's daily cap or "already sent
+    today" check. No caller wants the global count, so there is no way to ask
+    for it.
+    """
+    if user is None:
+        return 0
     stmt = (
         select(func.count(PushLog.id))
-        .where(PushLog.kind == kind, PushLog.created_at >= since)
+        .where(PushLog.kind == kind, PushLog.created_at >= since,
+               PushLog.user_id == user.id)
     )
-    if user is not None:
-        stmt = stmt.where(PushLog.user_id == user.id)
     return session.scalar(stmt) or 0
 
 
 def last_push_of(session: Session, *, user: User | None, kind: str) -> PushLog | None:
+    """This reader's most recent `kind` push; None if they have had none.
+
+    Same rule as `pushes_since`: without a reader there is no cooldown to look
+    up, and borrowing somebody else's last send would hold one chat's alerts
+    back because another chat received one a minute ago.
+    """
+    if user is None:
+        return None
     stmt = (
         select(PushLog)
-        .where(PushLog.kind == kind)
+        .where(PushLog.kind == kind, PushLog.user_id == user.id)
         .order_by(PushLog.created_at.desc())
         .limit(1)
     )
-    if user is not None:
-        stmt = stmt.where(PushLog.user_id == user.id)
     return session.scalar(stmt)
 
 

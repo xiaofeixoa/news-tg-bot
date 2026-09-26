@@ -116,7 +116,9 @@ class FreeAlertService:
         cooldown = as_int(self.cfg.get("cooldown_minutes"), 90)
         max_per_day = as_int(self.cfg.get("max_per_day"), 4)
         with session_scope() as session:
-            user = repo.get_user(session, chat_id) if chat_id else None
+            # Per reader from the first lookup: a missing row used to turn the cap
+            # and the cooldown into a count over everybody's pushes.
+            user = repo.ledger_user(session, chat_id, timezone=self.config.settings.timezone)
             if user is not None and user.paused:
                 return False, "user paused"
             day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)

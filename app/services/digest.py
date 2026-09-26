@@ -203,7 +203,9 @@ class DigestService:
         if not cfg.settings.breaking_news_enabled or not breaking_cfg.get("enabled", True):
             return False, "breaking news disabled in config"
         with session_scope() as session:
-            user = repo.get_user(session, chat_id) if chat_id else None
+            # Per reader, always: the cap and the cooldown below are meaningless if a
+            # missing row turns them into a global count.
+            user = repo.ledger_user(session, chat_id, timezone=cfg.settings.timezone)
             if user is not None:
                 if user.paused or not user.breaking_enabled:
                     return False, "user paused / breaking off"
@@ -245,7 +247,7 @@ class DigestService:
     def record_delivery(self, *, chat_id: int | None, digest: Digest) -> None:
         if digest.kind == "breaking":
             with session_scope() as session:
-                user = repo.get_user(session, chat_id) if chat_id else None
+                user = repo.ledger_user(session, chat_id, timezone=self.config.settings.timezone)
                 for article_id in digest.article_ids:
                     article = session.get(Article, article_id)
                     repo.record_push(session, user=user, kind="breaking", article_id=article_id,
@@ -255,7 +257,7 @@ class DigestService:
             return
         self.news.mark_sent(digest.article_ids)
         with session_scope() as session:
-            user = repo.get_user(session, chat_id) if chat_id else None
+            user = repo.ledger_user(session, chat_id, timezone=self.config.settings.timezone)
             repo.record_push(session, user=user, kind=digest.kind)
             session.commit()
 
