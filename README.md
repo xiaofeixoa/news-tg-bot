@@ -1114,6 +1114,42 @@ anr-jump 上第一次事故的原始异常是 `database is locked`（`busy_timeo
 
 427 passed（+9）。
 
+### v1.27 采集层是最没人管、又最容易"静默零产出"的一层（2026-09-26）
+用 coverage 把整个套件跑了一遍（本地 `.venv` 里装 `coverage`，不进 requirements、
+不上服务器）：总分支覆盖 74.7%，最薄的正是把 API 响应变成条目的那几个采集器 —
+`hackernews 24.3% / arxiv 22.1% / reddit 18.8% / youtube 19.8%`。
+这一层的危险方式和 v1.9 那扇打不开的突发门一样：**上游改字段不会报错，只会让某一源
+变成"今天没什么新闻"**，而他看到的只是条目变少。
+
+先按数据决定投哪里（近 7 天实际产出）：hackernews 58 行、arxiv 42 行、github 74 行、
+rss 546 行；reddit 采集器 0 行 — 一查配置，5 个 reddit 源全是 `enabled: false`
+（.json 对机房 IP 403，我们走的是 Reddit 的 .rss，那 137 行挂在 "Reddit LocalLLaMA RSS" 下）；
+youtube 源同样 `enabled: false`（phase 3 未启用）。所以这轮把力气花在真正在跑的 HN/arXiv，
+reddit 只补了纯函数（哪天他打开不至于坏）。
+
+新增 `tests/test_collectors_parse.py` 9 个用例，fixture 的形状来自**部署机上抓的真实响应**
+（HN front page 那条 "Revealing the details of how OpenAI agents hacked Hugging Face"
+heat 683、`created_at 2026-09-25T21:09:27Z` 就是当天线上数据）：
+- HN：外链帖用外链入库（和 RSS 覆盖同一篇文章时才能去重）、Ask HN 无外链回落讨论页、
+  同一条出现在两个查询里只留一条、heat 取自 points、
+  **并把"我们依赖的服务端过滤"钉住**：请求里必须带 `points>=<min_points>` 与 `created_at_i>`；
+- arXiv：Atom 解析（标题/摘要/作者串/arxiv_id/pdf 链接/主领域）、关键词门挡掉非 AI 论文、
+  `sortBy=submittedDate&sortOrder=descending` 必须是这个（我实测过默认查询会回 2020 年的论文），
+  空 feed 不炸；
+- Reddit：置顶/广告/低赞/AutoModerator/跨版推荐帖一律不入，自帖按 permalink、外链帖按文章 URL。
+
+顺带把一层容易踩的契约写进断言：采集器交的是**带时区的 UTC**，`build_article()` 才抹成
+naive UTC；库里窗口比较用的都是 naive。我第一版断言直接写成 naive 就红了 — 红得有道理，
+于是改成两层都测。
+
+覆盖率变化：`hackernews 24.3% → 84%`、`arxiv 22.1% → 78%`、`reddit 18.8% → 65%`。
+四处变异验证全部被抓：去掉 HN 关键词门、把 HN 外链换成讨论页、arXiv 排序改成 relevance、
+reddit 不再拦置顶帖。这一轮只动测试与文档，没有改运行时行为，所以**没有部署**
+（每次重启都会跑一轮采集、花掉共享的 GitHub 匿名配额，并且临近 08:00 不想动窗口）；
+`app/` 与 `config/` 树哈希三台机器仍然一致。
+
+436 passed（+9）。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -1135,6 +1171,11 @@ anr-jump 上第一次事故的原始异常是 `database is locked`（`busy_timeo
 所以"这条什么时候被处理的"无法回答，突发与翻译的历史归因只能靠日志时间戳反推（见 v1.22）。
 `database is locked` 本身还没查（`busy_timeout` 已经是 30 秒，说明撞上的是长写事务或
 WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump 上）。
+覆盖率仍有薄处（v1.27 实测总 74.7%）：`bot/sender.py 46.7%`、`bot/handlers/settings.py 55.2%`、
+`bot/handlers/news.py 55.8%`、`scheduler/jobs.py 56.1%`、`main.py 20.3%`——
+发送失败重试与 /设置 写入这两类"他第一时间会撞到、出事最难复现"的路径；
+`collectors/youtube.py 19.8%` 与 reddit 采集器对应的是**当前 disabled 的源**，
+真要用之前需要先补测试（v1.27 只补了 reddit 的纯函数部分）。
 v1.24 只关住了新水：库里**已经存下的 30 条 `meta.stars=0` 仓库行还在**（它们会出现在
 `/搜索` 的 14-30 天结果里，只是再也挤不进简报，因为都过了 24 小时窗口）。
 把它们统一标 `filtered_out=1` 是一次批量写他库的操作，没有替他做决定 —— 一句话就能做，等他发话。
