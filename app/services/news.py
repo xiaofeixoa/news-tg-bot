@@ -196,18 +196,19 @@ class NewsService:
     # ---------------------------------------------------------------- reads
     def latest(self, *, limit: int = 10, min_score: float | None = None,
                hours: int = 72, category: str | None = None,
-               order_by_score: bool = False) -> list[ArticleView]:
+               order_by_score: bool = False, skip_sent: bool = False) -> list[ArticleView]:
         """Recent articles. `order_by_score` asks for the best, not the newest.
 
         Both orders matter: /最新 wants arrival, while a briefing that lists
-        "the 10 newest" ends up being whatever feed polled last.
+        "the 10 newest" ends up being whatever feed polled last. `skip_sent`
+        leaves out what an earlier briefing already delivered.
         """
         since = datetime.utcnow() - timedelta(hours=hours)
         threshold = min_score if min_score is not None else self.default_min_score()
         with session_scope() as session:
             articles = repo.query_articles(
                 session, since=since, min_score=threshold, category=category,
-                limit=limit * 2, order_by_score=order_by_score,
+                limit=limit * 2, order_by_score=order_by_score, skip_sent=skip_sent,
             )
             return _views(session, articles[:limit])
 

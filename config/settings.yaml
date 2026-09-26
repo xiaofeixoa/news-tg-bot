@@ -208,13 +208,24 @@ digest:
   morning:
     enabled: true
     top_items: 10
-    min_score: 55
-    header: "☀️ AI Morning Briefing"
+    # 45, not 55: at 55 the 2026-09-26 pool lost "Anthropic to pay Akamai
+    # $11.6 billion..." (54) and every other press story in the 45-54 band, while
+    # Reddit/HN chatter cleared the bar on keyword-hit counts. With a 24h window,
+    # a per-source cap and only 8-10 slots, the ranking does the filtering - the
+    # floor only has to keep out the 尾部垃圾.
+    min_score: 45
+    window_hours: 24
+    header: "☀️ AI 早报"
   evening:
     enabled: true
     top_items: 8
-    min_score: 55
-    header: "🌙 AI Evening Briefing"
+    min_score: 45
+    # 晚报 12 点窗口实测等于只有社区源：08:00-20:00 北京 = 00:00-12:00 UTC，
+    # 美国媒体那半天在睡觉。2026-09-26 的晚报 8 条里 6 条来自同一个 subreddit，
+    # 而当天 Anthropic/Akamai 116 亿美元、法院裁定这些真实新闻一条没进。
+    # 拉到 24 小时后靠 is_sent 去重（早报发过的不再发），而不是靠缩短窗口。
+    window_hours: 24
+    header: "🌙 AI 晚报"
   # Sections rendered in this order; unknown categories go to "Other"
   section_order:
     - AI Models
@@ -243,7 +254,40 @@ breaking:
   threshold: 90
   max_per_day: 5
   cooldown_minutes: 60
-  header: "🚨 AI BREAKING NEWS"
+  header: "🚨 AI 突发新闻"
+  # 规则模式（没有 LLM key）根本打不出 90 分：实测 7 天 564 篇未过滤文章里最高
+  # 只有 78 分，一手博客最高 76.9 分——重要性/相关性来自关键词命中数，上限 85/88。
+  # 所以那套阈值下突发功能等于没做（线上 is_breaking 合计为 0）。规则模式改用
+  # 三重门槛：标题里有"事件词" + 一手来源 + 时效，而不是单纯把分数线调低。
+  rule:
+    min_score: 45
+    min_source_quality: 80
+    max_age_hours: 24
+    # 简报里 🔥/⭐/🔹 的分线：规则模式满分 100 但实测最高 78，沿用 90/75/60
+    # 就永远没有 🔥，而 ⭐ 反而比 🔥 更稀有。
+    hot_score: 72
+    star_score: 62
+    dot_score: 52
+    event_patterns:
+      - '\b(announc\w+|unveil\w+|introduc\w+)\b'
+      - '\bnow (available|live|generally available)\b'
+      - '\b(acquir\w+|merger|raises|raising|funding round|valuation)\b'
+      - '\b(lawsuit|\bsue\w+|indicted|antitrust|court|ruling|ruled|verdict|settlement|investigat\w+|banned)\b'
+      - '\b(outage|breach|hacked|exploit\w*|vulnerabilit\w+|data\s+leak)\b'
+      - '\$\s?\d+(\.\d+)?\s?(b|bn|billion)\b'
+    # 命中事件词但不算新闻的标题：版本号刷新的 release、社区自荐、招聘
+    exclude_titles:
+      - '^v?\d+\.\d+'
+      - '^show hn'
+      - '^eli5'
+      - '^\[p\]'
+      - '^hiring'
+    # 二手/社区渠道：同样的词在这里是讨论，不是发布
+    exclude_sources:
+      - 'reddit'
+      - 'arxiv'
+      - 'hacker news free'
+      - 'trending'
 
 bot:
   news_limit: 10

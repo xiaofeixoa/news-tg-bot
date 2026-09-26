@@ -9,6 +9,7 @@ from aiogram.types import Message
 from app.bot.keyboards.inline import refresh_keyboard
 from app.config import AppConfig
 from app.logging_setup import get_logger
+from app.processing import breaking
 from app.services import format as F_fmt
 from app.services.news import NewsService
 
@@ -35,7 +36,7 @@ async def cmd_start(message: Message, news: NewsService, app_config: AppConfig) 
         F_fmt.status_line(stats),
         "",
         f"☀️ 早报 {user['daily_time']} · 🌙 晚报 {user['evening_time']} · "
-        f"🚨 突发 {'开' if user['breaking_enabled'] else '关'}（阈值 {user['breaking_threshold']:.0f}）",
+        f"🚨 突发 {'开' if user['breaking_enabled'] else '关'}（{breaking.describe()}）",
         "",
         "发 /news 看今天的新闻，或直接问我，比如「最近 AI Agent 有什么值得关注的？」。",
         "完整命令见 /help。",

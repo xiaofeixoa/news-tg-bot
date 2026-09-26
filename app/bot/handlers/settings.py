@@ -12,6 +12,7 @@ from app.bot.context import store
 from app.bot.keyboards import inline as K
 from app.config import AppConfig
 from app.logging_setup import get_logger
+from app.processing import breaking
 from app.services import format as fmt
 from app.services.llm import LLMService
 from app.services.news import NewsService
@@ -32,7 +33,7 @@ async def cmd_settings(message: Message, news: NewsService) -> None:
         "",
         f"☀️ 早报：{'开' if user['daily_enabled'] else '关'} · {user['daily_time']}（{fmt.esc(user['timezone'])}）",
         f"🌙 晚报：{'开' if user['evening_enabled'] else '关'} · {user['evening_time']}",
-        f"🚨 突发新闻：{'开' if user['breaking_enabled'] else '关'} · 阈值 {user['breaking_threshold']:.0f}",
+        f"🚨 突发新闻：{'开' if user['breaking_enabled'] else '关'} · {breaking.describe()}",
         f"📊 最低评分：{user['min_score']:.0f}",
         f"⏸ 自动推送：{'已暂停' if user['paused'] else '运行中'}",
         "",

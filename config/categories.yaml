@@ -15,6 +15,7 @@ top_categories:
 
 categories:
   "AI Models":
+    label: 模型发布
     emoji: "🤖"
     description: 模型发布、能力、评测、价格
     keywords: [model, gpt, claude, gemini, llama, deepseek, qwen, mistral, grok, weights, benchmark, sota, context window, moe, reasoning, api pricing, frontier model]
@@ -28,6 +29,7 @@ categories:
       "Other Models": []
 
   "AI Agent":
+    label: 智能体
     emoji: "🧠"
     description: Agent 框架、工具调用、自主执行
     keywords: [agent, agentic, tool use, function calling, mcp, computer use, browser use, autonomous, workflow, copilot, assistant]
@@ -39,6 +41,7 @@ categories:
       "Autonomous Agent": [autonomous, multi-agent, planner, long horizon, memory]
 
   "AI Infrastructure":
+    label: 算力与推理
     emoji: "⚙️"
     description: 算力、推理引擎、 Serving
     keywords: [gpu, cuda, nvidia, amd, tpu, inference, serving, vllm, sglang, tensorrt, quantization, kv cache, cluster, datacenter, data center, h100, h200, b200, mi300]
@@ -51,6 +54,7 @@ categories:
       Serving: [serving, deployment, kubernetes, autoscaling, endpoint]
 
   "Open Source":
+    label: 开源生态
     emoji: "🧑‍💻"
     description: 开源项目、权重、数据集、工具链
     keywords: [open source, open-source, github, hugging face, huggingface, weights released, dataset, apache-2.0, mit license, wisp, repo]
@@ -61,6 +65,7 @@ categories:
       Tools: [sdk, library, toolkit, cli, framework]
 
   "Research":
+    label: 论文与方法
     emoji: "📚"
     description: 论文、新方法、评测基准
     keywords: [paper, arxiv, research, study, benchmark, state of the art, method, evaluation, dataset]
@@ -72,6 +77,7 @@ categories:
       "Computer Vision": [cv, detection, segmentation, diffusion, video understanding]
 
   "Companies":
+    label: 公司动态
     emoji: "🏢"
     description: 公司层面：融资、组织、合作、政策
     keywords: [funding, raises, acquisition, hires, partnership, lawsuit, regulation, valuation, ipo, datacenter deal, revenue]
@@ -84,6 +90,7 @@ categories:
       Microsoft: [microsoft, satya nadella, azure]
 
   "AI Applications":
+    label: 产品与应用
     emoji: "🎯"
     description: 产品与应用场景
     keywords: [launches, app, product, feature, search, writing, design, enterprise, healthcare, education, robot]
@@ -95,3 +102,5 @@ categories:
       Productivity: [productivity, notes, office, meeting, search assistant]
 
 fallback_category: "Other"
+# 未分类条目在简报里显示的中文栏目名
+fallback_label: "其他"

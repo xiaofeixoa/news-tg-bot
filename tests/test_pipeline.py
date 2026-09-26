@@ -359,8 +359,10 @@ async def test_digest_renders_sections_and_stays_under_telegram_limit(session, f
     digest = await get_digest_service().generate("morning", chat_id=111111111, llm=fake_llm)
     assert digest.messages and not digest.empty
     joined = "\n\n".join(digest.messages)
-    assert "AI Morning Briefing" in joined
+    assert "☀️ AI 早报" in joined, "简报自己的标题必须是中文"
+    assert "AI Morning Briefing" not in joined
     assert "今日重点" in joined
+    assert "模型发布" in joined, "栏目名也要中文：taxonomy 的英文键不该露给他看"
     assert len(digest.messages[0]) <= 4096
     assert "<a href=" in joined, "headlines link out"
 
@@ -379,6 +381,7 @@ async def test_breaking_guard_respects_cooldown_and_daily_cap(session):
     session.commit()
     article = session.get(Article, stored.id)
     article.final_score = 96
+    article.source_quality = 95          # 一手来源：规则模式的突发门槛之一
     article.is_processed = True
     article.category = "AI Models"
     session.commit()
@@ -583,3 +586,152 @@ def test_status_line_reports_enabled_sources_not_the_config_file(session):
     healthy = status_line({**stats, "sources_failing": 0})
     assert "报错" not in healthy, "a clean system must not advertise an error column"
     assert "3 个正在报错" in status_line({**stats, "sources_failing": 3})
+
+
+# ------------------------------------------------------- 突发 alert gate
+def _alert_like(title: str, *, score: float = 60.0, quality: float = 95.0,
+                hours_ago: float = 2.0, source: str = "OpenAI"):
+    """The attributes the gate reads, without a database row."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(final_score=score, source_quality=quality, source_name=source,
+                           title=title,
+                           published_at=datetime.utcnow() - timedelta(hours=hours_ago))
+
+
+def test_rule_mode_breaking_needs_an_event_a_publisher_and_freshness():
+    """The gate that replaced the unreachable bar of 90.
+
+    Headlines are the ones measured on the live box: the accepted set is what a
+    reader would call news, the rejected set is what a score-only cut would have
+    woken him up for.
+    """
+    from app.processing import breaking
+
+    cfg = get_config()
+    accept = [
+        "Anthropic to pay Akamai $11.6 billion over seven years in cloud deal",
+        "Introducing GPT-6 Sol and Luna",
+        "Court rules Trump can blacklist Anthropic for refusing to enable Claude feature",
+        "xAI's Grok 4.6 is now available in Amazon Bedrock",
+        "OpenAI agent hacked government website, PM says",
+    ]
+    for title in accept:
+        assert breaking.gate(_alert_like(title), config=cfg, ai_enabled=False)[0], title
+
+    reject = [
+        # same words, second-hand community source
+        (_alert_like("OpenAI agent hacked government website", source="Reddit LocalLLaMA RSS"), "社区源"),
+        # a version bump is a release, not an announcement
+        (_alert_like("v2.1.283 released in anthropics/claude-code"), "版本号"),
+        # no event at all
+        (_alert_like("TensorRT Edge-LLM Completes the MLPerf Edge Agentic Benchmark"), "无事件词"),
+        # quality below the first-hand floor
+        (_alert_like("Anthropic announces Claude for Enterprise", quality=65.0), "二手渠道"),
+        # stale: collected late, published long ago
+        (_alert_like("Anthropic announces Claude for Enterprise", hours_ago=30), "过期"),
+        # under the score floor
+        (_alert_like("Anthropic announces Claude for Enterprise", score=30.0), "低分"),
+    ]
+    for article, why in reject:
+        ok, reason = breaking.gate(article, config=cfg, ai_enabled=False)
+        assert not ok, f"{why}: {reason}"
+
+
+def test_ai_mode_breaking_still_uses_the_configured_bar():
+    from app.processing import breaking
+
+    cfg = get_config()
+    ok, _ = breaking.gate(_alert_like("Whatever the headline is", score=93.0),
+                          config=cfg, ai_enabled=True)
+    assert ok, "the model's importance score is the judgement in AI mode"
+    ok, reason = breaking.gate(_alert_like("Introducing a major model", score=88.0),
+                               config=cfg, ai_enabled=True)
+    assert not ok and "88" in reason
+
+
+def test_breaking_hot_bar_keeps_the_emoji_ladder_ordered():
+    from app.processing import breaking
+
+    cfg = get_config()
+    hot, star, dot = breaking.emoji_bars(cfg, ai_enabled=False)
+    assert hot < 78, "规则模式实测最高 78 分，🔥 必须够得着"
+    assert hot > star > dot, "否则 ⭐ 比 🔥 还稀有，图例就反了"
+    assert breaking.emoji_bars(cfg, ai_enabled=True)[0] == 90.0
+
+
+@pytest.mark.asyncio
+async def test_rule_mode_round_marks_and_logs_the_breaking_candidate(session, monkeypatch):
+    """End to end: a real event headline from a first-hand source alerts."""
+    from app.processing import pipeline
+
+    stored = repo.save_article(session, feed_item(
+        "OpenAI announces GPT-6 with a 1 million token context window",
+        "https://openai.com/index/announces-gpt-6"))
+    session.commit()
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(pipeline.log, "info",
+                        lambda *a, **k: seen.append(a), raising=False)
+    stats = await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=10)
+    session.commit()
+
+    assert stats.breaking == [stored.id], "规则模式也必须能触发突发"
+    row = session.get(Article, stored.id)
+    assert row.meta["breaking_reason"].startswith("event")
+    # caplog cannot see these loggers (news.* does not propagate), so the
+    # assertion is on the monkeypatched log object.
+    logged = [" ".join(str(part) for part in entry) for entry in seen]
+    assert any("breaking candidate" in line and "event" in line for line in logged), \
+        "突发决定必须有日志：过去 0 条突发看起来像新闻少，其实是功能死了"
+
+
+def test_briefing_backfill_shares_the_leftover_slots_round_robin():
+    """Backfilling in score order is how one feed took 6 of 8 briefing slots.
+
+    On 2026-09-26 the 12-hour evening window contained no press coverage at all,
+    so after the per-source cap bit the leftovers were re-added straight from
+    Reddit - the cap decided nothing.
+    """
+    from app.services.digest import select_briefing
+
+    pool = ([_Item("OpenAI", 70.0 + i) for i in range(3)]
+            + [_Item("Reddit", 60.0 - i) for i in range(9)]
+            + [_Item("Ars", 50.0 - i) for i in range(9)])
+    picked = select_briefing(pool, top_items=11, max_per_source=3)
+    sources = [p.source_name for p in picked]
+
+    assert len(picked) == 11
+    assert sources.count("Reddit") == sources.count("Ars") == 4, sources
+
+
+@pytest.mark.asyncio
+async def test_evening_briefing_does_not_repeat_the_morning_one(session):
+    """Widening the window to 24h is only safe because sent items are skipped.
+
+    Both briefings now look back a day - the evening one has to, or it covers
+    00:00-12:00 UTC and finds nothing but community posts - so the second of the
+    two must not reprint what the first already delivered.
+    """
+    from app.services.digest import get_digest_service
+
+    for source, base in (("OpenAI", 1), ("NVIDIA", 101), ("Hacker News", 201), ("Reddit", 301)):
+        for i in range(6):
+            repo.save_article(session, feed_item(
+                f"{source} releases a new model with lower API pricing and better reasoning {base + i}",
+                f"https://example.com/{source.lower()}-{base + i}", source=source))
+    session.commit()
+    await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=40)
+    session.commit()
+
+    service = get_digest_service()
+    news_service = service.news
+    news_service.user_for(111111111)
+    morning = await service.generate("morning", chat_id=111111111, llm=_SilentLLM())
+    assert morning.article_ids and morning.messages
+    service.record_delivery(chat_id=111111111, digest=morning)
+
+    evening = await service.generate("evening", chat_id=111111111, llm=_SilentLLM())
+    assert evening.article_ids, "24 小时窗口不该空手"
+    assert not set(evening.article_ids) & set(morning.article_ids), \
+        "早报发过的内容不能再出现在晚报里"

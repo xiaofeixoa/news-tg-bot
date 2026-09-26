@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
 from app.config import AppConfig, get_config
+from app.processing import breaking
 from app.processing.normalize import shorten
 from app.services.news import ArticleView
 
@@ -53,12 +54,12 @@ def short_date(value: datetime | None, tz_name: str = "UTC") -> str:
 
 def score_emoji(score: float, config: AppConfig | None = None) -> str:
     config = config or get_config()
-    threshold = float(config.get("breaking.threshold", 90))
-    if score >= threshold:
+    hot, star, dot = breaking.emoji_bars(config)
+    if score >= hot:
         return "🔥"
-    if score >= 75:
+    if score >= star:
         return "⭐"
-    if score >= 60:
+    if score >= dot:
         return "🔹"
     return "▫️"
 
@@ -201,7 +202,7 @@ def section_blocks(
     for category in ordered_keys:
         members = grouped[category]
         marker = emoji_table.get(category, "📰")
-        text = f"<b>{marker} {esc(category)}</b>\n" + "\n".join(
+        text = f"<b>{marker} {esc(config.category_label(category))}</b>\n" + "\n".join(
             line(a, number + i) for i, a in enumerate(members)
         )
         blocks.append(text)

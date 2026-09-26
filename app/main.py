@@ -22,6 +22,7 @@ from app.config import AppConfig, get_config
 from app.bot.errors import BotNotConfigured
 from app.database.database import init_db
 from app.logging_setup import get_logger, setup_logging
+from app.processing import breaking
 from app.scheduler.jobs import NewsJobs, begin_shutdown, create_scheduler, shutdown
 
 log = get_logger("app")
@@ -72,9 +73,10 @@ async def self_check(config: AppConfig) -> int:
     llm = LLMService(config)
     print(f"LLM            : {'可用 ' + config.settings.llm_model if llm.enabled else '不可用（规则模式）'}")
     print(f"早报/晚报      : {config.settings.daily_digest_time} / {config.settings.evening_digest_time}")
-    print(f"Breaking       : threshold={config.settings.breaking_news_threshold} "
-          f"max/day={config.settings.max_breaking_news_per_day} "
-          f"cooldown={config.settings.breaking_cooldown_minutes}min")
+    print(f"突发           : {breaking.describe(config, ai_enabled=llm.enabled)}"
+          + ("" if not config.settings.breaking_news_enabled else
+             f" · 每天最多 {config.settings.max_breaking_news_per_day} 条"
+             f" · 间隔 {config.settings.breaking_cooldown_minutes} 分钟"))
     print("-" * 46)
     if problems:
         print("需要注意：")

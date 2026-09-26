@@ -339,10 +339,16 @@ def query_articles(
     offset: int = 0,
     order_by_score: bool = False,
     include_duplicates: bool = False,
+    skip_sent: bool = False,
 ) -> list[Article]:
     stmt = select(Article).where(Article.is_archived.is_(False), Article.filtered_out.is_(False))
     if require_processed:
         stmt = stmt.where(Article.is_processed.is_(True))
+    if skip_sent:
+        # A briefing that overlaps the day's other briefing must not repeat items
+        # it already delivered. `IS NOT 1` rather than `= 0`: rows written before
+        # the column had a default carry NULL and must stay eligible.
+        stmt = stmt.where(Article.is_sent.is_not(True))
     if since:
         stmt = stmt.where(Article.published_at >= since)
     if until:

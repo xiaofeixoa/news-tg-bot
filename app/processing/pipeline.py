@@ -21,7 +21,7 @@ from app.config import AppConfig, as_int, get_config
 from app.database import repository as repo
 from app.database.models import Article, Source
 from app.logging_setup import get_logger
-from app.processing import classifier, deduplicate, enrich, scorer, summarizer, tagger
+from app.processing import breaking, classifier, deduplicate, enrich, scorer, summarizer, tagger
 from app.processing.normalize import is_blocked_title, is_blocked_url
 from app.services.llm import LLMService
 
@@ -253,7 +253,6 @@ async def process_pending(
         return stats
     stats.scanned = len(articles)
     breaking_enabled = bool(config.get("breaking.enabled", True)) and bool(config.settings.breaking_news_enabled)
-    breaking_threshold = float(config.get("breaking.threshold", config.settings.breaking_news_threshold))
     ai_enabled = bool(config.get("llm.enabled", True)) and llm.enabled
 
     if not ai_enabled:
@@ -367,8 +366,15 @@ async def _process_one(
             article.process_error = f"ai-degraded: {degraded}"[:300]
             article.meta = {**(article.meta or {}), "ai_degraded": True}
 
-    if (article.final_score or 0) >= float(config.get("breaking.threshold", config.settings.breaking_news_threshold)):
+    verdict, why = breaking.gate(article, config=config, ai_enabled=ai_enabled)
+    if verdict:
+        # Recorded on the row so a live alert can be audited afterwards, and
+        # logged: this feature ran for days with no log line at all, which is
+        # exactly why "0 alerts" looked like "a quiet news day".
+        article.meta = {**(article.meta or {}), "breaking_reason": why}
+        log.info("breaking candidate #%s: %s - %s", article.id, (article.title or "")[:70], why)
         return "breaking"
+    log.debug("not breaking #%s: %s", article.id, why)
     return "processed"
 
 

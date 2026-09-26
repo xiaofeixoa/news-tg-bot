@@ -190,6 +190,17 @@ class AppConfig:
 
     # ---- convenience views -------------------------------------------
     @property
+    def ai_enabled(self) -> bool:
+        """Can this run actually ask a model? Costs nothing to answer.
+
+        Several features (breaking news, briefing summaries) have to behave
+        differently when there is no key, and `LLMService.enabled` is the same
+        two conditions - so the check lives here rather than requiring callers
+        to build a client.
+        """
+        return bool(self.get("llm.enabled", True)) and self.settings.llm_configured
+
+    @property
     def enabled_sources(self) -> list[dict[str, Any]]:
         return [s for s in self.sources if s.get("enabled", True)]
 
@@ -210,6 +221,22 @@ class AppConfig:
 
     def category_meta(self, name: str) -> dict[str, Any]:
         return (self.categories.get("categories") or {}).get(name, {}) or {}
+
+    def category_label(self, name: str | None) -> str:
+        """Chinese column heading for output.
+
+        The taxonomy keys stay English because they are also the prompt vocabulary
+        and the DB column, but a briefing section titled "🤖 AI Models" is English
+        chrome we control - and he reads Chinese.
+        """
+        if not name:
+            return str(self.categories.get("fallback_label") or "其他")
+        label = self.category_meta(name).get("label")
+        if label:
+            return str(label)
+        if name == self.fallback_category:
+            return str(self.categories.get("fallback_label") or "其他")
+        return name
 
     def subcategories(self, name: str) -> list[str]:
         return list((self.category_meta(name).get("subcategories") or {}).keys())

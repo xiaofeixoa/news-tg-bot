@@ -92,7 +92,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt   # Windows: .
 | `PROCESS_INTERVAL` | `600` | AI 处理批次间隔 |
 | `DAILY_DIGEST_TIME` / `EVENING_DIGEST_TIME` | `08:00` / `20:00` | 用户可用 `/settings` 覆盖 |
 | `MIN_ARTICLE_SCORE` | `45` | 低于该分不进入列表和简报 |
-| `BREAKING_NEWS_ENABLED` / `_THRESHOLD` / `MAX_BREAKING_NEWS_PER_DAY` / `BREAKING_COOLDOWN_MINUTES` | `true` / `90` / `5` / `60` | 突发新闻开关、阈值、每日上限、冷却 |
+| `BREAKING_NEWS_ENABLED` / `_THRESHOLD` / `MAX_BREAKING_NEWS_PER_DAY` / `BREAKING_COOLDOWN_MINUTES` | `true` / `90` / `5` / `60` | 突发新闻开关、**AI 模式**阈值、每日上限、冷却；没配 `LLM_*` 时走 `breaking.rule.*` 的"事件词 + 一手来源 + 时效"三重门槛，见 §11 v1.9 |
 | `GITHUB_TOKEN` | 空 | **强烈建议填**：releases 模式每个仓库每轮一次请求，27 个仓库 ≈ 54 次/小时，而匿名上限就是 60 次/小时。没有它 GitHub 源会长期空转（日志现在会直接说明是配额问题，而不是伪装成"今天没新闻"）。用一个无 scope 的 classic token 即可 |
 | `LOG_LEVEL` | `INFO` | |
 
@@ -572,7 +572,38 @@ aiogram Bot（`/新闻 /来源 /订阅 /设置 /免费`）→ SQLite(WAL) + syst
   第二行放"没当上标题的那一条"）—— 未翻译的英文聊天句不配抢标题。
   配额耗尽的告警只在状态跃迁时打一次并写明"未译部分保持英文"，退避跳过降到 debug。
 
+### v1.9 突发新闻真的能用了，晚报不再被一个 subreddit 承包（2026-09-26）
+- **突发此前是死功能。** 阈值 90 是给 AI 打分写的，规则模式打不出来：线上 7 天 565 篇未过滤文章
+  实测最高 78 分，`sum(is_breaking)=0`，而且**一行日志都没有**，所以"0 条突发"长得像"今天没新闻"。
+  规则模式现在改用三重门槛：**标题里有事件词**（announced / acquires / lawsuit / breach /
+  `now available` / `$11.6 billion`）+ **一手来源**（source quality ≥ 80）+ **24 小时内**，
+  命中理由写进 `meta.breaking_reason` 并 INFO 落盘。同一份语料回放只命中 4 条
+  （Nscale 33.6 亿可转债、Anthropic 付 Akamai 116 亿、法院裁定 Anthropic 可被列黑名单、
+  Crusoe 放弃 12.5 亿涡轮方案），四条都是真事件；而"把分数线降到 72"这个更简单的方案
+  选出来的是 claude-code 版本号刷新和 AWS 部署教程。
+  **真实投递已验证**：`push_logs` 第 14 行 `kind=breaking article_id=578` @ 2026-09-26 13:54:06 UTC，
+  `is_breaking=1`，`logs/app.log` 有 `breaking candidate #578 … event "Court" from a first-hand source`。
+  诚实说明：这条是我把昨天的稿子重新入队跑出来的，代码路径与新稿完全一致，只是我按了提前键。
+- **晚报被一个 subreddit 承包。** 20:00 的 12 小时窗口 = 00:00–12:00 UTC，美国媒体在睡觉：
+  实测窗口里 37 条只来自 Reddit/HN/Linux.do 四个源，8 个槽位 6 个给了 r/LocalLLaMA，
+  而当天 116 亿与法院裁定一条没进。晚报窗口 12h → **24h**，并新增 `skip_sent`
+  ——早报发过的不再发，两条简报才能安全重叠；回填改成**按来源轮转**，不再把溢出的高分整股塞回；
+  `min_score` 55 → 45（55 会把 54 分的 116 亿新闻挡在门外，而 Reddit 靠关键词命中轻松过线）。
+- **`🔥` 再也点不亮。** 沿用 AI 模式的 90 分线时规则模式永远没有 🔥，而 ⭐ 的 75 分比 🔥 更稀有。
+  阶梯按模式给：规则模式 72 / 62 / 52。
+- **中文收尾。** `☀️ AI Morning Briefing`、`🌙 AI Evening Briefing`、`🚨 AI BREAKING NEWS`
+  和栏目名 `🤖 AI Models` 都是我们自己的文案，不是待翻译的新闻：改成 `☀️ AI 早报 / 🌙 AI 晚报 /
+  🚨 AI 突发新闻`，taxonomy 新增 `label:`（模型发布 / 智能体 / 算力与推理 / 开源生态 / 论文与方法 /
+  公司动态 / 产品与应用 / 其他），英文键仍留给 prompt 与数据库列。
+  `/settings`、`/start`、`--self-check` 里那句"阈值 90"换成当前模式真正生效的判断。
+
+本地全量 329 passed；两台服务器代码树 md5 一致（`97ea034a…`）。
+**改了 2 处既有测试断言**：`test_digest_renders_sections…` 原本断言英文标题 `AI Morning Briefing`
+——那正是硬要求要消掉的，现改为断言中文且不出现英文；`test_breaking_guard…` 需补
+`source_quality=95`，因为来源等级现在是规则模式门槛之一，而那条测试关心的是冷却与日上限。
+
 ### 仍未解决
-今晚 20:00 晚报是调度 + 选择改动后的第一次真实投递（待确认）；头条"摘要 vs 标题"是否按来源类型区分未定；
-**`LLM_*` 仍未配置**（所有摘要都是规则式首句，这是唯一未动的质量杠杆）；`GITHUB_TOKEN` 在 304 之后已非必需；
-限免"已推送"账本是全局而非每订阅者；免费翻译日配额几乎每天入夜用尽。
+头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
+"Anthropic" 会被免费翻译成"人类技术"这类专名错误，这是唯一未动的质量杠杆）；
+`GITHUB_TOKEN` 在 304 之后已非必需但 27 个仓库仍贴着实名上限跑；限免"已推送"账本是全局而非每订阅者；
+免费翻译日配额几乎每天入夜用尽；突发门槛的事件词是正则，换语种标题（如纯中文来源）需要另配词表。

@@ -18,6 +18,7 @@ from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, PushLog
 from app.logging_setup import get_logger
+from app.processing import breaking
 from app.services import format as F
 from app.services.llm import LLMService, get_llm
 from app.services.news import ArticleView, NewsService, get_news_service
@@ -54,13 +55,23 @@ def select_briefing(items: Sequence[ArticleView], *, top_items: int,
         chosen.append(item)
         if len(chosen) >= top_items:
             return chosen
-    for item in overflow:                      # thin day: fill the slots anyway
-        if len(chosen) >= top_items:
-            break
-        chosen.append(item)
+    if len(chosen) < top_items and overflow:
+        # Thin day: fill the slots anyway, but cycle through the capped sources
+        # instead of dumping one feed's leftovers in score order. On 2026-09-26
+        # the evening 晚报 took 6 of 8 slots from a single subreddit that way,
+        # because the 12h window held no press coverage at all (see the
+        # digest.*.window_hours note in config/settings.yaml).
+        by_source: dict[str, list[ArticleView]] = {}
+        for item in overflow:
+            by_source.setdefault(item.source_name or "?", []).append(item)
+        while len(chosen) < top_items and by_source:
+            for source in list(by_source):
+                if len(chosen) >= top_items:
+                    break
+                chosen.append(by_source[source].pop(0))
+                if not by_source[source]:
+                    del by_source[source]
     return chosen
-
-
 @dataclass
 class Digest:
     kind: str
@@ -94,21 +105,22 @@ class DigestService:
 
     async def generate_daily(self, *, chat_id: int | None = None,
                              llm: LLMService | None = None) -> Digest:
-        return await self._briefing("morning", window_hours=24, chat_id=chat_id, llm=llm)
+        return await self._briefing("morning", chat_id=chat_id, llm=llm)
 
     async def generate_evening(self, *, chat_id: int | None = None,
                               llm: LLMService | None = None) -> Digest:
-        return await self._briefing("evening", window_hours=12, chat_id=chat_id, llm=llm)
+        return await self._briefing("evening", chat_id=chat_id, llm=llm)
 
-    async def _briefing(self, kind: str, *, window_hours: int,
-                        chat_id: int | None, llm: LLMService | None) -> Digest:
-        """A rolling window (last 24h / last 12h), not a calendar day.
+    async def _briefing(self, kind: str, *, chat_id: int | None,
+                        llm: LLMService | None) -> Digest:
+        """A rolling window (configurable per briefing), not a calendar day.
 
         A calendar-day window at 08:00 would silently drop the overnight news
         that a morning briefing exists to surface.
         """
         cfg = self.config
         top_items = int(cfg.get(f"digest.{kind}.top_items", 10))
+        window_hours = as_int(cfg.get(f"digest.{kind}.window_hours", 24), 24)
         min_score = float(cfg.get(f"digest.{kind}.min_score", cfg.settings.min_article_score))
         prefs = self.news.user_for(chat_id) if chat_id else {}
         if prefs:
@@ -119,12 +131,18 @@ class DigestService:
 
         # The candidate pool is deliberately deeper than the briefing: with a
         # per-source cap there must be something left to pick after it bites.
-        items = self.news.latest(limit=top_items * BRIEFING_DEPTH, min_score=min_score,
-                                 hours=window_hours, order_by_score=True)
-        if not items:
-            # A quiet window: widen once rather than send an empty briefing.
-            items = self.news.latest(limit=top_items * 2, min_score=min_score,
+        # Already-briefed rows are skipped, which is what lets the 24h window
+        # overlap the other briefing of the day without repeating it.
+        depth = top_items * BRIEFING_DEPTH
+        items = self.news.latest(limit=depth, min_score=min_score, hours=window_hours,
+                                 order_by_score=True, skip_sent=True)
+        if len(items) < top_items:
+            # Thin window: widen once, and let yesterday's items back in rather
+            # than send a briefing of three.
+            seen = {a.id for a in items}
+            wider = self.news.latest(limit=depth, min_score=min_score,
                                      hours=window_hours * 2, order_by_score=True)
+            items += [a for a in wider if a.id not in seen]
         if not items:
             return Digest(kind=kind, messages=[], date_label=date_label, empty=True)
 
@@ -181,7 +199,6 @@ class DigestService:
         breaking_cfg = cfg.get("breaking", {}) or {}
         cooldown = int(breaking_cfg.get("cooldown_minutes", cfg.settings.breaking_cooldown_minutes))
         max_per_day = int(breaking_cfg.get("max_per_day", cfg.settings.max_breaking_news_per_day))
-        threshold = float(breaking_cfg.get("threshold", cfg.settings.breaking_news_threshold))
         if not cfg.settings.breaking_news_enabled or not breaking_cfg.get("enabled", True):
             return False, "breaking news disabled in config"
         with session_scope() as session:
@@ -189,13 +206,21 @@ class DigestService:
             if user is not None:
                 if user.paused or not user.breaking_enabled:
                     return False, "user paused / breaking off"
-                threshold = float(user.breaking_threshold or threshold)
             if article_id is not None:
                 article = session.get(Article, article_id)
                 if article is None:
                     return False, "article missing"
-                if (article.final_score or 0) < threshold:
-                    return False, f"score {article.final_score:.0f} below threshold {threshold:.0f}"
+                # The rules the pipeline applied, re-applied here rather than
+                # trusted: a re-queued or backfilled story reaches the sender with
+                # a score and age that have moved since the pass that flagged it.
+                # `user.breaking_threshold` is only consulted in AI mode: it
+                # stores the model-era default of 90, which rule mode cannot
+                # reach (top score measured: 78), so honouring it there would put
+                # the feature straight back to sleep.
+                ok, why = breaking.gate(article, config=cfg,
+                                        user_threshold=user.breaking_threshold if cfg.ai_enabled else None)
+                if not ok:
+                    return False, f"not breaking: {why}"
                 if article.is_breaking:
                     return False, "already sent as breaking"
                 if article.event_id:
