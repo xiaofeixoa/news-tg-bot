@@ -43,10 +43,70 @@ def note_rate(headers: Any) -> None:
         pass
 
 
-def rate_block_reason() -> str | None:
+def _rate_path(config: Any):
+    return config.settings.data_path / "github_rate.json"
+
+
+_rate_restored = False
+
+
+_saved_rate: dict[str, Any] = {"remaining": None, "reset": 0.0}
+
+
+def save_rate(config: Any) -> None:
+    """Remember the window across restarts, so a deploy does not re-spend it."""
+    import json
+
+    if _rate["remaining"] is None:
+        return
+    if (_saved_rate["remaining"], _saved_rate["reset"]) == (_rate["remaining"], _rate["reset"]):
+        return                                  # nothing moved since the last write
+    try:
+        _rate_path(config).write_text(json.dumps(_rate), encoding="utf-8")
+    except Exception as exc:  # pragma: no cover - read-only data dir
+        log.debug("github rate state unwritable (%s): %s", config, exc)
+        return
+    _saved_rate.update({"remaining": _rate["remaining"], "reset": _rate["reset"]})
+
+
+def restore_rate(config: Any) -> None:
+    """Adopt the quota state the previous process learned.
+
+    `_rate` used to live only in memory, so every restart began certain that
+    GitHub would answer - and spent the remaining hour's credits discovering
+    otherwise. Eight deploys in one evening is eight fresh rounds of 27 repos,
+    which is how both GitHub sources ended each run reporting "配额已用完".
+    """
+    global _rate_restored
+    import json
+    import time
+
+    if _rate_restored or _rate["remaining"] is not None:
+        return
+    _rate_restored = True
+    try:
+        stored = json.loads(_rate_path(config).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # a broken file must not stop collection
+        log.debug("github rate state unreadable: %s", exc)
+        return
+    try:
+        remaining = None if stored.get("remaining") is None else int(stored["remaining"])
+        reset = float(stored.get("reset") or 0.0)
+    except (TypeError, ValueError):  # pragma: no cover
+        return
+    if remaining == 0 and reset > time.time():
+        _rate["remaining"], _rate["reset"] = 0, reset
+        _saved_rate.update({"remaining": 0, "reset": reset})
+
+
+def rate_block_reason(config: Any = None) -> str | None:
     """Why GitHub calls cannot work right now, or None if they can."""
     import time as _time
 
+    if config is not None and _rate["remaining"] is None:
+        restore_rate(config)
     if _rate["remaining"] != 0:
         return None
     if _rate["reset"] and _time.time() < _rate["reset"]:
@@ -147,7 +207,7 @@ class GitHubCollector(BaseCollector):
         an hour. An unchanged repo now costs 0 (GitHub does not count a 304),
         which is what makes the no-token setup actually work.
         """
-        blocked = rate_block_reason()
+        blocked = rate_block_reason(self.config)
         if blocked:
             raise CollectorError(blocked)
         key = self._cache_key(url, kwargs.get("params"))
@@ -163,12 +223,12 @@ class GitHubCollector(BaseCollector):
             # exactly what tells us the quota is gone. /rate_limit is unmetered,
             # so ask it instead of guessing.
             if await self._confirm_spent(str(exc)):
-                raise CollectorError(rate_block_reason() or RATE_HINT) from exc
+                raise CollectorError(rate_block_reason(self.config) or RATE_HINT) from exc
             raise
         note_rate(getattr(response, "headers", None))
         status = getattr(response, "status_code", 200)
         if status == 403 and _rate["remaining"] == 0:
-            raise CollectorError(rate_block_reason() or RATE_HINT)
+            raise CollectorError(rate_block_reason(self.config) or RATE_HINT)
         if status == 304 and isinstance(entry, dict) and entry.get("body"):
             _stats["not_modified"] += 1
             return CachedResponse(entry["body"], getattr(response, "headers", None))
@@ -245,6 +305,9 @@ class GitHubCollector(BaseCollector):
             if self._etag_dirty:
                 self._etag_dirty = False
                 save_etags(self.config, load_etags(self.config))
+            # Outside the dirty check on purpose: a round that changed no bodies
+            # still learned the quota number, and that is the part a restart needs.
+            save_rate(self.config)
             self._report(started)
 
     def _report(self, started: dict[str, int]) -> None:
@@ -393,8 +456,8 @@ class GitHubCollector(BaseCollector):
             try:
                 response = await self.get(url, headers=self._headers(), attempts=2)
             except Exception as exc:  # 404 = the repo has no releases: skip it
-                if rate_block_reason():
-                    raise CollectorError(rate_block_reason()) from exc
+                if rate_block_reason(self.config):
+                    raise CollectorError(rate_block_reason(self.config)) from exc
                 if _looks_like_missing(str(exc)):
                     self._mark_empty(url)
                 log.debug("no latest release for %s: %s", name, exc)

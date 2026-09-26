@@ -115,8 +115,56 @@ def _reset_rate_state(monkeypatch, tmp_path):
     github._stats.update({"metered": 0, "not_modified": 0, "empty_skipped": 0})
     # In-memory so no test ever reads or writes the real data dir.
     github._etag_cache = {}
+    monkeypatch.setattr(github, "_rate_restored", False)
+    github._saved_rate.update({"remaining": None, "reset": 0.0})
     monkeypatch.setattr(github, "_etag_path", lambda config: tmp_path / "github_etags.json")
+    monkeypatch.setattr(github, "_rate_path", lambda config: tmp_path / "github_rate.json")
     yield
+
+
+def test_an_exhausted_window_survives_a_restart(tmp_path):
+    """重启不该让进程"忘记"配额已经用完。
+
+    2026-09-26 一台机器上一晚部署八次，每次新进程都从"以为还能调用"开始，
+    重新把 27 个仓库问一遍才发现又是 403 —— 那份一小时 60 次的额度就是这么烧掉的。
+    """
+    import time
+
+    from app.collectors import github
+    from app.config import get_config
+
+    config = get_config()
+    github._rate.update({"remaining": 0, "reset": time.time() + 1800})
+    github.save_rate(config)
+    assert (tmp_path / "github_rate.json").is_file()
+
+    # 新进程：内存里一无所知，只留下这个文件
+    github._rate.update({"remaining": None, "reset": 0.0})
+    github._rate_restored = False
+    reason = github.rate_block_reason(config)
+    assert reason and "分钟后恢复" in reason, reason
+
+
+def test_a_finished_window_is_not_inherited(tmp_path):
+    import time
+
+    from app.collectors import github
+    from app.config import get_config
+
+    config = get_config()
+    (tmp_path / "github_rate.json").write_text(
+        '{"remaining": 0, "reset": %s}' % (time.time() - 60), encoding="utf-8")
+    github._rate_restored = False
+    assert github.rate_block_reason(config) is None, "过期窗口该重新探测，不是继续封着"
+
+
+def test_an_unreadable_rate_file_never_blocks_collection(tmp_path):
+    from app.collectors import github
+    from app.config import get_config
+
+    (tmp_path / "github_rate.json").write_text("{not json", encoding="utf-8")
+    github._rate_restored = False
+    assert github.rate_block_reason(get_config()) is None
 
 
 def test_exhausted_anonymous_quota_is_reported_as_a_block():
