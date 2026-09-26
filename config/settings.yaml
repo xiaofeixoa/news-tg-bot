@@ -53,7 +53,8 @@ free:
 translate:
   enabled: true
   provider: auto
-  # 免费额度保护：每轮翻多少条、每天最多多少次请求（标题+摘要各算一次）
+  # 免费额度保护：每轮翻多少条、每天最多多少次请求（标题/摘要/要点各算一次；
+  # 要点排在标题和摘要之后，剩余额度才轮到它）
   per_run_limit: 60
   daily_budget: 400
   concurrency: 3
@@ -61,6 +62,54 @@ translate:
   rounds_per_run: 2
   # 列表/简报里优先显示中文标题；缺失时回落到原文
   prefer_translated_title: true
+  # 免费机器会把公司名当成英文单词翻译（实测线上：Gemini→双子座、
+  # Hugging Face→拥抱人脸、Claude→克劳德、Anthropic→人类技术）。
+  # 这些名字在送翻前换成⑴⑵这类占位符、回来再还原——专名翻错不是"译得软"，
+  # 是对一家公司说了假话。
+  # 只列**没有公认中文名**的名字。Microsoft/Amazon/NVIDIA/Google/Meta 这类有标准
+  # 译名的（微软、亚马逊、英伟达、谷歌）不要放进来：机器译成中文是对的，而占位符
+  # 一旦没被原样带回来就会被 `kept_intact` 判为翻译失败、整句退回英文。
+  keep_terms:
+    - OpenAI
+    - Anthropic
+    - DeepMind
+    - Google DeepMind
+    - xAI
+    - Mistral
+    - Perplexity
+    - Hugging Face
+    - Together AI
+    - ChatGPT
+    - Claude
+    - Gemini
+    - Copilot
+    - Llama
+    - DeepSeek
+    - Qwen
+    - Grok
+    - GPT
+    - GPT-5
+    - GPT-6
+    - Codex
+    - Veo
+    - Sora
+    - Claude Code
+    - Amazon Bedrock
+    - Amazon SageMaker
+    - AWS Bedrock
+    - GitHub Copilot
+    - Google Gemini
+    - AWS
+    - Azure
+    - Bedrock
+    - SageMaker
+    - GitHub
+    - Kubernetes
+    - PyTorch
+    - Triton
+    - CUDA
+    - vLLM
+    - SGLang
 
 llm:
   provider: openai-compatible

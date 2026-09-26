@@ -21,6 +21,10 @@ from app.services.llm import LLMService, get_llm
 
 log = get_logger("app")
 
+# How many bullets of one article a card can show; mirrors the render cap in
+# `format.article_card`, so we never pay to translate lines nobody sees.
+CARD_POINTS = 5
+
 
 @dataclass
 class ArticleView:
@@ -85,10 +89,33 @@ class ArticleView:
         return self.translated_summary or self.display_title
 
     @property
-    def needs_translation(self) -> bool:
-        from app.services.translate import needs_translation
+    def display_key_points(self) -> list[str]:
+        """Bullets fit to render in a Chinese briefing - translated or AI-written.
 
-        return needs_translation(self.title) or needs_translation(self.summary)
+        Rule-mode `key_points` are the first sentences of the English body: all
+        439 rows that carry them on the live box have zero Chinese, so every card
+        printed an English block under 核心内容 below an otherwise Chinese summary.
+        They come back as soon as translation reaches them (see `key_points_zh`),
+        and the AI path already writes them in Chinese.
+        """
+        stored = self.meta.get("key_points_zh")
+        if isinstance(stored, list) and stored:
+            return [str(point) for point in stored if str(point).strip()]
+        from app.services.translate import has_cjk
+
+        return [point for point in self.key_points if has_cjk(point)]
+
+    @property
+    def needs_translation(self) -> bool:
+        from app.services.translate import has_cjk, needs_translation
+
+        if needs_translation(self.title) or needs_translation(self.summary):
+            return True
+        # Bullets count too, or the card below a translated headline stays English
+        # forever; `key_points_zh` is written once so this does not re-spend.
+        if self.meta.get("key_points_zh"):
+            return False
+        return any(needs_translation(point) and not has_cjk(point) for point in self.key_points)
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -331,23 +358,33 @@ class NewsService:
         titles = await translator.translate_many([i.title for i in todo], hint="title")
         summaries = await translator.translate_many(
             [i.summary for i in todo if i.summary], hint="summary")
+        # Bullets are asked for last: the headline and the one-line summary own the
+        # free quota, and whatever is left after them belongs to these.
+        bullets = [point for item in todo if not item.meta.get("key_points_zh")
+                   for point in (item.key_points or [])[:CARD_POINTS]]
+        points = await translator.translate_many(bullets, hint="summary") if bullets else {}
         mode = translator.mode()
         with session_scope() as session:
             for item in todo:
                 zh_title = titles.get(item.title)
                 zh_summary = summaries.get(item.summary or "")
-                if not (zh_title or zh_summary):
+                zh_points = [points[p] for p in (item.key_points or [])[:CARD_POINTS] if p in points]
+                if not (zh_title or zh_summary or zh_points):
                     continue
                 if zh_title:
                     item.title_zh = zh_title
                 if zh_summary:
                     item.summary_zh = zh_summary
+                if zh_points:
+                    item.meta = {**(item.meta or {}), "key_points_zh": zh_points}
                 row = repo.get_article(session, item.id)
                 if row is not None:
                     if zh_title:
                         row.title_zh = zh_title
                     if zh_summary or item.summary_zh:
                         row.summary_zh = row.summary_zh or item.summary_zh
+                    if zh_points:
+                        row.meta = {**(row.meta or {}), "key_points_zh": zh_points}
                     row.translated_by = mode
             session.commit()
         return items

@@ -47,6 +47,85 @@ def has_cjk(text: str | None) -> bool:
     return any("一" <= ch <= "鿿" for ch in (text or ""))
 
 
+# Free machines translate company and product names into Chinese words: the live
+# library holds "Introducing Gemini Omni" -> "双子座 Omni 简介", "How Hugging Face
+# Inference Endpoints..." -> "拥抱人脸推理端点…", "Claude's Load-Bearing Seams" ->
+# "克劳德承重接缝", and today's 突发 alert called Anthropic "人类技术". A wrong
+# proper noun is not a soft translation, it is a false statement about a company.
+#
+# `config/settings.yaml -> translate.keep_terms` names the brands that have no
+# accepted Chinese form (微软/亚马逊 are correct renderings and must not be
+# guarded). Those names travel as circled-digit placeholders, which the engines
+# treat as punctuation; `kept_intact` rejects any answer that ate one, so a route
+# that mangles names loses the item to the next route instead of shipping junk.
+_MAX_KEPT = 35
+
+
+def _placeholder(index: int) -> str:
+    """⑴…⒇ then ㉑…㉟ - circled rather than bracketed digits.
+
+    Live titles already contain "【PM公益站】", and a placeholder that can collide
+    with source text would rename somebody's product.
+    """
+    if 1 <= index <= 20:
+        return chr(0x2474 + index - 1)          # ⑴ … ⒇
+    return chr(0x3251 + index - 21)             # ㉑ … ㉟
+
+
+def protect_terms(text: str, terms: Sequence[str]) -> tuple[str, dict[str, str]]:
+    """Replace known brand names with pass-through placeholders.
+
+    Adjacent hits become one placeholder: "GitHub Copilot" guarded as two tokens
+    lets the engine put a word between them, which is how a live row came out as
+    "…语音 SageMaker AI" with its "Amazon" left behind.
+    """
+    if not text or not terms:
+        return text, {}
+    ordered = sorted({t for t in terms if t}, key=len, reverse=True)[:_MAX_KEPT]
+    rx = re.compile("|".join(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(t)
+                             for t in ordered), re.I)
+    spans: list[tuple[int, int]] = []
+    for match in rx.finditer(text):
+        if spans and match.start() < spans[-1][1]:
+            continue                                  # already inside a longer name
+        if spans and not text[spans[-1][1]:match.start()].strip():
+            spans[-1] = (spans[-1][0], match.end())    # same name, one gap of space
+        else:
+            spans.append((match.start(), match.end()))
+    mapping: dict[str, str] = {}
+    cursor, out = 0, []
+    for index, (start, end) in enumerate(spans, start=1):
+        token = _placeholder(index)
+        mapping[token] = text[start:end]
+        out.append(text[cursor:start])
+        out.append(token)
+        cursor = end
+    if not mapping:
+        return text, {}
+    out.append(text[cursor:])
+    guarded = "".join(out)
+    return guarded, mapping
+
+
+def restore_terms(zh: str, mapping: dict[str, str]) -> str:
+    """Put the names back. A placeholder the engine swallowed stays untranslated."""
+    out = zh or ""
+    for token, term in mapping.items():
+        out = out.replace(token, term)
+    return out
+
+
+def kept_intact(zh: str, mapping: dict[str, str]) -> bool:
+    """Did the engine pass every placeholder through untouched?
+
+    Google does; MyMemory turns "⒆" into "锘洪噾" or drops it and leaves the
+    sentence without a subject. Both are worse than no translation: the caller
+    falls through to the next route, and if none is left the line stays in
+    English - which is the fallback he approved for spent quota.
+    """
+    return all(token in (zh or "") for token in mapping)
+
+
 # "owner/repo (123 stars)" - a repository name, not a sentence. Translating it
 # only burns free-tier quota and produces junk like "（ 0星）".
 # Key-free routes, tried in this order by `provider: auto`.
@@ -166,6 +245,8 @@ class Translator:
         )
         self.cache: dict[str, str] = {}
         self._down_until: dict[str, float] = {}
+        # Names the free engines must not turn into Chinese words.
+        self.keep_terms = [str(t) for t in (self.config.get("translate.keep_terms", []) or []) if str(t).strip()]
         # Which route actually served the last batch: `mode()` reports the
         # configured preference, and provenance written to the DB must be true.
         self.last_route: str | None = None
@@ -308,7 +389,8 @@ class Translator:
                              queue.qsize())
                     return
                 text = queue.get_nowait()
-                segment = text[:MYMEMORY_MAX_CHARS]
+                guarded, mapping = protect_terms(text, self.keep_terms)
+                segment = guarded[:MYMEMORY_MAX_CHARS]
                 self.budget.spend()
                 try:
                     client = await self._http()
@@ -329,8 +411,12 @@ class Translator:
                         break
                     if (status == 200 and translated and has_cjk(translated)
                             and translated.strip().lower() != segment.strip().lower()
-                            and "QUERY LENGTH LIMIT" not in translated.upper()):
-                        out[text] = self._polish(translated)
+                            and "QUERY LENGTH LIMIT" not in translated.upper()
+                            and kept_intact(translated, mapping)):
+                        out[text] = self._polish(restore_terms(translated, mapping))
+                    elif mapping and not kept_intact(translated, mapping):
+                        log.debug("mymemory swallowed a brand placeholder for %r; "
+                                  "trying the next route", text[:40])
                     elif status != 200:
                         log.debug("mymemory status %s for %r", status, text[:40])
                 except Exception as exc:  # noqa: BLE001 - keep the original text
@@ -341,17 +427,20 @@ class Translator:
         return self._remember(out)
 
     async def _via_google(self, texts: list[str]) -> dict[str, str]:
-        """Google's unauthenticated web endpoint.
+        """Google's unauthenticated web endpoint, one batched request.
 
-        This is the key-free route that still answers from a datacenter IP after
-        MyMemory's per-IP quota is spent - `translate.googleapis.com` returns an
-        empty payload from exactly those boxes.
+        Tried after MyMemory by `provider: auto`, and it is the better of the two
+        at brand names: it passes the ⑴⑵ placeholders through untouched, while
+        MyMemory transliterates them into junk like "锘洪噾" (measured live).
         """
         client = await self._http()
+        # One request for the whole batch, so names are guarded per line and the
+        # alignment check below still counts the same number of answers.
+        lines = [protect_terms(text, self.keep_terms) for text in texts]
         response = await client.get(
             GOOGLE_WEB,
             params={"client": "gtx", "sl": "en", "tl": TARGET, "dt": "t",
-                    "q": "\n".join(texts)},
+                    "q": "\n".join(guarded for guarded, _ in lines)},
         )
         status = getattr(response, "status_code", 200)
         if status >= 400:
@@ -366,7 +455,11 @@ class Translator:
             log.info("google answer did not line up (%d parts for %d text(s))",
                      len(parts), len(texts))
             return {}
-        return self._remember(dict(zip(texts, parts)))
+        return self._remember({
+            text: restore_terms(part, mapping)
+            for text, (_guarded, mapping), part in zip(texts, lines, parts)
+            if kept_intact(part, mapping)
+        })
 
     # --------------------------------------------------------------- helpers
     def _remember(self, pairs: dict[str, str]) -> dict[str, str]:

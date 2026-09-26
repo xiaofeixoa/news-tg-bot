@@ -117,7 +117,7 @@ def article_card(
         summary = item.title if item.display_title != item.title else ""
     if summary and summary != item.display_title:
         out += ["<b>一句话总结：</b>", esc(summary), ""]
-    points = (deep or {}).get("key_points") or item.key_points or []
+    points = (deep or {}).get("key_points") or item.display_key_points or []
     if points:
         out.append("<b>核心内容：</b>")
         out += [f"{BULLET} {esc(p)}" for p in points[:5]]
