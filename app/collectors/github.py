@@ -383,10 +383,10 @@ class GitHubCollector(BaseCollector):
         # so the source cost 2 credits and produced "0 new of 25" forever.
         new_floor = int(self.source.get("min_new_stars", 10))
         min_stars = int(self.source.get("min_stars", 300))
-        queries: list[tuple[str, str]] = []
+        queries: list[tuple[str, str, int]] = []
         for base in self._bases():
-            queries.append((f"{base} created:>{since} stars:>={new_floor}", "stars"))
-            queries.append((f"{base} pushed:>{since} stars:>={min_stars}", "updated"))
+            queries.append((f"{base} created:>{since} stars:>={new_floor}", "stars", new_floor))
+            queries.append((f"{base} pushed:>{since} stars:>={min_stars}", "updated", min_stars))
         # Each search costs one credit out of the same 60/hour the 27 watched
         # repos need, so the topic list is capped instead of run in full.
         # Set `max_search_calls: 0` to lift the cap once GITHUB_TOKEN is set.
@@ -394,7 +394,8 @@ class GitHubCollector(BaseCollector):
         queries = queries[:cap] if cap > 0 else queries
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for query, sort in queries:
+        below_floor = 0
+        for query, sort, floor in queries:
             params = {"q": query, "sort": sort, "order": "desc",
                       "per_page": min(30, self.limit())}
             try:
@@ -408,9 +409,19 @@ class GitHubCollector(BaseCollector):
                 if not key or key in seen:
                     continue
                 seen.add(key)
+                # Re-check the floor on the answer. `stars:>=N` is a search-index
+                # promise, and the index lags: 30 rows of "(0 stars)" spam repos got
+                # through it on 2026-09-25 and one more on 2026-09-25 21:24, and at
+                # score 54 a 0-star repo is good enough for a briefing slot.
+                if int(repo.get("stargazers_count") or 0) < floor:
+                    below_floor += 1
+                    continue
                 items.append(self._repo_item(repo))
             if len(items) >= self.limit():
                 break
+        if below_floor:
+            log.info("github %s: dropped %d repo(s) under the star floor",
+                     self.source.get("name"), below_floor)
         return items[: self.limit()]
 
     def _repo_item(self, repo: dict[str, Any]) -> dict[str, Any]:

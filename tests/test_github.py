@@ -371,6 +371,27 @@ async def test_each_topic_is_its_own_query_not_an_intersection(monkeypatch):
     assert len(asked) == 2, "the anonymous budget caps how many queries run"
 
 
+async def test_a_repo_under_its_own_star_floor_never_enters_the_database(monkeypatch):
+    """`stars:>=10` 是搜索索引的承诺，而索引会滞后：线上真的回来过 30 行 (0 stars)。"""
+    async def spy(self, url, **kwargs):
+        return JsonResp({"items": [
+            {"full_name": "real/eleven", "html_url": "https://github.com/real/eleven",
+             "stargazers_count": 11, "description": "A real tool for agents."},
+            {"full_name": "spam/zero", "html_url": "https://github.com/spam/zero",
+             "stargazers_count": 0, "description": "Instagram downloader for Ollama."},
+            {"full_name": "edge/ten", "html_url": "https://github.com/edge/ten",
+             "stargazers_count": 10, "description": "Exactly on the floor."},
+        ]})
+
+    monkeypatch.setattr("app.collectors.base.BaseCollector.get", spy)
+    collector = GitHubCollector({"name": "GitHub Trending", "type": "github",
+                                 "searches": [{"topic": "ai"}], "min_new_stars": 10})
+    items = await collector._search()
+    assert [i["meta"]["stars"] for i in items] == [11, 10], "0 星的行不该进库，压线的要留"
+    # 不要再写 `"0 stars" not in title`：标题 "edge/ten (10 stars)" 里就含着它。
+    assert all(f"({i['meta']['stars']:,} stars)" in i["title"] for i in items)
+
+
 async def test_only_bodyless_requests_get_a_validator(monkeypatch):
     """Search queries embed a date that changes every round, so caching them
     would grow the file without ever producing a 304."""
