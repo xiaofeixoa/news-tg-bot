@@ -570,6 +570,43 @@ def repair_template_titles(session: Session, *, limit: int = 5000) -> int:
         log.info("repaired %d templated title(s) without spending tokens", fixed)
     return fixed
 
+
+def repair_lost_units(session: Session, *, limit: int = 1500) -> int:
+    """Clear the Chinese of any row whose translation lost a guarded measurement symbol.
+
+    The placeholder guard only protects text translated after it shipped, so the
+    library still holds "速度可达50吨/秒" for a source that said `50t/s` and
+    "0.9 KB/令牌" for `0.9 KB/token`. Same invariant the brand sweep uses - a
+    guarded symbol present in the English and absent from the Chinese means the
+    answer is void - and clearing the field is the only honest repair: the queue
+    redoes it under the guard, and if every route mangles it again the row shows
+    English, which he prefers over a wrong unit.
+    """
+    from app.services.translate import term_in
+
+    units = [str(u) for u in (get_config().get("translate.keep_units", []) or []) if str(u).strip()]
+    if not units:
+        return 0
+    rows = list(session.scalars(
+        select(Article).where(Article.is_archived.is_(False)).limit(limit)))
+    dropped = 0
+    for row in rows:
+        for source, translated, field in ((row.title, row.title_zh, "title_zh"),
+                                          (row.summary, row.summary_zh, "summary_zh")):
+            if not source or not translated:
+                continue
+            # The source decides what must survive: a row that says `50t/s` has to
+            # still say `t/s` in Chinese, or the number is measuring something else.
+            wanted = [unit for unit in units if term_in(source, unit)]
+            if wanted and not all(term_in(translated, unit) for unit in wanted):
+                setattr(row, field, None)
+                row.translated_by = None
+                dropped += 1
+    session.flush()
+    if dropped:
+        log.info("dropped %d Chinese field(s) that lost a guarded unit; requeued", dropped)
+    return dropped
+
 async def translate_pending(
     session: Session,
     *,

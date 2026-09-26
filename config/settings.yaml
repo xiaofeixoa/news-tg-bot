@@ -115,6 +115,27 @@ translate:
     - CUDA
     - vLLM
     - SGLang
+  # 度量记号走同一套占位符保护：线上实测 "50t/s" 被译成 "50吨/秒"（吨！）、
+  # "0.9 KB/token" 被译成 "0.9 KB/令牌"，两条都进了他能看到的列表/简报。
+  # 这里只放**带斜杠或大写的吞吐单位**这种不可能有中文名的记号。
+  # 不要放裸词 token/tokens：安全语境的 "approval token" 译成"批准令牌"是对的，
+  # 保护它反而会把好句子变成中英夹杂。
+  keep_units:
+    - t/s
+    - tok/s
+    - toks/s
+    - tokens/s
+    - token/s
+    - it/s
+    - req/s
+    - KB/token
+    - MB/token
+    - GB/s
+    - MB/s
+    - KB/s
+    - TB/s
+    - QPS
+    - TPS
 
 llm:
   provider: openai-compatible

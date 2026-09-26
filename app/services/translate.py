@@ -72,6 +72,26 @@ def _placeholder(index: int) -> str:
     return chr(0x3251 + index - 21)             # ㉑ … ㉟
 
 
+def _boundary(term: str) -> str:
+    """Look-arounds for one guarded term.
+
+    A brand is alphanumeric and must not match inside a longer word, so digits
+    count as "inside" for it: guarding the "Qwen" in "Qwen3-TTS", or the "GPT-5"
+    in "GPT-50", would be a different claim about which product the row is about.
+    A slash unit is not a word: "50t/s" has its digit glued to the symbol, and the
+    alphanumeric lookbehind used to reject exactly the case worth guarding - which
+    is how a live row reached a reader as "50吨/秒".
+    """
+    if "/" in term:                                 # "t/s", "tokens/s", "KB/token"
+        return f"(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])"
+    return f"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])"
+
+
+def term_in(text: str | None, term: str) -> bool:
+    """Does this text carry `term` as a standalone token, case-insensitively?"""
+    return bool(text) and re.search(_boundary(term), text, re.I) is not None
+
+
 def protect_terms(text: str, terms: Sequence[str]) -> tuple[str, dict[str, str]]:
     """Replace known brand names with pass-through placeholders.
 
@@ -81,9 +101,9 @@ def protect_terms(text: str, terms: Sequence[str]) -> tuple[str, dict[str, str]]
     """
     if not text or not terms:
         return text, {}
-    ordered = sorted({t for t in terms if t}, key=len, reverse=True)[:_MAX_KEPT]
-    rx = re.compile("|".join(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(t)
-                             for t in ordered), re.I)
+    # Longest first so "GitHub Copilot" wins over "GitHub".
+    ordered = sorted({t for t in terms if t}, key=len, reverse=True)
+    rx = re.compile("|".join(_boundary(t) for t in ordered), re.I)
     spans: list[tuple[int, int]] = []
     for match in rx.finditer(text):
         if spans and match.start() < spans[-1][1]:
@@ -92,6 +112,11 @@ def protect_terms(text: str, terms: Sequence[str]) -> tuple[str, dict[str, str]]
             spans[-1] = (spans[-1][0], match.end())    # same name, one gap of space
         else:
             spans.append((match.start(), match.end()))
+    # The cap is on placeholders in *this string* (the circled digits run out at
+    # 35), not on the vocabulary. Truncating the term list instead silently
+    # un-guarded the shortest entries - which is exactly how "50t/s" got through
+    # once the unit list pushed the brand list past the limit.
+    spans = spans[:_MAX_KEPT]
     mapping: dict[str, str] = {}
     cursor, out = 0, []
     for index, (start, end) in enumerate(spans, start=1):
@@ -247,6 +272,13 @@ class Translator:
         self._down_until: dict[str, float] = {}
         # Names the free engines must not turn into Chinese words.
         self.keep_terms = [str(t) for t in (self.config.get("translate.keep_terms", []) or []) if str(t).strip()]
+        # Measurement symbols ride the same guard: "50t/s" came back as "50吨/秒"
+        # (tonnes per second) and "0.9 KB/token" as "0.9 KB/令牌" - both reached a
+        # briefing. Bare "token" is deliberately NOT here: in "single-use approval
+        # token" the machine's 令牌 is correct Chinese, and guarding the word would
+        # turn a good sentence into untranslated noise.
+        self.keep_terms += [str(t) for t in (self.config.get("translate.keep_units", []) or [])
+                            if str(t).strip()]
         # Which route actually served the last batch: `mode()` reports the
         # configured preference, and provenance written to the DB must be true.
         self.last_route: str | None = None

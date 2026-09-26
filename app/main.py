@@ -118,19 +118,22 @@ def _backfill_free_offers(config: AppConfig) -> None:
     Cheap and token-free, so a vocabulary edit takes effect on old news too.
     """
     from app.database.database import session_scope
-    from app.processing.pipeline import (backfill_free_offers, repair_template_titles,
-                                         repair_truncated_summaries)
+    from app.processing.pipeline import (backfill_free_offers, repair_lost_units,
+                                         repair_template_titles, repair_truncated_summaries)
 
     try:
         with session_scope() as session:
             backfill_free_offers(session, config=config)
             repair_template_titles(session)
             repaired = repair_truncated_summaries(session)
+            lost_units = repair_lost_units(session)
             from app.processing import enrich
             stale = enrich.reset_stale_translations(session, config=config)
             session.commit()
         if repaired:
             log.info("re-cut %d truncated summary line(s)", repaired)
+        if lost_units:
+            log.info("requeued %d Chinese line(s) that dropped a guarded unit", lost_units)
         if stale:
             log.info("dropped %d stale Chinese summary line(s) for re-translation", stale)
     except Exception as exc:  # noqa: BLE001 - never block startup over this

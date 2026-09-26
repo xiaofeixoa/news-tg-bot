@@ -23,8 +23,9 @@ from app.services.translate import (
 )
 
 # The engine-facing name list lives in settings.yaml; the stub has to guard the
-# same way the service does to stay a believable stand-in.
-KEEP_TERMS = [str(t) for t in (get_config().get("translate.keep_terms", []) or [])]
+# same way the service does to stay a believable stand-in. Read it off a real
+# Translator so the two can never drift apart (units joined the list in v1.25).
+KEEP_TERMS = Translator(get_config()).keep_terms
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -532,6 +533,73 @@ async def test_ensure_chinese_translates_only_what_is_about_to_be_shown(session)
         tr._translator = None
     assert out[0].display_title == "微软推出 Copilot 超级应用"
     assert session.query(Article).get(ids[0]).title_zh == "微软推出 Copilot 超级应用"
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_dropped_its_unit_is_requeued(session):
+    """库里已经存下的错译没法靠占位符救回来，但"英文有、中文没有"这个不变量能挑出来。"""
+    from app.processing.pipeline import repair_lost_units
+
+    ids = seed(session, ("I run Qwen3 27B at 50t/s on an M5 Pro", "https://reddit.com/50ts"))
+    row = session.get(Article, ids[0])
+    row.title_zh = "我在 M5 Pro 上以 50吨/秒 运行 Qwen3 27B"     # 吨！线上真实输出
+    row.summary_zh = "速度不错。"
+    row.translated_by = "mymemory"
+    session.commit()
+
+    assert repair_lost_units(session) >= 1
+    session.commit()
+    session.expire_all()
+    again = session.get(Article, ids[0])
+    assert again.title_zh is None and again.translated_by is None
+    assert [a.id for a in repo.untranslated_articles(session, limit=20)] == [again.id], \
+        "清空之后要能被后台队列重新捡起来"
+
+
+def test_a_row_whose_chinese_kept_the_unit_is_left_alone(session):
+    from app.processing.pipeline import repair_lost_units
+
+    ids = seed(session, ("Serve the model at 1,200 tokens/s", "https://example.com/tps"))
+    row = session.get(Article, ids[0])
+    row.title_zh = "以 1,200 tokens/s 提供该模型"
+    # `seed` 把摘要写成"标题 + summary sentence in english"，所以摘要里也带着这个单位。
+    row.summary_zh = "吞吐以 1,200 tokens/s 计。"
+    session.commit()
+    assert repair_lost_units(session) == 0
+    assert session.get(Article, ids[0]).title_zh == "以 1,200 tokens/s 提供该模型"
+
+
+@pytest.mark.asyncio
+async def test_a_measurement_unit_travels_through_the_placeholder():
+    """占位符送过去、原样回来：单位翻错不是"译得软"，是对事实说了假话。"""
+    import app.services.translate as tr
+    from app.services.translate import reset_translator
+
+    src = "I run the model at 50t/s on a laptop"
+    # 引擎看到的是 "50⑴"（只有单位被换成占位符），所以真实回答里数字仍在原位。
+    client = StubClient({src: "我在笔记本上以 50⑴ 运行该模型"})
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    reset_translator()
+    tr._translator = translator
+    try:
+        got = await translator.translate_many([src], hint="title")
+    finally:
+        tr._translator = None
+    assert got == {src: "我在笔记本上以 50t/s 运行该模型"}
+
+
+def test_the_guard_does_not_fire_inside_other_words():
+    from app.services.translate import term_in
+
+    assert term_in("run at 50t/s", "t/s")
+    assert term_in("0.9 KB/token", "KB/token")
+    assert not term_in("tokenization pipeline", "token"), "名字不能落在更长的词里面"
+    assert not term_in("GPTX is not a thing", "GPT")
+    # 裸词 token 故意不保护："approval token" 译成"批准令牌"是对的中文
+    assert "token" not in [t.lower() for t in KEEP_TERMS]
+    assert "tokens" not in [t.lower() for t in KEEP_TERMS]
 
 
 @pytest.mark.asyncio
