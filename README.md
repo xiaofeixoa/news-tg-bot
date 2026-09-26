@@ -368,7 +368,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 362 个用例
+.venv/bin/python -m pytest            # 371 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -757,6 +757,36 @@ help_text / /sources / 问答 answer / deep_summary` 全部渲染出来，剥掉
 362 passed。过程里我自己写错了一次断言（把整串 `.lower()` 后再找 " rss"，结果匹配到
 正确标签 "RSS 新闻源" 自己），已改成匹配旧格式的 `r"\brss\b ·"`；另外两次 Edit 误删了
 `category_label` 的 docstring 和 `subcategories` 的函数体，都在下一步补回并跑全量确认。
+
+### v1.16 数据源登记表与配置同步，顺手接上一个即将发生的磁盘故障（2026-09-26）
+- **`sources.enabled` 是创建时的快照，配置改了不会跟。** 采集循环里 `get_or_create_source`
+  永远以 `enabled=True` 建行，之后再没人更新过：VentureBeat AI 在配置里 2026-09-26 就关了
+  （WAF 对机房 IP 回 429，六小时失败 69 次），库里却仍是 `enabled=1, error_count=114`，
+  于是每六小时维护就播一次"这个源坏了 114 次"——一个他已经关掉的源。
+  新增 `repo.sync_sources(session, config.sources)`：每轮采集开头把 enabled / url / quality /
+  type 对齐配置，关掉的源同时清掉失败计数（重新打开时不该一上来就带着旧账），
+  配置里删掉的行也置为关闭；`run_maintenance` 只报仍然启用的源。
+  线上核对：两台库的 VentureBeat AI 与 Linux.do 最新话题 都变 `en=0 err=0`，
+  库里"启用"数从 22 变 20，与 `/stats` 早就算出的配置值终于一致。
+- **同步自身要幂等，否则每轮都在"修"同一批行。** 部署后日志连着两回合报
+  `25` 与 `14` 个字段被更新——采集循环会把**每条新闻自己的 URL** 写进 `sources.url`，
+  同步再把配置里的 feed URL 写回去，两边每轮互相覆盖。这是同步暴露出来的老 bug
+  （`sources.url` 一直是某篇文章的地址），修法是让条目路径不再写 url。
+  回归用例先证明会失败：把那一行改回去，新测试立刻红；改回来则收敛为 0。
+  线上复验：部署后 rss/hackernews/github/arxiv 四回合采集（fetched=395）都没有再打印同步行。
+- 数据源登记这块**原先一个测试都没有**（`/stats` 的源数量、维护告警都读它）。这次补 9 个。
+- **磁盘：09-26 实测只剩 769MB，而 `/var/log/syslog` 与 `daemon.log` 是同一条流的两份拷贝，
+  各自 877MB、约 131MB/天，合计 ~260MB/天 ≈ 3 天写满。** 写满的表现不是报错，
+  而是 SQLite 静默拒绝写入、"新闻突然不采了"。日志量来自他另一台服务 `mmwx`
+  （INFO 级逐请求计时，占 syslog 行数的 74%）——改它的日志级别或 rsyslog  duplicating
+  属于另一个服务的决定，所以这里**没有动手**，只把风险变成会说话的东西：
+  `stats()` 现在带 `disk_free_mb`，低于 `alerts.min_free_mb`（默认 1024）时
+  `/stats` 末尾出现 `⚠️ 磁盘只剩 0.8GB（低于 1GB 告警线）…`，维护日志同步告警。
+  线上已实际触发。
+
+371 passed。过程记录：我用 heredoc 写多行 f-string 时把 `disk_warning` 的返回语句写成了
+语法错误（9 个用例在 collection 阶段就红），当场改回；第一次"验证测试能抓 bug"用了错误的
+`-k` 过滤词（选中 0 个用例却看起来像通过），换成点名单个用例后确认旧代码确实失败。
 
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，

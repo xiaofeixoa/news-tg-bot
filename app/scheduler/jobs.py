@@ -327,13 +327,22 @@ class NewsJobs:
 
     async def run_maintenance(self) -> None:
         archived = self.news.archive_old()
+        stats = self.news.stats()
         with session_scope() as session:
-            failing = [s for s in repo.all_sources(session) if (s.error_count or 0) >= 5]
+            # `enabled` mirrors the config now (see repo.sync_sources), so a feed
+            # he switched off can no longer be reported as broken every six hours.
+            failing = [s for s in repo.all_sources(session)
+                       if s.enabled and (s.error_count or 0) >= 5]
         if archived:
             log.info("archived %d old article(s)", archived)
         for source in failing:
             log.warning("source %s has failed %s times in a row (last error: %s)",
                         source.name, source.error_count, (source.last_error or "")[:120])
+        free_mb = stats.get("disk_free_mb")
+        floor = as_int(self.config.get("alerts.min_free_mb", 1024), 1024)
+        if free_mb is not None and free_mb <= floor:
+            log.warning("only %sMB free on the database volume (alert below %sMB): "
+                        "collection will fail silently once it fills", free_mb, floor)
 
     async def startup_report(self) -> None:
         stats = self.news.stats()

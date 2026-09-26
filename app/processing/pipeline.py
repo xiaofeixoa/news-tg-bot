@@ -74,6 +74,12 @@ async def collect(
     """Run collectors and persist whatever is new. One failure = one error line."""
     config = config or get_config()
     stats = stats or CollectStats()
+    # Keep the sources table a mirror of the config, not a fossil of the first
+    # round that ever ran: a feed switched off must stop looking switched on.
+    synced = repo.sync_sources(session, config.sources)
+    if synced:
+        session.commit()
+        log.info("source registry synced with config: %d field(s) updated", synced)
     dedup_cfg = config.get("dedup", {}) or {}
     window = int(dedup_cfg.get("window_hours", 72))
     index = deduplicate.RecentIndex.from_articles(
@@ -110,7 +116,9 @@ async def collect(
                 session,
                 name=label,
                 type_=data.get("source_type", "rss"),
-                url=data.get("normalized_url"),
+                # No `url=` on purpose: this is the article's own address, and
+                # writing it here used to fight `sync_sources` (which mirrors the
+                # feed URL from the config) once per round forever.
                 quality=source_quality(config, label),
             )
             session.commit()

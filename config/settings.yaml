@@ -313,6 +313,11 @@ classify:
   model_size_weight: 0.6       # 标题里出现 27B / 0.8B 这类参数量
   repo_title_weight: 1.0       # 标题就是 owner/name 形态的仓库条目
 
+# 低于这条线就在 /stats 与维护日志里报警：磁盘写满时 SQLite 只会静默报错，
+# 表现是"新闻突然不采了"，没有任何别的地方会告诉你原因。
+alerts:
+  min_free_mb: 1024
+
 # 内部枚举值给人看时的中文说法（/sources、--self-check 都会用到）。
 # 键是数据库与配置里的真实取值，不要改键，只改说法。
 labels:

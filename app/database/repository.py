@@ -22,12 +22,12 @@ _ARTICLE_COLUMNS = {column.key for column in Article.__table__.columns}
 # ---------------------------------------------------------------- sources
 def get_or_create_source(session: Session, name: str, type_: str = "rss", url: str | None = None,
                          quality: str = "C", category: str | None = None,
-                         fetch_interval: int | None = None) -> Source:
+                         fetch_interval: int | None = None, *, enabled: bool = True) -> Source:
     source = session.scalar(select(Source).where(Source.name == name))
     if source is None:
         source = Source(
             name=name, type=type_, url=url, quality=quality, category=category,
-            fetch_interval=fetch_interval, enabled=True,
+            fetch_interval=fetch_interval, enabled=enabled,
         )
         session.add(source)
         session.flush()
@@ -38,6 +38,60 @@ def get_or_create_source(session: Session, name: str, type_: str = "rss", url: s
         if quality:
             source.quality = quality
     return source
+
+
+def sync_sources(session: Session, configured: Sequence[dict[str, Any]]) -> int:
+    """Mirror `config/sources.yaml` into the sources table, and say how many rows moved.
+
+    Rows used to be created lazily by the collector loop with `enabled=True` and
+    never revisited, so switching a feed off in the config left the database
+    claiming it was on: VentureBeat AI still reads `enabled=1, error_count=114`
+    long after it was turned off, and the six-hourly maintenance job kept
+    announcing failures for a source nobody was collecting any more.
+
+    Turning a source off also clears its failure state. A counter carried over
+    from before the switch would otherwise be reported as "currently broken" the
+    moment it is re-enabled.
+    """
+    changed = 0
+    known = {str(s.get("name")) for s in configured if s.get("name")}
+    for entry in configured:
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        wanted = bool(entry.get("enabled", True))
+        source = session.scalar(select(Source).where(Source.name == name))
+        if source is None:
+            source = get_or_create_source(
+                session, name, type_=str(entry.get("type") or "rss"),
+                url=entry.get("url"), quality=str(entry.get("quality") or "C"),
+                category=entry.get("category"), fetch_interval=entry.get("fetch_interval"),
+                enabled=wanted)
+            changed += 1
+            continue
+        if source.enabled is not wanted:
+            source.enabled = wanted
+            changed += 1
+            if not wanted:
+                source.error_count = 0
+                source.last_error = None
+        if entry.get("url") and source.url != entry.get("url"):
+            source.url = str(entry["url"])
+            changed += 1
+        if entry.get("quality") and source.quality != str(entry["quality"]):
+            source.quality = str(entry["quality"])
+            changed += 1
+        if str(entry.get("type") or "") and source.type != str(entry["type"]):
+            source.type = str(entry["type"])
+            changed += 1
+    # Config deleted but the DB still remembers it (and would keep being reported):
+    for source in list(session.scalars(select(Source))):
+        if source.name not in known and source.enabled:
+            source.enabled = False
+            source.error_count = 0
+            source.last_error = None
+            changed += 1
+    return changed
 
 
 def mark_source_fetch(session: Session, source_id: int, *, ok: bool, error: str | None = None,

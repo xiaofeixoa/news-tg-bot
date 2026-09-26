@@ -6,6 +6,8 @@ back, so SQLAlchemy sessions never leak into async Telegram code paths.
 
 from __future__ import annotations
 
+import shutil
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -412,6 +414,9 @@ class NewsService:
             "sources_delivering": len(delivering & enabled),
             "sources_failing": sum(1 for s in states if (s.error_count or 0) > 0
                                    and str(s.name) in enabled),
+            # 磁盘写满是静默死亡：SQLite 报错、Bot 停止入库，看起来像"今天没新闻"。
+            # 美西那台 2026-09-26 实测只剩 770MB，而 syslog 每天涨 260MB。
+            "disk_free_mb": int(shutil.disk_usage(str(self.config.settings.data_path)).free / 1024 / 1024),
         }
 
     # ------------------------------------------------------------- settings

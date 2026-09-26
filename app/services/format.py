@@ -418,4 +418,17 @@ def status_line(stats: dict[str, Any]) -> str:
         f"🔌 数据源：{stats.get('sources', 0)} 启用 / {stats.get('sources_configured', 0)} 配置"
         f" · 近 24 小时出过新闻 {stats.get('sources_delivering', 0)} 个"
         + (f" · {stats.get('sources_failing')} 个正在报错" if stats.get("sources_failing") else "")
+        + disk_warning(stats)
     )
+
+
+def disk_warning(stats: dict[str, Any], config: AppConfig | None = None) -> str:
+    """磁盘快到顶时的一句话——写满之后 SQLite 会静默报错，别等到那时才发现。"""
+    free = stats.get("disk_free_mb")
+    if free is None:
+        return ""
+    threshold = int((config or get_config()).get("alerts.min_free_mb", 1024))
+    if int(free) > threshold:
+        return ""
+    return (f"\n⚠️ 磁盘只剩 {int(free) / 1024:.1f}GB（低于 {threshold / 1024:.0f}GB 告警线），"
+            "采集随时可能因写不进数据库而停住")
