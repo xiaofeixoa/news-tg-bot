@@ -417,12 +417,17 @@ def query_articles(
         stmt = stmt.where(Article.source_name == source_name)
     if search:
         like = f"%{search.strip()}%"
+        # The Chinese columns belong in here: upstream text is English, and every
+        # row now carries a translated title/summary, but a query typed in the
+        # language he actually reads matched nothing until 2026-09-26.
         stmt = stmt.where(
             or_(
                 Article.title.ilike(like),
                 Article.content.ilike(like),
                 Article.summary.ilike(like),
                 Article.why_it_matters.ilike(like),
+                Article.title_zh.ilike(like),
+                Article.summary_zh.ilike(like),
             )
         )
     order = [Article.final_score.desc(), Article.published_at.desc()] if order_by_score else [

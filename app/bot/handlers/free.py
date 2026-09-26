@@ -68,6 +68,17 @@ async def cb_free(callback: CallbackQuery, news: NewsService, app_config: AppCon
 
 
 # ------------------------------------------------------------------ helpers
+def _haystack(view: ArticleView) -> str:
+    """Lowercased text a keyword may hit — in both languages.
+
+    Searchers type what they read, so the translated columns have to be part of
+    the filter: dropping them made a keyword look absent from a row whose card
+    plainly shows that keyword.
+    """
+    return " ".join(str(part or "") for part in (
+        view.title, view.summary, view.content, view.title_zh, view.summary_zh)).lower()
+
+
 async def _live(config: AppConfig, *, term: str | None = None) -> tuple[str, bool]:
     """(rendered live block, whether the pricing source answered).
 
@@ -128,8 +139,7 @@ def _collect(news: NewsService, *, days: int, tool: str | None, keyword: str | N
     from app.processing.free_offers import detect
 
     searched = SearchService(config, news).search(keyword, days=days, limit=limit * 3)
-    searched = [i for i in searched if not tool or tool.lower() in
-                ((i.title or "") + (i.summary or "") + (i.content or "")).lower()]
+    searched = [i for i in searched if not tool or tool.lower() in _haystack(i)]
     matched = [item for item in searched
                if detect(item.title, item.summary, item.content, config=config) is not None]
     if matched:
@@ -165,8 +175,7 @@ async def answer_free(message: Message, news: NewsService, config: AppConfig, *,
     if tool:
         filtered = [i for i in items if (i.free_offer or {}).get("tool", "").lower() == tool.lower()]
         if not filtered:
-            filtered = [i for i in news.free_offers(days=days, limit=12)
-                        if tool.lower() in ((i.title or "") + (i.summary or "")).lower()]
+            filtered = [i for i in news.free_offers(days=days, limit=12) if tool.lower() in _haystack(i)]
         items = filtered or items
     tz_name = news.user_for(message.chat.id).get("timezone") or config.settings.timezone
     live, checked = await _live(config, term=tool or keyword_term(question))

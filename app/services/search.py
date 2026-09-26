@@ -51,19 +51,33 @@ class SearchService:
 
     def search(self, query: str, *, days: int = 30, limit: int = 10,
                min_score: float = 0) -> list[ArticleView]:
-        terms = clean_query(query)
+        """Run every LIKE the query justifies, then rank the union.
+
+        One LIKE cannot answer Chinese: `%模型发布%` misses "阿里发布了新模型", and
+        `%英伟达%` misses the row that says NVIDIA. The windows and the alias table
+        close those two holes, and a row is then ranked by how much of the query it
+        actually carries rather than by which pattern happened to be tried first.
+        """
         since = datetime.utcnow() - timedelta(days=max(1, days))
+        pool = build_pool(clean_query(query), query, self.config)
         with session_scope() as session:
-            # Try the whole phrase first; if nothing matches, fall back to the
-            # strongest single token so /search never comes back empty by accident.
-            for candidate in _candidates(terms, query):
-                articles = repo.query_articles(
-                    session, since=since, search=candidate, limit=limit * 2,
+            hits: dict[int, tuple[Any, int]] = {}
+            for candidate, weight in pool.items():
+                rows = repo.query_articles(
+                    session, since=since, search=candidate, limit=limit * 3,
                     min_score=min_score, order_by_score=False, require_processed=False,
                 )
-                if articles:
-                    return [r for r in _views(session, articles)][:limit]
-            return []
+                for article in rows:
+                    previous = hits.get(article.id)
+                    hits[article.id] = (article, weight if previous is None else previous[1] + weight)
+            if not hits:
+                return []
+            ranked = sorted(hits.values(), key=lambda pair: pair[0].published_at or since,
+                            reverse=True)
+            # Stable two-pass sort: newest first, then query coverage, then score.
+            ranked = sorted([(a, w) for a, w in ranked if w >= MIN_MATCH_WEIGHT],
+                            key=lambda pair: (pair[1], pair[0].final_score or 0), reverse=True)
+            return [r for r in _views(session, [article for article, _ in ranked])][:limit]
 
     def counts_by_source(self, *, days: int = 7) -> list[tuple[str, int]]:
         since = datetime.utcnow() - timedelta(days=days)
@@ -205,19 +219,99 @@ def clean_query(query: str) -> list[str]:
     return out
 
 
-def _candidates(terms: list[str], raw: str) -> list[str]:
-    out: list[str] = []
-    phrase = F.plain(raw, 80).strip()
-    if phrase:
-        out.append(phrase)
+# A row's rank is the sum of the weights of the patterns it answers, so these
+# numbers are the ranking policy: matching what he typed beats matching a piece
+# of what he typed, and matching both beats either alone.
+PHRASE_WEIGHT = 3
+TERM_WEIGHT = 2
+WINDOW_WEIGHT = 1
+MAX_ALIASES = 6
+MAX_WINDOWS = 6
+# A single two-character window is not an answer: measured on the live library,
+# "量子隧穿" hit three quantum-computing rows on the window 量子 alone, which is a
+# confidently wrong reply. Two windows, or one real term, or one alias twin is.
+MIN_MATCH_WEIGHT = 2
+
+
+def build_pool(terms: list[str], raw: str, config: AppConfig | None = None) -> dict[str, int]:
+    """{LIKE pattern: weight} - everything one query is allowed to look like."""
+    config = config or get_config()
+    pool: dict[str, int] = {}
+
+    def add(text: str, weight: int) -> None:
+        text = (text or "").strip()
+        if len(text) >= 2 and pool.get(text, 0) < weight:
+            pool[text] = weight
+
+    add(F.plain(raw, 80), PHRASE_WEIGHT)
     for term in terms:
-        if term not in out:
-            out.append(term)
-    # Chinese queries rarely match with spaces between terms.
-    joined = "".join(terms[:3])
-    if joined and joined not in out:
-        out.append(joined)
-    return [o for o in out if o][:5]
+        add(term, TERM_WEIGHT)
+    # Chinese is typed without spaces, so the joined form is what the rows contain.
+    add("".join(terms[:3]), TERM_WEIGHT)
+    for alias in _alias_variants(terms, raw, config):
+        add(alias, TERM_WEIGHT)
+    for window in _subterms(terms):
+        add(window, WINDOW_WEIGHT)
+    return pool
+
+
+def _alias_variants(terms: list[str], raw: str, config: AppConfig) -> list[str]:
+    """The other-language members of every alias group the query touches.
+
+    Brand and taxonomy words travel untranslated on purpose, so the Chinese name
+    of a thing is missing from the rows that are about it: measured on the live
+    library, 英伟达 hits 0 rows and NVIDIA hits 34, 芯片 hits 0 and chip hits 14.
+    """
+    groups = config.get("search.aliases") or {}
+    if not isinstance(groups, dict):
+        return []
+    haystack = f"{raw} {' '.join(terms)}".lower()
+    out: list[str] = []
+    for name, variants in groups.items():
+        members = [str(name)] + [str(v) for v in (variants or [])]
+        if not any(m.lower() in haystack for m in members):
+            continue
+        for member in members:
+            if member.lower() not in haystack and member not in out:
+                out.append(member)
+        if len(out) >= MAX_ALIASES:
+            break
+    return out[:MAX_ALIASES]
+
+
+_CJK_RUN = re.compile(r"[一-鿿]{2,}")
+
+
+def _subterms(terms: list[str]) -> list[str]:
+    """Two-character windows inside a longer Chinese run, worth less than the term.
+
+    `LIKE '%开源模型%'` needs those four characters to sit next to each other, and
+    a translation writes "阿里开源了新的大模型" — the compound is split across the
+    sentence. SQLite has no Chinese word segmenter, so short windows are the only
+    way to reach those rows. Until 2026-09-26 the effect was that every pure
+    Chinese question answered "没有找到相关新闻" while the same words in English
+    returned five hits.
+
+    的 is the only splitter: 和/与/了 look like particles but sit inside real terms
+    (饱和、相关), and cutting there would invent words. Windows are overlapping
+    because the word boundary is not known — 模型推理 needs both 模型 and 推理.
+    """
+    out: list[str] = []
+    for term in terms:
+        for part in term.split("的"):
+            for run in _CJK_RUN.findall(part):
+                if len(run) == 2:
+                    if len(term) > 2:      # "AI 芯片" 写在一起时，芯片是可用的一半
+                        _add(out, run)
+                    continue
+                for index in range(len(run) - 1):
+                    _add(out, run[index:index + 2])
+    return out[:MAX_WINDOWS]
+
+
+def _add(items: list[str], piece: str) -> None:
+    if len(piece) >= 2 and piece not in items:
+        items.append(piece)
 
 
 # "关注" is what he types in both directions: "我想关注 NVIDIA" (a setting) and

@@ -326,7 +326,9 @@ ssh anr-vps 'cd /opt/ai-news-radar && .venv/bin/python scripts/telegram_smoke.py
 | 落库 | `articles.title_zh` / `summary_zh` / `translated_by` | 同左 |
 | 显示优先级 | `summary_zh` > `title_zh` > 原文 | 同左 |
 
-原文永远保留，搜索与去重仍基于原文；翻译失败只会退回英文，**不会丢新闻**。
+原文永远保留，去重仍基于原文；翻译失败只会退回英文，**不会丢新闻**。
+检索两边都查（v1.18 起）：`title/summary/why_it_matters` 之外还查 `title_zh/summary_zh`，
+因为品牌词按设计不译——他打「英伟达」时要靠 `settings.yaml` 的 `search.aliases` 走到 `NVIDIA`。
 
 ### 免密钥路线的实测结论（省得你再试）
 

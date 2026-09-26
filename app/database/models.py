@@ -132,7 +132,7 @@ class Article(Base):
     key_points: Mapped[list[str] | None] = mapped_column(JSON)
 
     # 中文输出：上游是英文源时，这里存中文标题/摘要（LLM 或免费 MT）。
-    # 原文永远保留，搜索与去重仍然基于原文，翻译失败也只是显示英文。
+    # 原文永远保留，去重仍基于原文；检索两边都查，否则中文问句搜不到东西。
     title_zh: Mapped[str | None] = mapped_column(String(512))
     summary_zh: Mapped[str | None] = mapped_column(Text)
     translated_by: Mapped[str | None] = mapped_column(String(16))

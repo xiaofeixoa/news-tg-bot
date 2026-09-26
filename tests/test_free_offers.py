@@ -509,3 +509,17 @@ def test_chrome_headline_falls_back_to_the_title_in_views():
     assert row.display_summary in (None, "")
     assert row.display_line == row.title
     assert row.display_title
+
+
+def test_keyword_filter_sees_both_languages_of_a_row():
+    """/免费 的工具过滤曾经只看英文列：卡片上明写的名字，过滤说没有。"""
+    from app.bot.handlers.free import _haystack
+    from app.services.news import ArticleView
+
+    row = ArticleView(id=1, title="A coding agent now free for students",
+                      url="https://example.com/1", source_name="Example", source_type="rss",
+                      category="Other", subcategory=None, summary=None,
+                      title_zh="某编程 Agent 向学生免费开放 Qoder", summary_zh="限免一个月。")
+    assert "qoder" in _haystack(row), "译文列里的工具名要能被过滤看见"
+    assert "coding agent" in _haystack(row), "原文列仍然得在，否则英文问题会退化"
+

@@ -336,6 +336,24 @@ labels:
     C: C 级（社区）
     D: D 级（个人）
 
+# 检索中英对照表：品牌与术语在译文里按设计保留英文写法（NVIDIA 不会被译成
+# 「英伟达」），所以他打中文词时必须有第二条路走过去。2026-09-26 活库实测：
+# 「英伟达」0 行 vs NVIDIA 34 行；「芯片」0 行 vs chip 14 行；「涨价」0 行 vs
+# 价格 6 行。键随便起，匹配时一组的成员互为同义词（不分大小写），谁出现都算。
+search:
+  aliases:
+    NVIDIA: [英伟达, 老黄, GeForce]
+    AMD: [超威]
+    chip: [芯片, 晶片]
+    semiconductor: [半导体, 芯片]
+    GPU: [显卡, 显存]
+    price: [涨价, 降价, 价格, pricing]
+    funding: [融资, 募资, 筹款, funding, rais]
+    open-weight: [开源, 开放权重, 开放源码, open-source, open source]
+    agent: [智能体, agent]
+    inference: [推理, inference]
+    robot: [机器人, 具身, humanoid]
+
 breaking:
   enabled: true
   threshold: 90
