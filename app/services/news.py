@@ -94,18 +94,28 @@ class ArticleView:
     def display_key_points(self) -> list[str]:
         """Bullets fit to render in a Chinese briefing - translated or AI-written.
 
-        Rule-mode `key_points` are the first sentences of the English body: all
-        439 rows that carry them on the live box have zero Chinese, so every card
-        printed an English block under 核心内容 below an otherwise Chinese summary.
-        They come back as soon as translation reaches them (see `key_points_zh`),
-        and the AI path already writes them in Chinese.
+        Rule-mode `key_points` are the first sentences of the English body. While
+        none of them had Chinese at all (295 of the 423 openable rows on the live
+        box) the card dropped the 核心内容 block in silence, which reads as a broken
+        card, not as a missing translation. His standing call is that English beats
+        nothing, so they render - labelled, via `key_points_in_english`.
         """
         stored = self.meta.get("key_points_zh")
         if isinstance(stored, list) and stored:
             return [str(point) for point in stored if str(point).strip()]
         from app.services.translate import has_cjk
 
-        return [point for point in self.key_points if has_cjk(point)]
+        chinese = [point for point in self.key_points if has_cjk(point)]
+        return chinese or [str(point) for point in self.key_points if str(point).strip()]
+
+    @property
+    def key_points_in_english(self) -> bool:
+        """True when 核心内容 below is the untouched original, not our Chinese text."""
+        if not self.key_points or self.meta.get("key_points_zh"):
+            return False
+        from app.services.translate import has_cjk
+
+        return not any(has_cjk(point) for point in self.key_points)
 
     @property
     def needs_translation(self) -> bool:

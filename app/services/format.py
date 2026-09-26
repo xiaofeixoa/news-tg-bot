@@ -117,9 +117,13 @@ def article_card(
         summary = item.title if item.display_title != item.title else ""
     if summary and summary != item.display_title:
         out += ["<b>一句话总结：</b>", esc(summary), ""]
-    points = (deep or {}).get("key_points") or item.display_key_points or []
+    deep_points = (deep or {}).get("key_points") or []
+    points = deep_points or item.display_key_points or []
     if points:
-        out.append("<b>核心内容：</b>")
+        # 说清楚这段是原文：藏起来看起来像卡片坏了，不标出来看起来像翻错了。
+        heading = ("核心内容（以下为原文，中文翻译还没轮到）"
+                   if not deep_points and item.key_points_in_english else "核心内容")
+        out.append(f"<b>{heading}：</b>")
         out += [f"{BULLET} {esc(p)}" for p in points[:5]]
         out.append("")
     matters = (deep or {}).get("why_it_matters") or item.why_it_matters

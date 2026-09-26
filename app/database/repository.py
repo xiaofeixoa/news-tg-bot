@@ -240,6 +240,23 @@ def untranslated_articles(session: Session, limit: int = 120) -> list[Article]:
     return list(session.scalars(stmt))
 
 
+def rows_with_key_points(session: Session, *, limit: int = 200) -> list[Article]:
+    """Visible rows that have bullets but no Chinese version of them.
+
+    Score-ordered, because the free provider's leftover budget should go to the
+    stories that can reach a briefing or a tap. On the deployed box 295 of the 423
+    rows a reader can open carried `key_points` and showed no 核心内容 block at all.
+    """
+    stmt = (
+        select(Article)
+        .where(Article.is_processed.is_(True), Article.is_archived.is_(False),
+               Article.filtered_out.is_(False), Article.key_points.isnot(None))
+        .order_by(Article.final_score.desc(), Article.published_at.desc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt))
+
+
 def free_offers(session: Session, *, days: int = 30, limit: int = 20,
                 tool: str | None = None, since: datetime | None = None) -> list[Article]:
     """Latest "this is free right now" items, newest first."""

@@ -396,6 +396,125 @@ async def test_translate_pending_fills_chinese_columns_and_drains_queue(session)
 
 
 @pytest.mark.asyncio
+async def test_the_background_round_fills_key_points_with_the_leftover_budget(session):
+    """settings.yaml 一直写着"剩余额度轮到要点"，但后台轮从没真做过这段。"""
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import reset_translator
+
+    ids = seed(session, ("Meta releases an open model", "https://meta.com/llama"))
+    row = session.get(Article, ids[0])
+    row.title_zh = "Meta 发布开放模型"          # 标题摘要都齐了，只剩要点
+    row.summary_zh = "开放权重，可商用。"
+    row.key_points = ["The release includes a 400B variant.", "Pricing drops by a third."]
+    session.commit()
+
+    client = StubClient({
+        "The release includes a 400B variant.": "这次发布包含一个 400B 版本。",
+        "Pricing drops by a third.": "价格下降三分之一。",
+    })
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    reset_translator()
+    try:
+        done = await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+    finally:
+        reset_translator()
+    assert done == 1, "标题摘要已在库里，不该再问；只有要点可翻"
+    session.expire_all()
+    view = get_news_service().by_id(ids[0])
+    assert view.meta["key_points_zh"] == ["这次发布包含一个 400B 版本。", "价格下降三分之一。"]
+    assert view.key_points_in_english is False
+    assert view.display_key_points == ["这次发布包含一个 400B 版本。", "价格下降三分之一。"]
+
+
+@pytest.mark.asyncio
+async def test_one_round_moves_headline_and_bullets_without_double_counting(session):
+    """一行同时被标题段和要点段改到，返回的"处理了几篇"只能算一次。"""
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import reset_translator
+
+    ids = seed(session, ("Mistral ships an edge model", "https://mistral.ai/edge"))
+    row = session.get(Article, ids[0])
+    row.key_points = ["Runs on a phone.", "Price per million tokens falls."]
+    session.commit()
+
+    client = StubClient({
+        "Mistral ships an edge model": "Mistral 发布端侧模型",
+        "Mistral ships an edge model summary sentence in english": "端侧也能跑。",
+        "Runs on a phone.": "可以在手机上运行。",
+        "Price per million tokens falls.": "每百万 token 价格下降。",
+    })
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    reset_translator()
+    try:
+        done = await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+    finally:
+        reset_translator()
+    assert done == 1
+    session.expire_all()
+    view = get_news_service().by_id(ids[0])
+    assert view.title_zh == "Mistral 发布端侧模型"
+    assert view.meta["key_points_zh"] == ["可以在手机上运行。", "每百万 token 价格下降。"]
+
+
+@pytest.mark.asyncio
+async def test_a_point_the_provider_cannot_translate_is_asked_twice_then_dropped(session):
+    """问不出结果的句子不能每轮都把整条预算吃掉——正文提取用的是同一个办法。"""
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import reset_translator
+
+    ids = seed(session, ("Anthropic publishes a long contract", "https://anthropic.com/contract"))
+    row = session.get(Article, ids[0])
+    row.title_zh = "Anthropic 发布长合同"
+    row.summary_zh = "条款很长。"
+    row.key_points = ["Untranslatable gibberish zzzq."]
+    session.commit()
+
+    client = StubClient({})           # 什么都翻不出来
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    reset_translator()
+    try:
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+        session.expire_all()
+        first = session.get(Article, ids[0]).meta.get("key_points_tried")
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+        session.expire_all()
+        second = session.get(Article, ids[0]).meta.get("key_points_tried")
+        asked = len(client.calls)
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+        session.expire_all()
+    finally:
+        reset_translator()
+    assert (first, second) == (1, 2)
+    assert len(client.calls) == asked, "两次问不到就不该再问"
+
+
+def test_card_labels_the_english_bullets_instead_of_dropping_the_block():
+    """藏起来看起来像卡片坏了；他说过额度用尽就直接显示英文。"""
+    config = get_config()
+    view = make_view(key_points=["The model beats GPT-5 on coding benchmarks."])
+    assert view.key_points_in_english is True
+    card = fmt.article_card(view, config=config)
+    assert "核心内容（以下为原文" in card
+    assert "The model beats GPT-5 on coding benchmarks." in card
+
+    translated = make_view(key_points=["English one."],
+                           meta={"key_points_zh": ["中文要点。"]})
+    assert translated.key_points_in_english is False
+    assert "核心内容（以下为原文" not in fmt.article_card(translated, config=config)
+
+
+@pytest.mark.asyncio
 async def test_ensure_chinese_translates_only_what_is_about_to_be_shown(session):
     ids = seed(session, ("Microsoft unveils a Copilot super app", "https://theverge.com/copilot"))
     client = StubClient({"Microsoft unveils a Copilot super app": "微软推出 Copilot 超级应用"})
@@ -505,6 +624,8 @@ def test_translation_queue_uses_the_template_for_releases(session, monkeypatch):
 
     class StubTranslator:
         enabled = True
+        # 真实的 Translator 带着额度计数器；要点那一段会先看它还剩多少。
+        budget = Budget(per_run=99, per_day=99)
 
         async def translate_many(self, texts, hint=""):
             calls.extend(texts)

@@ -567,7 +567,10 @@ async def translate_pending(
     batch = limit or int(config.get("translate.per_run_limit", 120))
     rows = repo.untranslated_articles(session, limit=batch)
     if not rows:
-        return 0
+        # An empty headline queue is the normal state on a box that has been
+        # running for a week. Returning here would mean the 核心内容 pass below
+        # never runs at all, which is how the config's promise stayed a promise.
+        return len(await _translate_key_points(session, translator, config))
 
     titles = [row.title for row in rows if needs_translation(row.title)]
     summaries = [row.summary for row in rows if needs_translation(row.summary)]
@@ -606,7 +609,59 @@ async def translate_pending(
     session.flush()
     if done:
         log.info("translated %d/%d article(s) to Chinese via %s", done, len(rows), mode)
-    return done
+    # A row can be moved by both passes in one round; report it once, or the
+    # "N article(s)" line overstates what the round did.
+    pointed = await _translate_key_points(session, translator, config)
+    return done + len(pointed - {row.id for row in rows})
+
+
+async def _translate_key_points(session: Session, translator: Any, config: AppConfig) -> set[int]:
+    """Spend whatever budget the headlines left on 核心内容, as `translate` promises.
+
+    Returns the ids of rows whose bullets turned Chinese.
+
+    `settings.yaml` has said "要点排在标题和摘要之后，剩余额度才轮到它" for weeks,
+    but the background round only ever queued titles and summaries: a Chinese
+    核心内容 block appeared solely on cards somebody happened to open, and every
+    other row showed no block at all (295 of 423 openable rows on the live box).
+    Two attempts per row, then it stops asking - a body sentence the free provider
+    refuses must not take the whole budget every round for ever.
+    """
+    from app.services.news import CARD_POINTS
+    from app.services.translate import needs_translation
+
+    if not translator.budget.available():
+        return set()
+    scan = int(config.get("translate.points_scan_rows", 120))
+    limit = int(config.get("translate.points_per_run", 40))
+    rows = [row for row in repo.rows_with_key_points(session, limit=scan)
+            if not (row.meta or {}).get("key_points_zh")
+            and (row.meta or {}).get("key_points_tried", 0) < 2]
+    if not rows:
+        return set()
+    asked: list[str] = []
+    for row in rows:
+        for point in (row.key_points or [])[:CARD_POINTS]:
+            text = str(point or "").strip()
+            if text and needs_translation(text) and text not in asked:
+                asked.append(text)
+    if not asked:
+        return set()
+    got = await translator.translate_many(asked[:limit], hint="summary")
+    pointed: set[int] = set()
+    for row in rows:
+        points = [got[str(point).strip()] for point in (row.key_points or [])[:CARD_POINTS]
+                  if str(point or "").strip() in got]
+        if points:
+            row.meta = {**(row.meta or {}), "key_points_zh": points}
+            pointed.add(row.id)
+        else:
+            row.meta = {**(row.meta or {}),
+                        "key_points_tried": (row.meta or {}).get("key_points_tried", 0) + 1}
+    if pointed:
+        log.info("translated key points for %d article(s), %d of %d string(s) asked",
+                 len(pointed), len(got), min(len(asked), limit))
+    return pointed
 
 
 def _link_event(session: Session, article: Article) -> None:
