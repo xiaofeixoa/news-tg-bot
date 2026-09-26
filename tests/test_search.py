@@ -110,6 +110,22 @@ def test_a_row_carrying_both_spellings_outranks_one_that_only_has_the_alias(sess
         "只命中对照词的行分数再高，也不该排在真正含用户原词的那行前面"
 
 
+def test_a_two_concept_query_has_to_answer_both_concepts(session):
+    """「芯片涨价了吗」的第一条曾经是一行只讲价格的新闻——那是半个问题的答案。"""
+    add(session, title="The price tag is bigger than expected",
+        title_zh="价格标签明显高于先前的价格", score=90)
+    add(session, title="A new chip package", title_zh="新的芯片封装工艺", score=95)
+    both = add(session, title="Chip prices keep climbing", title_zh="芯片与内存价格继续上涨")
+    found = service().search("芯片涨价了吗", days=7, limit=5)
+    assert [a.id for a in found] == [both.id]
+
+
+def test_a_single_concept_query_is_not_held_to_that_bar(session):
+    """只有一个概念时，命中它就够——否则「英伟达」又要退回 0 条。"""
+    add(session, title="NVIDIA buys a networking startup", title_zh="NVIDIA 收购一家网络初创公司")
+    assert len(service().search("英伟达", days=7, limit=5)) == 1
+
+
 # ------------------------------------------------------------------- units
 def test_pool_weights_prefer_what_was_actually_typed():
     pool = build_pool(["模型发布"], "模型发布", get_config())
@@ -146,3 +162,9 @@ def test_de_is_the_only_splitter():
 def test_clean_query_strips_chinese_noise_words():
     assert clean_query("最近有哪些模型发布？") == ["模型发布"]
     assert clean_query("最近 AI Agent 有什么值得关注的") == ["AI", "Agent"]
+
+
+def test_clean_query_drops_question_tails():
+    assert clean_query("开源模型有哪些") == ["开源模型"]
+    assert clean_query("芯片涨价了吗") == ["芯片涨价"]
+    assert clean_query("饱和度") == ["饱和度"], "结尾的度不是语气词"

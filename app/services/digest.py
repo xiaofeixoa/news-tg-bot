@@ -150,7 +150,8 @@ class DigestService:
             items, top_items=top_items,
             max_per_source=as_int(cfg.get("digest.max_per_source", 3), 3))
         # 简报里每一条都保证中文：后台翻译轮还没覆盖到的，这里当场补齐
-        day_items = await self.news.ensure_chinese(day_items)
+        # （简报只有标题行 + 摘要行，没有要点，所以不替它花要点的配额）
+        day_items = await self.news.ensure_chinese(day_items, with_points=False)
         blocks = F.section_blocks(
             day_items, config=cfg, tz_name=tz_name,
             top_count=int(cfg.get("digest.top_count", 3)),

@@ -45,7 +45,7 @@ async def show_list(message: Message | None, *, chat_id: int, items: Sequence[Ar
     start = (page - 1) * PER_PAGE
     window = items[start : start + PER_PAGE]
     # 先把即将显示的这几条翻成中文，用户不必等后台翻译轮
-    window = await news.ensure_chinese(list(window))
+    window = await news.ensure_chinese(list(window), with_points=False)
     # Numbers must match the buttons, so re-start the circle per page.
     text = fmt.news_list(window, config=config, tz_name=_tz(news.user_for(chat_id)), title=title)
     keyboard = K.news_list_keyboard([a.id for a in window], page=page, total_pages=total_pages)

@@ -59,25 +59,33 @@ class SearchService:
         actually carries rather than by which pattern happened to be tried first.
         """
         since = datetime.utcnow() - timedelta(days=max(1, days))
-        pool = build_pool(clean_query(query), query, self.config)
+        terms = clean_query(query)
+        pool = build_pool(terms, query, self.config)
+        coverage, needed = concept_coverage(pool, terms, query, self.config)
         with session_scope() as session:
-            hits: dict[int, tuple[Any, int]] = {}
+            hits: dict[int, list[Any]] = {}
             for candidate, weight in pool.items():
                 rows = repo.query_articles(
                     session, since=since, search=candidate, limit=limit * 3,
                     min_score=min_score, order_by_score=False, require_processed=False,
                 )
                 for article in rows:
-                    previous = hits.get(article.id)
-                    hits[article.id] = (article, weight if previous is None else previous[1] + weight)
+                    entry = hits.get(article.id)
+                    if entry is None:
+                        hits[article.id] = [article, weight, set(coverage.get(candidate) or ())]
+                    else:
+                        entry[1] += weight
+                        entry[2] |= coverage.get(candidate) or set()
             if not hits:
                 return []
-            ranked = sorted(hits.values(), key=lambda pair: pair[0].published_at or since,
+            ranked = sorted(hits.values(), key=lambda entry: entry[0].published_at or since,
                             reverse=True)
             # Stable two-pass sort: newest first, then query coverage, then score.
-            ranked = sorted([(a, w) for a, w in ranked if w >= MIN_MATCH_WEIGHT],
-                            key=lambda pair: (pair[1], pair[0].final_score or 0), reverse=True)
-            return [r for r in _views(session, [article for article, _ in ranked])][:limit]
+            ranked = sorted(
+                [entry for entry in ranked
+                 if entry[1] >= MIN_MATCH_WEIGHT and len(entry[2]) >= needed],
+                key=lambda entry: (entry[1], entry[0].final_score or 0), reverse=True)
+            return [r for r in _views(session, [entry[0] for entry in ranked])][:limit]
 
     def counts_by_source(self, *, days: int = 7) -> list[tuple[str, int]]:
         since = datetime.utcnow() - timedelta(days=days)
@@ -138,7 +146,9 @@ class SearchService:
         results = self.search(query, days=days, limit=int(self.config.get("bot.chat_context_size", 12)))
         if intent == "latest" and not results:
             results = self.news.latest(limit=10, min_score=0, hours=24 * days)
-        results = await self.news.ensure_chinese(results)
+        # The chat answer lists one line per row, so this must not spend the
+        # free quota on bullets nothing renders.
+        results = await self.news.ensure_chinese(results, with_points=False)
         if not results:
             return AgentAnswer(
                 f"数据库里最近 {days} 天没有找到与 “{F.plain(query, 60)}” 相关的新闻。\n"
@@ -214,6 +224,11 @@ def clean_query(query: str) -> list[str]:
     out: list[str] = []
     for piece in pieces:
         piece = piece.strip()
+        # Question tails: "开源模型有哪些" asks about 开源模型, and echoing the raw
+        # "开源模型有" back at him reads like a sentence with a word missing.
+        shorter = re.sub(r"[了吗呢吧的有]+$", "", piece)
+        if len(shorter) >= 2:
+            piece = shorter
         if piece and piece.lower() not in [o.lower() for o in out]:
             out.append(piece)
     return out
@@ -255,6 +270,59 @@ def build_pool(terms: list[str], raw: str, config: AppConfig | None = None) -> d
     return pool
 
 
+def _alias_groups(config: AppConfig) -> list[list[str]]:
+    """`search.aliases` as member lists, with groups sharing a word merged.
+
+    A word listed twice is one concept, not two: 芯片 sits under both `chip` and
+    `semiconductor`, and counting those separately would let a chip-only row
+    satisfy a "chip AND price" query.
+    """
+    groups = config.get("search.aliases") or {}
+    if not isinstance(groups, dict):
+        return []
+    merged: list[dict[str, str]] = []
+    for name, variants in groups.items():
+        members = {str(name).lower(): str(name)}
+        members.update({str(v).lower(): str(v) for v in (variants or [])})
+        for existing in merged:
+            if members.keys() & existing.keys():
+                existing.update(members)
+                break
+        else:
+            merged.append(members)
+    return [list(members.values()) for members in merged]
+
+
+def _haystack(terms: list[str], raw: str) -> str:
+    return f"{raw} {' '.join(terms)}".lower()
+
+
+def concept_coverage(pool: dict[str, int], terms: list[str], raw: str,
+                     config: AppConfig) -> tuple[dict[str, frozenset[int]], int]:
+    """Which concept each candidate answers, and how many a row has to answer.
+
+    Two words typed together mean "and", which is the one thing LIKE cannot say:
+    the query 芯片涨价了吗 is one unsegmented run, so a row about prices alone used to
+    come back first and answer only half of the question. When the query touches
+    two or more alias groups, a row must hit two of them. Two is the ceiling on
+    purpose - three-concept queries rarely have one row covering all three, and an
+    empty list is a worse answer than a partial one.
+    """
+    groups = _alias_groups(config)
+    hay = _haystack(terms, raw)
+    triggered = {index for index, members in enumerate(groups)
+                 if any(member.lower() in hay for member in members)}
+    if len(triggered) < 2:
+        return {}, 0
+    coverage = {
+        text: frozenset(index for index in triggered
+                        if any(member.lower() in text.lower() or text.lower() in member.lower()
+                               for member in groups[index]))
+        for text in pool
+    }
+    return coverage, min(2, len(triggered))
+
+
 def _alias_variants(terms: list[str], raw: str, config: AppConfig) -> list[str]:
     """The other-language members of every alias group the query touches.
 
@@ -262,14 +330,13 @@ def _alias_variants(terms: list[str], raw: str, config: AppConfig) -> list[str]:
     of a thing is missing from the rows that are about it: measured on the live
     library, 英伟达 hits 0 rows and NVIDIA hits 34, 芯片 hits 0 and chip hits 14.
     """
-    groups = config.get("search.aliases") or {}
-    if not isinstance(groups, dict):
+    groups = _alias_groups(config)
+    if not groups:
         return []
-    haystack = f"{raw} {' '.join(terms)}".lower()
+    haystack = _haystack(terms, raw)
     out: list[str] = []
-    for name, variants in groups.items():
-        members = [str(name)] + [str(v) for v in (variants or [])]
-        if not any(m.lower() in haystack for m in members):
+    for members in groups:
+        if not any(member.lower() in haystack for member in members):
             continue
         for member in members:
             if member.lower() not in haystack and member not in out:

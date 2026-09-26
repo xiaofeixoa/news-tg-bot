@@ -415,6 +415,34 @@ async def test_ensure_chinese_translates_only_what_is_about_to_be_shown(session)
     assert session.query(Article).get(ids[0]).title_zh == "微软推出 Copilot 超级应用"
 
 
+@pytest.mark.asyncio
+async def test_a_row_that_is_already_chinese_costs_nothing(session):
+    """库里已有 title_zh/summary_zh 时，列表面一条请求都不该发（要点由卡片面负责）。"""
+    ids = seed(session, ("Anthropic publishes a longer context window", "https://anthropic.com/ctx"))
+    row = session.get(Article, ids[0])
+    row.title_zh = "Anthropic 发布更长的上下文窗口"
+    row.summary_zh = "上下文更长了。"
+    row.key_points = ["Pricing drops by a third."]
+    session.commit()
+
+    import app.services.translate as tr
+
+    client = StubClient({"Pricing drops by a third.": "价格下降三分之一。"})
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    tr._translator = translator
+    news = get_news_service()
+    try:
+        listed = await news.ensure_chinese([news.by_id(ids[0])], with_points=False)
+        assert client.calls == [], f"列表面把已经翻好的标题又问了一遍：{client.calls}"
+        await news.ensure_chinese([news.by_id(ids[0])], with_points=True)
+    finally:
+        tr._translator = None
+    assert any("Pricing" in call for call in client.calls), "卡片面仍然要补要点"
+    assert listed[0].display_title == "Anthropic 发布更长的上下文窗口"
+
+
 # ------------------------------------------------------------- rendering
 def test_rendering_prefers_chinese_everywhere():
     config = get_config()

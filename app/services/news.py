@@ -344,12 +344,20 @@ class NewsService:
             for name, count in ranked
         ]
 
-    async def ensure_chinese(self, items: list[ArticleView]) -> list[ArticleView]:
+    async def ensure_chinese(self, items: list[ArticleView], *,
+                             with_points: bool = True) -> list[ArticleView]:
         """Translate exactly these items, right before they are rendered.
 
         Covers the gap between "collected" and "the nightly translation round has
         reached it": whatever the user is about to look at gets Chinese first,
         and the result is written back so it is paid for only once.
+
+        Per field, and only for the fields this surface shows. The item-level
+        decision re-asked for a headline that is already in `title_zh` whenever
+        anything else about that row was missing: measured on the live box, one
+        chat question over 12 already-translated rows cost 9.7 seconds and asked
+        the free provider for 24 strings it had answered before. `with_points`
+        covers the other half - a list has no bullets to render.
         """
         from app.services.translate import get_translator
 
@@ -359,14 +367,17 @@ class NewsService:
         todo = [item for item in items if item.needs_translation]
         if not todo:
             return items
-        titles = await translator.translate_many([i.title for i in todo], hint="title")
+        titles = await translator.translate_many(
+            [i.title for i in todo if not i.title_zh], hint="title")
         summaries = await translator.translate_many(
-            [i.summary for i in todo if i.summary], hint="summary")
+            [i.summary for i in todo if i.summary and not i.summary_zh], hint="summary")
         # Bullets are asked for last: the headline and the one-line summary own the
         # free quota, and whatever is left after them belongs to these.
-        bullets = [point for item in todo if not item.meta.get("key_points_zh")
+        bullets = [point for item in todo if with_points and not item.meta.get("key_points_zh")
                    for point in (item.key_points or [])[:CARD_POINTS]]
         points = await translator.translate_many(bullets, hint="summary") if bullets else {}
+        if not (titles or summaries or points):
+            return items
         mode = translator.mode()
         with session_scope() as session:
             for item in todo:
