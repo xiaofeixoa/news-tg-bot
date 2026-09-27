@@ -308,8 +308,15 @@ class NewsJobs:
         read exactly like "the scheduler never ran". It was the latter: deploys
         cycled the service every 2-3 minutes inside the window, and each fresh
         process waited a full interval before its first check.
+
+        `bad time` joined later, and it is the worst of the three: a malformed
+        `daily_time` makes that briefing impossible forever, not just for one
+        morning, while the scheduler quietly returns "not due" every 5 minutes
+        with nothing to show for it. The two notes that are working as designed
+        (paused, the briefing switch) stay silent on purpose - he set those.
         """
-        if note not in ("already sent today", "window closed"):
+        loud = note in ("already sent today", "window closed") or note.startswith("bad time")
+        if not loud:
             return
         key = (chat_id, kind, str(datetime.utcnow().date()), hhmm)
         if key in self._digest_notes:
@@ -317,7 +324,10 @@ class NewsJobs:
         if len(self._digest_notes) > 200:          # never let this grow unbounded
             self._digest_notes.clear()
         self._digest_notes.add(key)
-        if note == "window closed":
+        if note.startswith("bad time"):
+            log.warning("%s digest for %s can never be sent: %r is not a valid HH:MM - "
+                        "reset it in /设置 or the users row", kind, chat_id, hhmm)
+        elif note == "window closed":
             log.warning("%s digest for %s missed its %s window - no check ran within "
                         "%d minutes of it, so it will not be sent today",
                         kind, chat_id, hhmm, DIGEST_GRACE_MINUTES)

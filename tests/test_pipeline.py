@@ -461,10 +461,15 @@ async def test_a_digest_that_will_not_arrive_says_so(monkeypatch):
     jobs._note_miss(123, "morning", "already sent today", "08:00")   # deduped
     jobs._note_miss(123, "evening", "window closed", "20:00")
     jobs._note_miss(123, "morning", "not yet due", "08:00")          # never spams
+    # 设定时间被写坏（"8am"、空串）时这一份永远不会发，而每 5 分钟的判定只说"还没到点"
+    jobs._note_miss(123, "morning", "bad time '8am'", "8am")
+    jobs._note_miss(123, "morning", "bad time '8am'", "8am")
 
-    assert [level for level, _ in records.items] == ["info", "warning"]
+    assert [level for level, _ in records.items] == ["info", "warning", "warning"]
     assert "already been delivered" in records.items[0][1]
     assert "missed its 20:00 window" in records.items[1][1]
+    assert "can never be sent" in records.items[2][1] and "8am" in records.items[2][1], \
+        "要说清是哪一份、哪个值坏了，否则这条日志没法行动"
 
 
 async def test_run_digests_reports_a_suppressed_send():
@@ -481,6 +486,47 @@ async def test_run_digests_reports_a_suppressed_send():
 
     assert await jobs._run_digests() == 0
     assert noted == [(123, "morning", "window closed", "08:00")]
+
+
+async def test_a_corrupt_briefing_time_reaches_the_log_through_the_real_path(monkeypatch):
+    """接线也要测：`_note_miss` 会说话不够，`_digest_due` 得真的把坏值递给它。
+
+    这条用最真实的形状（不设假 `_digest_due`、sender 为空所以绝不联网）问一个问题：
+    库里 `daily_time` 被写成 "8am" 之后，运维能不能从日志里看出来。
+    """
+    from app.scheduler import jobs as jobs_module
+    from app.scheduler.jobs import NewsJobs
+
+    class Records:
+        def __init__(self) -> None:
+            self.items: list[tuple[str, str]] = []
+
+        def _emit(self, level):
+            def go(msg, *args):
+                self.items.append((level, msg % args if args else msg))
+            return go
+
+        def info(self, msg, *args):
+            self._emit("info")(msg, *args)
+
+        def warning(self, msg, *args):
+            self._emit("warning")(msg, *args)
+
+        def error(self, msg, *args):
+            self._emit("error")(msg, *args)
+
+    records = Records()
+    monkeypatch.setattr(jobs_module, "log", records)
+    jobs = NewsJobs(get_config())
+    jobs._sender = None
+    jobs.chat_ids = lambda: [123]
+    jobs.news.user_for = lambda chat: {"paused": False, "daily_enabled": True,
+                                       "daily_time": "8am", "evening_enabled": False,
+                                       "evening_time": "20:00", "timezone": "Asia/Shanghai"}
+
+    assert await jobs._run_digests() == 0
+    warnings = [text for level, text in records.items if level == "warning"]
+    assert any("can never be sent" in t and "8am" in t for t in warnings), records.items
 
 
 @pytest.mark.asyncio
