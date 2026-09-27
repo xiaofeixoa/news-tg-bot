@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 481 个用例
+.venv/bin/python -m pytest            # 494 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 481 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 494 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1377,6 +1377,36 @@ Traceback 数不变 `db=4/scheduler=4`）：
 - 真库检索：`搜「模型」` 的前几条里就有 #697、#691 这两行**标题只有"模特"**的存量行；
   `搜「模特」` 也走到同一批。481 passed。
 
+### v1.34 启动路径：`--collect` 以前会把常驻服务偷偷起来，SIGTERM 关停有个能跳过 shutdown() 的守卫洞（2026-09-27）
+覆盖率排完序，最薄的可跑代码是 `app/main.py 24%` —— 这个文件决定 systemd 怎么起进程、`--self-check`
+告诉他什么、以及收到 SIGTERM 之后走不走 `shutdown()`。它坏掉的形态不是报错，而是
+"服务看起来是活的"。补 13 个用例（`tests/test_main_paths.py`），挖出两处：
+
+1. **`--collect` / `--types` 不带 `--once` 时被解析完就丢掉**，代码直接落到 `run_forever()`：
+   他敲 `python -m app.main --collect` 想采一轮，实际把**整个常驻服务（含 Bot 轮询）拉起来了**，
+   而且退出码 0、什么也不说。现在这两个参数隐含一次性运行，并打一行提示说明等价于加了 `--once`。
+2. **关停扫描 `if task is not stop_task and task.exception():` 是会炸的**：
+   `Task.exception()` 对**已被取消**的任务不是返回 None，而是**抛出 `CancelledError`**，
+   而它不是 `Exception` 的子类 —— 一旦有被取消的任务落进 `done`（停轮询与停止信号同一拍完成），
+   这行就会把下面的 `shutdown(jobs, scheduler, sender)` 整个跳过（调度器不关、发送会话不关），
+   而 `main()` 的 `except Exception` 也接不住它。实测确认过：`t.cancel()` 之后再 `t.exception()`
+   → `raises CancelledError | isinstance Exception: False`。守卫改成先 `task.cancelled()` 跳过，
+   真失败的轮询任务照旧记 ERROR。
+
+`app/main.py 24% → 72%`，总覆盖 88% → 89%，494 passed（+13）。四处变异全红：
+守卫退回原样 / 守卫连真报错一起咽 / `--collect` 不再隐含一次性 / 去掉那行提示。
+**测的过程中我自己差点记错一个数**：第一次跑 `--self-check | tail -8` 后拿 `$?` 读退出码，
+读的是 `tail` 的 0 而不是程序的 1；去掉管道重测才是 `exit=1`。已按正确的数写在这里。
+
+线上（两台 `stamp=20260927T051706Z`，active、`schema=ok`）：
+- `python -m app.main --collect --types hackernews` → 打印提示、跑一轮（`fetched=24 stored=0 dup=24`）、
+  **进程自己退出 exit=0**，不再常驻；
+- `--self-check` 真实退出码 `1`，并如实列出三项 unset（这次是以 `news` 身份跑、没带 env 文件，
+  所以 token/allowlist 报未设置是**这条命令的正确行为**，不代表服务缺配置）；
+- 关停路径另起一个 `--no-bot` 进程、22 秒后 `kill -TERM` → `exit=0`、stderr **0 个 Traceback**、
+  最后一行是 `shutdown requested`（即 `shutdown()` 走到了）。那个额外进程没有新花配额：它报的是
+  "匿名配额已用完…约 6 分钟后恢复"，也就是 v1.5 持久化的耗尽窗口被子进程继承了。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -1402,10 +1432,12 @@ Traceback 数不变 `db=4/scheduler=4`）：
 NULL，所以只有新行有时间戳，历史归因还是只能靠日志时间戳反推（见 v1.22）。
 `database is locked` 本身还没查（`busy_timeout` 已经是 30 秒，说明撞上的是长写事务或
 WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump 上）。
-覆盖率仍有薄处（v1.28 实测总 76.9%）：
-`bot/handlers/news.py 55.8%`、`scheduler/jobs.py 56.1%`、`main.py 20.3%`——
-CLI 启动路径与新闻列表这两类"他第一时间会撞到、出事最难复现"的地方；
-`bot/handlers/settings.py` 已在 v1.29 补到 90%。
+覆盖率仍有薄处（v1.34 实测总 89%，语句口径）：`bot/handlers/news.py 60.9%`、
+`bot/handlers/free.py 60.7%`、`scheduler/jobs.py 65.7%`、`bot/middleware.py 63%`——
+新闻列表与限免这两个他最常用的出口；`app/main.py` 已在 v1.34 补到 72%、
+`bot/handlers/settings.py` 已在 v1.29 补到 90%、`bot/sender.py` 已在 v1.28 补到 86%。
+`services/llm.py 25.6%`、`collectors/youtube.py 27.9%` 属于**当前模式跑不到的代码**
+（没 LLM key、YouTube 源 disabled），按"先量真实产出再决定"排在后面。
 `collectors/youtube.py 19.8%` 与 reddit 采集器对应的是**当前 disabled 的源**，
 真要用之前需要先补测试（v1.27 只补了 reddit 的纯函数部分）。`bot/sender.py` 已在 v1.28 补到 86%。
 v1.24 只关住了新水：库里**已经存下的 30 条 `meta.stars=0` 仓库行还在**（它们会出现在

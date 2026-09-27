@@ -5,6 +5,9 @@
     python -m app.main --no-bot     # scheduler only (e.g. bot runs elsewhere)
     python -m app.main --self-check # config / db / source health report
 
+--collect and --types imply --once: they only mean something for a one-shot run, and
+silently booting the daemon was the old behaviour.
+
 Exit codes: 0 clean, 1 crash, 2 startup failure, 3 configuration error.
 Code 3 is declared non-retryable in the systemd unit so a missing bot token
 stops the service once with a readable message instead of restarting forever.
@@ -196,8 +199,14 @@ async def run_forever(config: AppConfig, *, with_bot: bool = True) -> int:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
     for task in done:
-        if task is not stop_task and task.exception():
-            log.error("telegram polling stopped: %s", task.exception())
+        if task is stop_task or task.cancelled():
+            # `task.exception()` on a cancelled task *raises* CancelledError, and that
+            # is a BaseException - it would escape main()'s `except Exception` and
+            # skip shutdown() below (scheduler left running, sender session unclosed).
+            continue
+        error = task.exception()
+        if error:
+            log.error("telegram polling stopped: %s", error)
 
     await shutdown(jobs, scheduler, sender)
     if bot is not None:
@@ -209,8 +218,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="ai-news-radar", description="个人 AI 新闻 Agent")
     parser.add_argument("--once", action="store_true", help="采集并处理一轮后退出（不启动 Bot）")
     parser.add_argument("--no-bot", action="store_true", help="只运行采集与调度，不启动 Telegram")
-    parser.add_argument("--collect", action="store_true", help="只采集（配合 --once）")
-    parser.add_argument("--types", default="", help="限定 collector 类型，逗号分隔，如 rss,hackernews")
+    parser.add_argument("--collect", action="store_true", help="只采集（隐含 --once，不启动 Bot）")
+    parser.add_argument("--types", default="", help="限定 collector 类型（隐含 --once），逗号分隔，如 rss,hackernews")
     parser.add_argument("--self-check", dest="self_check", action="store_true", help="检查配置与数据源")
     return parser.parse_args(argv)
 
@@ -223,10 +232,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 2
     types = [t.strip() for t in args.types.split(",") if t.strip()] or None
+    # --collect / --types only mean something for a one-shot run. Before this they
+    # were parsed and then ignored, so `python -m app.main --collect` quietly booted
+    # the daemon (bot polling included) instead of collecting once and exiting.
+    one_shot = args.once or args.collect or bool(types)
+    if one_shot and not args.once:
+        print("提示：--collect/--types 只在一次性运行时有效，这里等同于加了 --once（不会启动 Bot）")
     try:
         if args.self_check:
             return asyncio.run(self_check(config))
-        if args.once:
+        if one_shot:
             stats = asyncio.run(run_once(config, types=types, process=not args.collect))
             for label, value in stats.items():
                 print(f"{label}: {value}")
