@@ -1982,3 +1982,15 @@ max 78.0 · p90 61.8 · p75 57.6 · p60 54.4 · p50 52.7 · p40 51.1 · p30 50.8
 自然换完（明天 20:00 的晚报是第一个干净样本）。用例 +2（其中 1 条是把上面那条假测试修成真的），
 全量 533 通过：Windows 与 anr-jump Linux 都是 `exit=0`（推送前跑的）。两台
 `stamp=20260927T132656Z`、`service=active`，`tree=b5989b48754d5d578b9e5813f1b581fe` 三台一致。
+
+**下一轮的起点已经量好了：突发新闻连续 7 天一条没出。** 48 小时窗口 239 行按 `breaking.gate`
+逐条走一遍：`社区源被挡 163 / 标题无事件词 70 / 超时效 6 / 通过 0`；拉到 7 天（525 行）是
+`296 / 209 / 17 / 分数不够 3 / 通过 0`。而 `breaking.rule.min_community_heat: 250` 那条"社区
+渠道也能破例"的门**不是没人排队**：7 天里 heat≥250 的有 68 行，可它们全卡在事件词或
+`exclude_sources` 之前——比如 `OpenAI Feared "Optics" of what might appear on Hacker News`
+（heat 372）、`Gemini 3.8 text-to-speech`（heat 330）、`DeepSeek Elastic Compute (DSec)`
+（heat 277）三条都是"某个具名产品发布了"，判的却是 `no event in the headline`。
+配置注释写着"实测近 7 天有 4 行"靠热度破例进突发，**今天同一把尺子量出来是 0 行**：
+要么事件词表与真实标题用词脱节了，要么 `event_trigger` 的匹配方式（整词/大小写/短语）
+和这批标题对不上。v1.44 与这条无关，已单独排除：同一批行按新旧两套分数过门禁，
+判定翻转 0 条。
