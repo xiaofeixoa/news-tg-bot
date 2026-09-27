@@ -108,22 +108,6 @@ def settings_keyboard(*, paused: bool, breaking: bool, daily: str, evening: str,
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def sources_keyboard(sources: Sequence[dict]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for source in sources[:20]:
-        flag = "🟢" if source.get("enabled") else "⚪️"
-        if source.get("last_error"):
-            flag = "🔴"
-        row.append(_cb(f"{flag} {source['name']}"[:44], cb(BACK, "sources")))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 def refresh_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_cb("🔄 刷新", cb(BACK, "news"))]])
 

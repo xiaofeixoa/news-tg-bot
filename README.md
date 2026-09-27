@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 494 个用例
+.venv/bin/python -m pytest            # 500 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 494 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 500 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1407,6 +1407,44 @@ Traceback 数不变 `db=4/scheduler=4`）：
   最后一行是 `shutdown requested`（即 `shutdown()` 走到了）。那个额外进程没有新花配额：它报的是
   "匿名配额已用完…约 6 分钟后恢复"，也就是 v1.5 持久化的耗尽窗口被子进程继承了。
 
+### v1.35 /sources 那排按钮从来不存在，而它背后的回调是坏的（2026-09-27）
+`bot/handlers/news.py` 60.9% → 补到 **80%**（`keyboards/inline.py` 79% → **96%**），
+过程中挖到的不是"少测了几行"，而是一个**从来没存在过的功能**和一个**能往订阅表里写假人**的缺省值：
+
+1. **`sources_keyboard` 全仓库没有任何调用点。** `/sources` 实际渲染的是一页纯文本状态表
+   （🟢/🔴/⚪️ + 上次成功时间 + 错误行），而这份"每行一个来源按钮"的键盘只被
+   `keyboards/__init__.py` 导出、从未挂到任何消息上。也就是说它不是"坏了"，是**根本没接上**。
+2. **唯一能触发它的那条回调还是炸的**：`cb_back` 里 `await cmd_sources(callback.message, news)`
+   少传 `cmd_sources` 的第三个参数 `app_config` → 一旦有键盘真发出 `b:sources` 就是
+   `TypeError`；而且这一行原本挂着 `# type: ignore[arg-type]` —— **把类型检查注释掉
+   而不是把参数传对**，这就是那类"被忽略的错误提示"。
+   结论与 v1.28 的 `send_many` 一样：**删**，不是修。留下"看起来有按钮、点下去炸"的代码
+   只会诱使下一个人去接它。`b:topics` 同理（没有键盘发它），未知标签现在改成
+   "回退到新闻列表 + 日志一行 `unknown back tag`"，既不静默也不炸。
+3. **三处 `chat_id = callback.message.chat.id if callback.message else 0`**（`cb_topic`、
+   `cb_page`、`cb_back`）+ `cb_article` 回落 `from_user.id`：前者会让 `user_for(0)`
+   **往订阅者表里写一行假订阅者**（正是我在真库看到的那行 `chat_id=111111111` 的成因类别），
+   后者把**用户号当聊天号**用（群聊里两者不是一回事）。现在统一走 `_chat_of()`：
+   没有可写回的消息就回一句"这条消息已经不可用了，请再用 /news 打开一份"，一行都不写。
+
+500 passed（+6）。四处变异全红：退回 `chat 0` 顶替 / 未知标签不报告 / 把死键盘再挂回来 /
+翻页不看 `page`。我自己的一处测试数据错误也要记：第一条用例我拿 `t:Robots` 当"真存在的栏目键"，
+结果 `category_label("Robots")` 原样回显被我断言成中文缺陷 —— 查了配置与真库
+（库里 8 个栏目全在当前 taxonomy 内，**没有孤儿分类**）才确认是我编了个不存在的键；
+测试改用真的 `t:Research`，并把"未知栏目会露出英文键"这条**降级记录**在下面，不当 bug 修。
+
+线上（两台 `stamp=20260927T054312Z`，active、`schema=ok`、Traceback 数不变 `db=4/scheduler=4`），
+真库 + 已部署代码 + 假 Telegram 对象（不发消息）：
+- `/sources` 首行 `🔌 信息来源`、`挂了按钮吗: False`；
+- 点 `b:sources` → 回退到 `🤖 最新 AI 新闻`，日志出现
+  `unknown back tag 'sources' from chat …; showing the news list instead`；
+- 点 `t:AI Models` → 标题行 `模型发布 分类`，正文里**不再出现英文键**；
+- 第 2 页按钮 `['a:753','a:751','a:752','a:749']` 与库里第 11–14 条一致；
+- 三个回调在 `message=None` 时全部回提示且**库里 chat 0/42 的行数为 0**；
+  探针订阅者删除后剩下的是他真实那行与那行测试残留（`[111111111, 1985298804]`）。
+顺带被这轮探针照出来的一条：`translate route mymemory is out of free quota; retrying in 60 min,
+untranslated lines stay in English` —— 免密钥翻译今早又额度用尽，未译行按他定的规则留英文。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -1432,9 +1470,9 @@ Traceback 数不变 `db=4/scheduler=4`）：
 NULL，所以只有新行有时间戳，历史归因还是只能靠日志时间戳反推（见 v1.22）。
 `database is locked` 本身还没查（`busy_timeout` 已经是 30 秒，说明撞上的是长写事务或
 WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump 上）。
-覆盖率仍有薄处（v1.34 实测总 89%，语句口径）：`bot/handlers/news.py 60.9%`、
-`bot/handlers/free.py 60.7%`、`scheduler/jobs.py 65.7%`、`bot/middleware.py 63%`——
-新闻列表与限免这两个他最常用的出口；`app/main.py` 已在 v1.34 补到 72%、
+覆盖率仍有薄处（v1.35 实测总 89%，语句口径）：`bot/handlers/free.py 60.7%`、
+`scheduler/jobs.py 65.7%`、`bot/middleware.py 63%`——限免这个他常用的出口还欠着；
+`bot/handlers/news.py` 已在 v1.35 补到 80%、`app/main.py` 已在 v1.34 补到 72%、
 `bot/handlers/settings.py` 已在 v1.29 补到 90%、`bot/sender.py` 已在 v1.28 补到 86%。
 `services/llm.py 25.6%`、`collectors/youtube.py 27.9%` 属于**当前模式跑不到的代码**
 （没 LLM key、YouTube 源 disabled），按"先量真实产出再决定"排在后面。
@@ -1443,6 +1481,13 @@ WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump
 v1.24 只关住了新水：库里**已经存下的 30 条 `meta.stars=0` 仓库行还在**（它们会出现在
 `/搜索` 的 14-30 天结果里，只是再也挤不进简报，因为都过了 24 小时窗口）。
 把它们统一标 `filtered_out=1` 是一次批量写他库的操作，没有替他做决定 —— 一句话就能做，等他发话。
+**没被接上的功能与"被注释掉的类型检查"是同一类信号**：v1.35 删掉 `sources_keyboard` 之前，
+它唯一的回调带着 `# type: ignore[arg-type]`。以后在任何文件里看到 `type: ignore` 遮住的
+**参数数量/类型**不匹配，先当作缺陷查，不要当作噪声略过。删掉这条之后**全仓库只剩一处** `type: ignore`（`app/config.py` 的 `ignore[prop-decorator]`，是 pydantic 计算字段的写法问题，不是被遮住的参数不匹配），已经逐条数过。
+**未知栏目键会露出英文内部键**（v1.35 查出为潜在、非现状）：`category_label()` 对不在
+taxonomy 里的键原样回显，所以一旦 `sources.yaml`/分类表被改名而库里还有旧类，`/topics`
+的按钮与空分类提示就会带上英文。今天实测**库里 8 个栏目全在当前 taxonomy 内**，没有孤儿，
+所以没动它 —— 改名分类表之后要回来复查这一条。
 **上一轮我写下的"简报决定不发时一声不吭"是错的**（09-27 02:13 复查代码 + 线上日志后更正）：
 `_note_miss()` 早就存在，而且今天 08:06:37 真就在 `scheduler.log` 里说了
 `morning digest for … skipped: today's 08:00 briefing has already been delivered`。

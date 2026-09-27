@@ -9,6 +9,7 @@ scripts/telegram_smoke.py.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,7 @@ from app.bot.keyboards import inline as K
 from app.bot.middleware import REFUSAL, AccessMiddleware, chat_id_of, is_allowed
 from app.config import get_config
 from app.database import repository as repo
+from app.database.database import session_scope
 from app.processing.normalize import build_article
 from app.services.news import get_news_service
 from app.services.search import SearchService
@@ -444,3 +446,147 @@ def test_chat_id_extraction_from_nested_update():
     assert chat_id_of(FakeMessage(555)) == 555
     callback = FakeCallback("a:1", chat_id=777)
     assert chat_id_of(callback) == 777
+
+
+# ------------------------------------------------- 回调：源码里那两个真缺陷
+def _seed_many(count: int) -> list[int]:
+    from datetime import timedelta
+
+    ids: list[int] = []
+    with session_scope() as s:
+        for i in range(count):
+            title = f"Model release {i} tops the reasoning benchmark for AI agents"
+            data = build_article(
+                title=title, url=f"https://example.org/many-{i}", source_name="OpenAI",
+                source_type="rss", content=f"{title}. " + ("Details about the AI model release. " * 6),
+                published_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=i),
+                quality="A",
+            )
+            article = repo.save_article(s, data)
+            assert article is not None
+            article.is_processed = True
+            article.final_score = 60.0 + i / 100
+            ids.append(article.id)
+        s.commit()
+    return ids
+
+
+@pytest.mark.asyncio
+async def test_sources_page_is_an_honest_status_table_without_buttons(seeded):
+    """`/sources` 是一页只读状态表：没有按钮，也不该假装有。
+
+    以前这里有一份 `sources_keyboard`（每行都是 `b:sources`）但从没被调用过，
+    而它唯一的回调分支还漏传了 `cmd_sources` 的第三个参数 —— 一旦被接上就是 TypeError。
+    v1.35 把这份死代码删掉，这条测试负责证明它没有以"看起来能用"的形式回来。
+    """
+    from app.bot.handlers.news import cmd_sources
+
+    message = FakeMessage(ALLOWED, "/sources")
+    await cmd_sources(message, get_news_service(), get_config())
+    assert "信息来源" in message.last and "RSS 新闻源" in message.last
+    assert message.last_kwargs.get("reply_markup") is None, "只读页不该挂一排点了没用的按钮"
+
+
+def test_the_dead_sources_keyboard_is_gone_from_the_tree():
+    """源码扫描：删掉的死功能不能被重新接回去（grep 比记忆可靠）。
+
+    只看**调用点**——news.py 的注释里写着 `sources_keyboard` 是为了解释为什么删掉它，
+    那不算引用；第一版按整文件子串匹配，被自己的注释判成了"又接回去了"。
+    """
+    root = Path(__file__).resolve().parent.parent
+    markers = ("K.sources_keyboard", "def sources_keyboard", 'cb(BACK, "sources")')
+    hits = []
+    for path in list((root / "app").rglob("*.py")) + list((root / "scripts").rglob("*.py")):
+        code_lines = []
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            code_lines.append(line.split("  # ")[0])
+        if any(marker in line for line in code_lines for marker in markers):
+            hits.append(path.name)
+    assert hits == [], f"被删掉的来源键盘又被接回去了：{hits}"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_back_tag_falls_back_to_the_news_list_with_a_log(seeded):
+    """没见过的回路标签不该静默，也不该炸：给他一份能看的列表，日志里留一行。"""
+    from app.bot.handlers import news as news_handlers
+    from app.bot.handlers.news import cb_back
+
+    logged: list[str] = []
+
+    class Recorder:
+        def debug(self, *a):
+            return None
+
+        def info(self, msg, *args):
+            logged.append(str(msg % args if args else msg))
+
+        warning = error = exception = info
+
+    original = news_handlers.log
+    news_handlers.log = Recorder()
+    try:
+        callback = FakeCallback("b:sources")
+        await cb_back(callback, get_news_service(), get_config())
+    finally:
+        news_handlers.log = original
+    assert any("unknown back tag" in m and "sources" in m for m in logged), logged
+    assert "最新 AI 新闻" in callback.message.last, "回退也要给他一个列表"
+
+
+@pytest.mark.asyncio
+async def test_a_callback_without_a_message_creates_no_phantom_subscriber(seeded):
+    """`user_for(0)` / `user_for(from_user.id)` 是订阅者表里假行的来源。"""
+    from app.bot.handlers.news import (cb_article, cb_back, cb_page, cb_topic)
+
+    ids = _seed_many(2)
+    news = get_news_service()
+    for data in ("p:2", "b:news", f"a:{ids[0]}", "t:AI Models"):
+        callback = FakeCallback(data)
+        callback.message = None
+        await {"p": cb_page, "b": cb_back, "a": cb_article, "t": cb_topic}[data.split(":")[0]](
+            callback, news, get_config())
+        assert "/news" in callback.answers[-1][0], (data, callback.answers)
+        assert "失效" in callback.answers[-1][0] or "不可用" in callback.answers[-1][0]
+    with session_scope() as s:
+        assert repo.get_user(s, 0) is None, "chat 0 不该成为一个订阅者"
+        assert repo.get_user(s, 42) is None, "from_user.id 是用户号，不是聊天号"
+    assert get_news_service().user_for(ALLOWED)["chat_id"] == ALLOWED
+
+
+@pytest.mark.asyncio
+async def test_page_two_numbers_match_page_two_buttons(seeded):
+    """列表上的编号就是按钮，翻页后必须重新从 1️⃣ 开始，且只露出这一页的条数。"""
+    from app.bot.handlers.news import cb_page, show_list
+
+    ids = _seed_many(12)
+    news = get_news_service()
+    items = [news.by_id(i) for i in ids]
+    first = FakeMessage(ALLOWED, "/news")
+    await show_list(first, chat_id=ALLOWED, items=[i for i in items if i],
+                    title="🤖 最新 AI 新闻", news=news, config=get_config())
+    keyboard = first.last_kwargs["reply_markup"]
+    page1_ids = [b.callback_data for r in keyboard.inline_keyboard for b in r
+                 if (b.callback_data or "").startswith("a:")]
+    assert len(page1_ids) == 10, page1_ids
+
+    callback = FakeCallback("p:2")
+    await cb_page(callback, news, get_config())
+    rendered = callback.message.last
+    keyboard2 = callback.message.last_kwargs["reply_markup"]
+    page2_ids = [b.callback_data for r in keyboard2.inline_keyboard for b in r
+                 if (b.callback_data or "").startswith("a:")]
+    assert page2_ids == [f"a:{i}" for i in ids[10:]], page2_ids
+    assert "1️⃣" in rendered and "2️⃣" in rendered and "3️⃣" not in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_an_empty_category_answers_in_chinese_with_the_label(seeded):
+    from app.bot.handlers.news import cb_topic
+
+    callback = FakeCallback("t:Research")     # 真存在的栏目键，最近 7 天在测试库里没有行
+    await cb_topic(callback, get_news_service(), get_config())
+    text = callback.message.last
+    assert "论文与方法" in text and "还没有新闻" in text, text
+    assert "Research" not in text, "分类名要出中文，不是数据库里的内部键"

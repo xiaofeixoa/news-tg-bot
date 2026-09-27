@@ -34,6 +34,17 @@ def _tz(user: dict) -> str:
     return user.get("timezone") or "UTC"
 
 
+STALE_CALLBACK = "这条消息已经不可用了，请再用 /news 打开一份"
+
+
+def _chat_of(callback: CallbackQuery) -> int | None:
+    """这个回调属于哪一份聊天。没有 message 时返回 None，**不要**用 0 顶替：
+    `user_for(0)` 会往订阅者表里写一行永远收不到东西的假订阅者，
+    而 `from_user.id` 是用户号不是聊天号，群聊里两者根本不是一回事。
+    """
+    return callback.message.chat.id if callback.message is not None else None
+
+
 async def show_list(message: Message | None, *, chat_id: int, items: Sequence[ArticleView],
                     title: str, news: NewsService, config: AppConfig, page: int = 1,
                     callback: CallbackQuery | None = None, edit: bool = False) -> None:
@@ -156,7 +167,11 @@ async def cb_article(callback: CallbackQuery, news: NewsService, app_config: App
     if item is None:
         await callback.answer("这条新闻已经不在库里了", show_alert=True)
         return
-    user = news.user_for(callback.message.chat.id if callback.message else callback.from_user.id)
+    chat_id = _chat_of(callback)
+    if chat_id is None:
+        await callback.answer(STALE_CALLBACK, show_alert=True)
+        return
+    user = news.user_for(chat_id)
     await news.ensure_chinese([item])
     text = fmt.article_card(item, config=app_config, tz_name=_tz(user))
     keyboard = K.article_keyboard(item.id, item.url)
@@ -190,22 +205,27 @@ async def cb_deep(callback: CallbackQuery, news: NewsService, search: SearchServ
 @router.callback_query(F.data.startswith(f"{K.TOPIC}:"))
 async def cb_topic(callback: CallbackQuery, news: NewsService, app_config: AppConfig) -> None:
     category = (callback.data or "").split(":", 1)[1]
-    chat_id = callback.message.chat.id if callback.message else 0
+    chat_id = _chat_of(callback)
+    if chat_id is None or callback.message is None:
+        await callback.answer(STALE_CALLBACK, show_alert=True)
+        return
     items = news.by_category(category, limit=PER_PAGE, days=7)
-    if callback.message is not None:
-        if not items:
-            await callback.message.answer(f"{app_config.category_label(category)} 分类最近 7 天还没有新闻。")
-        else:
-            await show_list(callback.message, chat_id=chat_id, items=items,
-                            title=f"{fmt.esc(app_config.category_label(category))} 分类",
-                            news=news, config=app_config)
+    if not items:
+        await callback.message.answer(f"{app_config.category_label(category)} 分类最近 7 天还没有新闻。")
+    else:
+        await show_list(callback.message, chat_id=chat_id, items=items,
+                        title=f"{fmt.esc(app_config.category_label(category))} 分类",
+                        news=news, config=app_config)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(f"{K.PAGE}:"))
 async def cb_page(callback: CallbackQuery, news: NewsService, app_config: AppConfig) -> None:
     page = _int_arg(callback.data.split(":", 1)[1]) or 1
-    chat_id = callback.message.chat.id if callback.message else 0
+    chat_id = _chat_of(callback)
+    if chat_id is None:
+        await callback.answer(STALE_CALLBACK, show_alert=True)
+        return
     context = store.get(chat_id)
     ids = context.article_ids if context else []
     items = [news.by_id(i) for i in ids]
@@ -219,19 +239,23 @@ async def cb_page(callback: CallbackQuery, news: NewsService, app_config: AppCon
 @router.callback_query(F.data.startswith(f"{K.BACK}:"))
 async def cb_back(callback: CallbackQuery, news: NewsService, app_config: AppConfig) -> None:
     tag = (callback.data or "").split(":", 1)[1]
-    chat_id = callback.message.chat.id if callback.message else 0
-    if tag == "sources":
-        await cmd_sources(callback.message, news)  # type: ignore[arg-type]
-    elif tag == "topics":
-        await cmd_topics(callback.message, news)  # type: ignore[arg-type]
-    else:
-        context = store.get(chat_id)
-        items = [news.by_id(i) for i in (context.article_ids if context else [])]
-        items = [i for i in items if i is not None]
-        if not items:
-            items = news.latest(limit=int(app_config.get("bot.news_limit", 10)), hours=72)
-        await show_list(callback.message, chat_id=chat_id, items=items, title="🤖 最新 AI 新闻",
-                        news=news, config=app_config, callback=callback)
+    chat_id = _chat_of(callback)
+    if chat_id is None or callback.message is None:
+        await callback.answer(STALE_CALLBACK, show_alert=True)
+        return
+    if tag != "news":
+        # 今天没有任何键盘会发 b:sources / b:topics：`/sources` 是一页纯文本状态表
+        # （sources_keyboard 从未被调用，已随这轮删除），所以这两条分支走不到，
+        # 而它们里面还藏着一个 TypeError —— cmd_sources 的第三个参数以前没传。
+        # 留着的代价是"看起来有、点下去炸"，所以只保留真正存在的一条回路。
+        log.warning("unknown back tag %r from chat %s; showing the news list instead", tag, chat_id)
+    context = store.get(chat_id)
+    items = [news.by_id(i) for i in (context.article_ids if context else [])]
+    items = [i for i in items if i is not None]
+    if not items:
+        items = news.latest(limit=int(app_config.get("bot.news_limit", 10)), hours=72)
+    await show_list(callback.message, chat_id=chat_id, items=items, title="🤖 最新 AI 新闻",
+                    news=news, config=app_config, callback=callback)
     await callback.answer()
 
 

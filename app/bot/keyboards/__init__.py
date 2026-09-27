@@ -4,7 +4,6 @@ from app.bot.keyboards.inline import (
     news_list_keyboard,
     refresh_keyboard,
     settings_keyboard,
-    sources_keyboard,
     topics_keyboard,
 )
 
@@ -14,6 +13,5 @@ __all__ = [
     "news_list_keyboard",
     "refresh_keyboard",
     "settings_keyboard",
-    "sources_keyboard",
     "topics_keyboard",
 ]
