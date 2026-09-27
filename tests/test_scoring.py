@@ -200,3 +200,42 @@ def test_the_settings_text_describes_the_gate_that_is_actually_in_force():
 
     text = breaking.describe(get_config(), ai_enabled=False)
     assert "热度" in text and "250" in text, f"/设置 说的门必须就是代码里的门：{text}"
+
+
+# ------------------- 采集器交来的是原始计数，不是 0..100 的分量（线上 51 条并列）
+def trending(stars: int) -> dict:
+    """GitHub Trending 的形状：meta 里有 stars，同时把原始星数当 community_heat 交进来。"""
+    article = make(f"someorg/somerepo 收获 {stars:,} 星", meta={"stars": stars, "forks": 40})
+    article["community_heat"] = stars
+    return article
+
+
+@pytest.mark.parametrize("stars", [330, 1422, 7415, 76847, 390594])
+def test_raw_star_counts_stay_inside_the_heat_band(stars):
+    scores = scorer.compute_scores(trending(stars), importance=37, relevance=41,
+                                   novelty_value=65, quality="C", config=get_config())
+    assert 0 <= scores["community_heat"] <= 100, \
+        f"{stars} 星被当成分量原样使用：heat={scores['community_heat']}"
+
+
+def test_a_bigger_repo_is_not_tied_with_a_smaller_one():
+    """钉死在档位上限 = 排序信息全丢。线上实测 51 条并列 78.0。"""
+    cfg = get_config()
+    finals = []
+    for stars in (330, 1422, 7415, 76847):
+        s = scorer.compute_scores(trending(stars), importance=37, relevance=41,
+                                  novelty_value=65, quality="C", config=cfg)
+        assert s["final_score"] <= scorer.tier_cap("C", cfg)
+        finals.append(s["final_score"])
+    assert finals == sorted(finals), f"星数越多分数反而低：{finals}"
+    assert len(set(finals)) >= 3, f"四条只差在星数上的稿子被判成同一档：{finals}"
+    assert finals[-1] < scorer.tier_cap("C", cfg) or finals[0] < finals[-1], finals
+
+
+def test_heat_without_any_signal_field_is_clamped_not_trusted():
+    article = make()                      # meta 里没有任何 HEAT_FIELDS
+    article["community_heat"] = 390594
+    scores = scorer.compute_scores(article, importance=37, relevance=41,
+                                   novelty_value=65, quality="C", config=get_config())
+    assert scores["community_heat"] == 100.0, "无信号可推导时也要压在分量量程内"
+    assert scores["final_score"] <= scorer.tier_cap("C", get_config())

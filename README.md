@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 524 个用例
+.venv/bin/python -m pytest            # 531 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 524 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 531 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1899,3 +1899,54 @@ delivered … in 1 message(s)` + 账本 `本地 09-27 20:03:39`），我把它�
 —— 英文原文实测是 `OpenAI Feared "Optics" of what might appear on Hacker News`（optics = 观感/形象），
 免费 MT 给了物理光学；**全库 `title_zh LIKE '%光学%'` 只有这一行**，所以它现在只是一条记账，不值得为它单独发版。这和 v1.33 的 `model→模特` 同类，
 下一轮先量出现率再按 `SENSE_FIXES` 的规矩加（必须有英文触发词才动手）。
+
+### v1.44 76,847 星的仓库和 330 星的仓库同分：热度分量被原始计数灌满
+v1.43 修完"晚报 8/8 同一个源"之后，池子里那批并列 78.0 的行仍然在——那才是根因。量出来是这样：
+
+```
+带 community_heat 的已处理行: 667   | 其中 >100 的: 76 行   | 最大: 390,594.0
+分布: <=100 有 591 | 101-500 有 37 | 501-1000 有 8 | >1000 有 31
+超 100 的源: GitHub Trending 46、Hacker News 29、Hacker News Free 1
+钉在档位上限(78/100/68)的行: 53
+```
+
+`scorer` 的文档写着 `community_heat*.10`、分量量程 0..100，而 `community_heat()` 就是专门
+把"GitHub 星数 / HN 点数 / Reddit 赞"压进 0..100 的（`HEAT_WEIGHTS`、log 缩放，注释原话
+"Squash wildly different signals"）。但 `compute_scores` 取的是
+`article.get("community_heat") or community_heat(article)` —— **采集器一交数字，那个专门的
+压缩函数就永远轮不到**。而三个采集器交的都是原始计数：`github.py:444` 交 `stars`、
+`hackernews.py:72` 交 `points`、`reddit.py:96` 交 `score`。10% 权重下 heat=1,000 一项就贡献
+约 110 分，于是任何 HN/GitHub 行必然撞穿档位上限、原样被 `min(cap, ...)` 拍成 78.0。
+
+**第二层是我自己的用例抓出来的**：把原始计数挡住之后，`test_a_bigger_repo_is_not_tied_with_a_smaller_one`
+还是红的——`[49.1, 51.5, 51.5, 51.5]`。原因是那个压缩用的上限是 `community_heat_max_signal: 500`，
+500 是"Hacker News 点数"的量级（配置注释自己就这么写），套到星数上：1,422 星就已经 99.9，
+7,415 星和 76,847 星同样顶格 100。**修好一层，另一层继续在并列**。所以改成逐字段上限
+（`scoring.community_heat_ceilings`，星数 2 万饱和、点数/赞/评论 2 千，共享值退回作默认）。
+
+只读地把 820 条已入库行的分量原样喂回新打分器重算（不改库）：
+
+| | 修复前 | 修复后 |
+| --- | --- | --- |
+| 钉在档位上限的行 | 53 | **2** |
+| heat 分量 >100 的行 | 76（库里存的就是原始计数） | **0**，最大正好 100.0 |
+| 全库前 20 名里的 GitHub Trending | 13 | 5 |
+| 前 20 名里的厂商博客 | **0 条** | AWS ML 4、NVIDIA Developer 3、GitHub Releases 2 |
+
+部署后的构建在真库上复核（同样只读）：六条库里都是 78.0 的 trending 行，重算得到
+`43.9 / 45.9 / 49.7 / 52.7 / 58.9 / 60.0`，heat `52.4→100.0`（390,594 星那条现在正好封顶）。
+排序不再等于"谁的星数大"，而是回到文档写的那个加权和——`tier_cap` 的注释要的就是这件事
+（"A random trending repo must not outrank an official announcement"，修复前 13/20 都是随机仓库）。
+
+**三点要说在前面**：
+1. 这只改**以后新打分**的行。库里已有的 `final_score` 不动（改它是一次批量写他的库，等他发话），
+   所以 24 小时窗口要自然滚一晚上，**明天 20:00 的晚报**才是这份修复第一次完整生效的样本。
+2. 上面那张表里我**没有**引用"最大同分簇 145 → 60"这个数：那 145 条是 `score_detail` 缺失的行，
+   我的重算给它们补了默认输入，属于我探针的产物而不是代码的行为。同理，`低于门槛 45 的行数`
+   也不作数。
+3. 如果他觉得"仓库趋势本来就该多上简报"，那要动的是档位上限/权重（`sources_quality.tier_caps`、
+   `scoring.weights`），不是这条 bug——这条 bug 的症状是"星数差 54 倍判定为同一条"。
+
+验证：新增 7 条用例（5 条星数阶梯 + 并列必须破开 + 无信号字段时只准夹紧不准采信），
+两处反向验证（恢复原始计数直用 / 恢复共用 500 上限）全部 CAUGHT；本地 531 passed（524+7）、anr-jump Linux 531 passed `exit=0`（推送前先跑，见 v1.42 第 6 条）；
+两台 `stamp=20260927T124938Z`、`service=active`，奇偶校验 `tree=4bb314f47c4726c9abbc654b9b1a90cc` 三台一致。

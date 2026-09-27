@@ -21,6 +21,13 @@ QUALITY_DEFAULTS = {"A": 95, "B": 80, "C": 65, "D": 45}
 HEAT_FIELDS = ("points", "upvotes", "stars", "stars_today", "comments", "score")
 HEAT_WEIGHTS = {"points": 1.0, "upvotes": 1.0, "score": 1.0, "stars": 0.35, "stars_today": 1.5,
                 "comments": 0.3}
+# The signal level at which a field is "as hot as it gets". One number for every
+# field cannot work: 500 is a huge HN point count and a trivial repo's star count
+# (measured live - with the old shared ceiling of 500, every trending repo above
+# ~1,430 stars saturated at heat 100, so a 1,422-star and a 76,847-star project
+# tied again one layer up from the bug this ceiling exists to fix).
+HEAT_CEILINGS = {"points": 2000.0, "upvotes": 2000.0, "score": 2000.0,
+                 "stars": 20000.0, "stars_today": 2000.0, "comments": 2000.0}
 
 
 def source_quality(source: dict[str, Any] | None = None, *, quality: str | None = None,
@@ -35,7 +42,11 @@ def community_heat(article: dict[str, Any], config: AppConfig | None = None) -> 
     """Squash wildly different signals (GitHub stars vs HN points) into 0..100."""
     config = config or get_config()
     meta = article.get("meta") or {}
-    ceiling = float(config.get("scoring.community_heat_max_signal", 500))
+    # The shared key stays the documented default for any field without its own
+    # ceiling; `community_heat_ceilings` overrides per field from settings.yaml.
+    fallback = float(config.get("scoring.community_heat_max_signal", 500))
+    ceilings = {**HEAT_CEILINGS,
+                **{k.lower(): v for k, v in (config.get("scoring.community_heat_ceilings", {}) or {}).items()}}
     best = 0.0
     for field in HEAT_FIELDS:
         raw = meta.get(field)
@@ -46,6 +57,7 @@ def community_heat(article: dict[str, Any], config: AppConfig | None = None) -> 
         except (TypeError, ValueError):
             continue
         weight = HEAT_WEIGHTS.get(field, 1.0)
+        ceiling = float(ceilings.get(field, fallback)) or fallback
         # log scaling: 100 points and 1000 points are not 10x apart in meaning
         signal = math.log10(1 + value * weight) / math.log10(1 + ceiling) * 100
         best = max(best, min(100.0, signal))
@@ -119,13 +131,31 @@ def compute_scores(
     published = article.get("published_at") or datetime.utcnow()
     age_hours = (datetime.utcnow() - published).total_seconds() / 3600 if isinstance(published, datetime) else 0
 
+    # Collectors hand over their own heat as a **raw count**: github.py sends
+    # `stars`, hackernews.py sends `points`, reddit.py sends `score`, and
+    # base.py copies that straight into the component. `community_heat()` above
+    # exists precisely to squash those scales into 0..100 (stars*0.35 vs points
+    # vs comments are not comparable), but `article.get("community_heat") or ...`
+    # let the raw number win whenever it was non-zero - measured on the live box:
+    # 76 stored rows with heat above 100, the largest 390,594, and 31 of them over
+    # 1,000. At the documented 10% weight, heat=1,000 alone contributes ~110, so
+    # every such row slammed into its tier cap and came out tied at exactly 78.0
+    # (51 rows that way) - which is how a 76,847-star repo and a 330-star one
+    # became indistinguishable, and how one feed filled a whole briefing window.
+    # So: derive the component from the signals, and only fall back to whatever
+    # the feed supplied when there is no signal to derive from - clamped, never
+    # trusted.
+    supplied_heat = float(article.get("community_heat") or 0)
+    derived_heat = community_heat(article, config)
+    heat = derived_heat if derived_heat > 0 else max(0.0, min(100.0, supplied_heat))
+
     scores = {
         "importance_score": float(importance if importance not in (None, 0) else article.get("importance_score") or 0),
         "relevance_score": float(relevance if relevance is not None else article.get("relevance_score") or 50),
         "novelty_score": float(novelty_value if novelty_value is not None else article.get("novelty_score")
                                or novelty(age_hours)),
         "source_quality": float(article.get("source_quality") or source_quality(article, quality=quality, config=config)),
-        "community_heat": float(article.get("community_heat") or community_heat(article, config)),
+        "community_heat": heat,
     }
     # A story with no importance signal at all is filler: make sure the weighted
     # sum cannot float by on source quality alone.

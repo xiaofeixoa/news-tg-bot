@@ -185,6 +185,16 @@ scoring:
   interest_bonus_max: 15
   # Community heat (HN points / Reddit upvotes) is squashed into 0..100
   community_heat_max_signal: 500
+  # 上面那条 500 是" HN 点数 / Reddit 赞"的量级，不能套到星数上：实测 2026-09-27
+  # 共享上限 500 时，1,422 星的仓库就已经顶格 100，76,847 星的那条也是 100 —— 星数
+  # 差 54 倍而热度分量相同，档位上限之外又造出一层并列。逐字段给上限，星数按 2 万饱和。
+  community_heat_ceilings:
+    stars: 20000
+    stars_today: 2000
+    points: 2000
+    upvotes: 2000
+    score: 2000
+    comments: 2000
 
 filters:
   # Layer 1 of the cost control design: pure rules, no tokens spent.
