@@ -1465,15 +1465,31 @@ untranslated lines stay in English` —— 免密钥翻译今早又额度用尽�
 （第一次跑第四处时我改成"只替换 tz 那一行"，可前面的守卫还在 → 那不是等价变异，测试当然抓不到；
 把守卫整块删掉重跑才变红 —— 变异检查要改回**旧行为整体**，不是改回某个片段。）
 
-**线上验证暂时做不了，如实记在这里**：这一轮准备部署时，`ssh anr-jump` 与 `ssh anr-vps`
-同时开始拒绝部署密钥 ——
-`Offering public key: ~/.ssh/ai_news_radar_deploy ED25519 SHA256:C0cVMeRwpb2gQok1AjHrJe1xSrdbkaBGPLMxHdbXYF4`
-→ `Permission denied (publickey,password)`。TCP 与握手都正常（机器活着），是**服务端不再接受这把 key**；
-anr-vps 走 anr-jump 跳板，所以两台一起失联。这是他的基础设施状态，我没有去动任何认证配置，
-也没有试任何口令。因此本轮代码**只在开发机与 GitHub CI 上验证过**（505 用例 + CI 矩阵），
-`scripts/deploy.sh` 未执行成功，两台仍跑着上一版 `stamp=20260927T054312Z`（v1.35，服务 active）。
-密钥恢复之后要做的事：部署 → `delivery_report`/`f:d:90 → f:t:Qoder` 的线上复测 →
-再补这一节的"线上实测"段。
+线上复测（anr-vps `stamp=20260927T062939Z`、active、`schema=ok`；假 Telegram 对象 + 真库，
+不发消息；探针订阅者行测完删除）：
+
+```
+f:d:90       -> '✅ 近 90 天'  saved_days=90
+f:t:Qoder    -> '✅ 近 90 天'  saved_days=90   面板提到 Qoder=True
+7 天→点工具  -> '✅ 近 7 天'   saved_days=7    ← 旧代码在这里会跳回 30 天
+伪造 f:d:99999 -> WARNING free callback asked for days='99999', not one of (7, 30, 90); using 30
+未知 f:z:xx    -> WARNING unknown free callback payload 'z:xx' from chat …; using the default window
+message=None   -> 「这条消息已经不可用了，请再用 /免费 打开一份」×2
+库里 chat 0/42 的行数: 0        他真实那一行逐列比对: 未变
+```
+
+两条 WARNING 也确认能落到 `logs/telegram.log`（生产格式，带北京时间的 `2026-09-27 14:31:36`
++ `WARNING [news.telegram]`），这次探针带上了 `TZ=Asia/Shanghai` —— 上一轮就是因为漏了它而误判过
+"日志没写进去"。**至今真实流量里没有伪造回调**（`free callback` 的行数就是我探针写的那 2 行），
+所以这条告警是"下次有人乱点/客户端被改"时才会长出来。
+
+**基础设施变动（2026-09-27 14:31 检查）**：`192.168.8.99` 这台（anr-jump，原本以 `--no-bot`
+只跑采集）今天 13:58 重启过，`/opt/ai-news-radar` 与 `ai-news-radar.service` **都不在了**
+（`Unit ai-news-radar.service could not be found`，`/root/.ssh/authorized_keys` 里只有刚重新授权
+的这一行 key）。表现是采集端少了一台：`anr-vps` 仍 active、照常采集与投递，但 README §6 里
+"两台代码树哈希一致"这条现在只对 anr-vps 成立，`deploy.sh` 不带参数会在 anr-jump 上失败。
+要么那台被重装/换机（需要重新供给：venv、`/etc/ai-news-radar/env`、systemd 单元、`data/` 里的库），
+要么 IP 现在指向了另一台机器 —— 这件事只有他能确认，我没有去装任何东西。
 
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
@@ -1499,7 +1515,8 @@ anr-vps 走 anr-jump 跳板，所以两台一起失联。这是他的基础设�
 "这条什么时候被处理的"现在能回答；但**存量不回补**：线上 584 行已处理可见行的 `processed_at` 仍是
 NULL，所以只有新行有时间戳，历史归因还是只能靠日志时间戳反推（见 v1.22）。
 `database is locked` 本身还没查（`busy_timeout` 已经是 30 秒，说明撞上的是长写事务或
-WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump 上）。
+WAL checkpoint；v1.21 已经让它不再拖垮整轮，根因仍未查 —— 而且 v1.36 检查时发现 anr-jump
+那台的安装已经不在了，要复查只能等那台恢复或改在 Bot 机上复现）。
 覆盖率仍有薄处（v1.36 实测总 89%，语句口径）：`scheduler/jobs.py 65.7%`、
 `bot/middleware.py 63%`；`bot/handlers/free.py` 已在 v1.36 补到 74%（回调那块已全覆盖，剩下的
 是 `_live` 与回落分支），
@@ -1512,6 +1529,7 @@ WAL checkpoint；v1.21 已经让它不再拖垮整轮，但根因还在 anr-jump
 v1.24 只关住了新水：库里**已经存下的 30 条 `meta.stars=0` 仓库行还在**（它们会出现在
 `/搜索` 的 14-30 天结果里，只是再也挤不进简报，因为都过了 24 小时窗口）。
 把它们统一标 `filtered_out=1` 是一次批量写他库的操作，没有替他做决定 —— 一句话就能做，等他发话。
+**anr-jump（192.168.8.99）这台采集机没了**（v1.36 一节里有证据）：重启后 `/opt/ai-news-radar` 与它的 systemd 单元都不存在，采集量因此只剩 Bot 机一份。
 **没被接上的功能与"被注释掉的类型检查"是同一类信号**：v1.35 删掉 `sources_keyboard` 之前，
 它唯一的回调带着 `# type: ignore[arg-type]`。以后在任何文件里看到 `type: ignore` 遮住的
 **参数数量/类型**不匹配，先当作缺陷查，不要当作噪声略过。删掉这条之后**全仓库只剩一处** `type: ignore`（`app/config.py` 的 `ignore[prop-decorator]`，是 pydantic 计算字段的写法问题，不是被遮住的参数不匹配），已经逐条数过。
