@@ -43,6 +43,9 @@ FIRST_PROCESS_DELAY = 150
 DIGEST_STARTUP_DELAY = 120
 # How late a scheduled briefing may arrive and still count as on time.
 DIGEST_GRACE_MINUTES = 45
+# First health check after boot. Six hours of *uninterrupted* uptime is what the
+# interval alone asks for, and this box restarted 135 times in 46 hours.
+MAINT_STARTUP_DELAY = 20
 LOCK_RETRIES = 3
 
 _SHUTTING_DOWN = False
@@ -269,7 +272,10 @@ class NewsJobs:
                     continue
                 payload = await self.digest.generate(kind, chat_id=chat_id, llm=self.llm)
                 if payload.empty or not payload.messages:
-                    log.info("%s digest for %s skipped: %s", kind, chat_id, note)
+                    # This used to log `skipped: due` - the reason string from the
+                    # check that had just said *yes*. A briefing that composed to
+                    # nothing is a real miss and has to be reported as one.
+                    self._note_miss(chat_id, kind, "nothing to send", str(user[time_key]))
                     continue
                 if self._sender is None:
                     log.warning("no sender: %s digest for %s not delivered", kind, chat_id)
@@ -319,7 +325,8 @@ class NewsJobs:
         with nothing to show for it. The two notes that are working as designed
         (paused, the briefing switch) stay silent on purpose - he set those.
         """
-        loud = note in ("already sent today", "window closed") or note.startswith("bad time")
+        loud = (note in ("already sent today", "window closed", "nothing to send")
+                or note.startswith("bad time"))
         if not loud:
             return
         key = (chat_id, kind, str(datetime.utcnow().date()), hhmm)
@@ -335,11 +342,25 @@ class NewsJobs:
             log.warning("%s digest for %s missed its %s window - no check ran within "
                         "%d minutes of it, so it will not be sent today",
                         kind, chat_id, hhmm, DIGEST_GRACE_MINUTES)
+        elif note == "nothing to send":
+            # Deduped like the others: the watcher retries every 5 minutes, and an
+            # empty pool stays empty for the rest of the grace window.
+            log.warning("%s digest for %s found nothing to send at %s: no stored "
+                        "article cleared the score floor in the briefing window",
+                        kind, chat_id, hhmm)
         else:
             log.info("%s digest for %s skipped: today's %s briefing has already "
                      "been delivered", kind, chat_id, hhmm)
 
     async def run_maintenance(self) -> None:
+        # Archiving commits, so this job is a writer like the other two. Without
+        # the lock it could land in the middle of a collection round - which is
+        # the "database is locked" the lock exists for - and the boot-time report
+        # this job now produces would be the thing that fails.
+        async with self._write_lock:
+            await self._run_maintenance()
+
+    async def _run_maintenance(self) -> None:
         archived = self.news.archive_old()
         stats = self.news.stats()
         with session_scope() as session:
@@ -366,6 +387,14 @@ class NewsJobs:
         if free_mb is not None and free_mb <= floor:
             log.warning("only %sMB free on the database volume (alert below %sMB): "
                         "collection will fail silently once it fills", free_mb, floor)
+        # One line per run, even when everything is fine. Every conditional above
+        # can be silent, and when the whole job is silent that is indistinguishable
+        # from it never having run: 135 boots in 46 hours left exactly one line to
+        # grep for, and telling those two cases apart is the whole job of a log.
+        log.info("health check: %s article(s) in db, %s unprocessed, %s failing "
+                 "source(s), %sMB free (告警线 %sMB)",
+                 stats.get("total_articles", "?"), len(pending), len(failing),
+                 free_mb if free_mb is not None else "?", floor)
 
     async def startup_report(self) -> None:
         stats = self.news.stats()
@@ -475,6 +504,14 @@ def create_scheduler(jobs: NewsJobs, config: AppConfig | None = None) -> AsyncIO
         guarded(jobs.run_maintenance, "maintenance"),
         IntervalTrigger(hours=6),
         id="maintenance", name="maintenance",
+        # An interval-only job is a job that never runs here: the first pass is
+        # six hours into an uninterrupted process, and 135 restarts in 46 hours
+        # produced exactly one maintenance report (2026-09-26 19:39). Whatever it
+        # says is therefore said about once a day at best - including the disk
+        # floor and the processing backlog, the two conditions that are only ever
+        # worth acting on early. The same trap caught the briefings before
+        # DIGEST_STARTUP_DELAY existed.
+        next_run_time=datetime.now() + timedelta(seconds=MAINT_STARTUP_DELAY),
     )
     log.info("scheduler configured with %d job(s)", len(scheduler.get_jobs()))
     return scheduler

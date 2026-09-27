@@ -1057,3 +1057,145 @@ def test_evening_is_not_blocked_by_the_morning_send(monkeypatch):
     ok, note = jobs._digest_due(111, "evening", "20:00", "Asia/Shanghai")
     assert ok and note == "due", f"早报发过不该挡住晚报：{note}"
 
+
+
+# ------------------------------ 维护任务：135 次启动里只跑过一次的那个作业
+def _job(job_id: str):
+    from app.scheduler.jobs import NewsJobs, create_scheduler
+
+    config = get_config()
+    return create_scheduler(NewsJobs(config), config).get_job(job_id)
+
+
+def test_maintenance_runs_at_boot_not_six_hours_after_it():
+    """线上实测：46 小时里调度器启动 135 次，维护任务只产出过 1 条日志。
+
+    纯 IntervalTrigger 的作业，首次执行要等满 6 小时**不间断**运行；每次部署
+    都会把这个计时器清零，所以"哪个源挂了""磁盘还剩多少"这两句他最该看到的
+    话，实际上一年也出不来几次。
+    """
+    from app.scheduler.jobs import MAINT_STARTUP_DELAY
+
+    job = _job("maintenance")
+    assert job is not None, "维护作业根本没注册"
+    lead = _lead(job)
+    assert 0 < lead < MAINT_STARTUP_DELAY * 3, f"维护任务 {lead:.0f} 秒后才跑；启动即体检才有效"
+
+
+def test_every_other_job_still_keeps_its_own_startup_delay():
+    """别把"启动就跑"推广到写库的作业上：那正是 database is locked 的来源。"""
+    from app.scheduler.jobs import DIGEST_STARTUP_DELAY, FIRST_PROCESS_DELAY
+
+    rss = _job("collect:rss")
+    process = _job("ai:process")
+    watcher = _job("digest:watcher")
+    rss_lead = _lead(rss)
+    assert 0 < rss_lead < 60, f"采集作业启动延迟 {rss_lead:.0f}s，本应几秒内就开始"
+    lead_p = _lead(process)
+    lead_d = _lead(watcher)
+    assert lead_p >= FIRST_PROCESS_DELAY - 5, f"AI 处理只等 {lead_p:.0f}s，会和采集撞锁"
+    assert 0 < lead_d <= DIGEST_STARTUP_DELAY + 60
+
+
+def _lead(job):
+    """Seconds from now until this job next fires (they all carry a local tz)."""
+    from datetime import datetime as real_datetime
+
+    return (job.next_run_time - real_datetime.now(job.next_run_time.tzinfo)).total_seconds()
+
+
+def test_maintenance_waits_for_the_writer_lock():
+    """归档会 commit：它必须和其他写者排队，而不是插进一轮采集中间。"""
+    import asyncio
+
+    from app.scheduler.jobs import NewsJobs
+
+    async def scenario():
+        jobs = NewsJobs(get_config())
+        await jobs._write_lock.acquire()
+        try:
+            task = asyncio.create_task(jobs.run_maintenance())
+            await asyncio.sleep(0.05)
+            assert not task.done(), "维护任务没等写锁，会和采集同时 commit"
+        finally:
+            jobs._write_lock.release()
+        await asyncio.wait_for(task, timeout=30)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_maintenance_still_says_it_ran(monkeypatch):
+    """所有告警条件都不成立时，日志里必须还剩一行"我跑过了"。"""
+    from app.scheduler import jobs as jobs_mod
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import NewsService
+
+    info: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "info", lambda *a, **k: info.append(str(a[0]) % a[1:] if a else ""))
+    monkeypatch.setattr(NewsService, "archive_old", lambda self: 0)
+    monkeypatch.setattr(NewsService, "stats", lambda self: {"total_articles": 7, "disk_free_mb": 999_999})
+    jobs = NewsJobs(get_config())
+    monkeypatch.setattr(jobs.news, "user_for", lambda chat_id, **k: {})
+    await jobs.run_maintenance()
+    line = [i for i in info if i.startswith("health check:")]
+    assert line, f"维护跑完一个字都没留：{info}"
+    assert "7 article(s) in db" in line[0] and "999999MB free" in line[0]
+
+
+# ------------------------------------ 空简报：日志不能拿"该发了"当理由
+class _EmptyDigest:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate(self, kind, *, chat_id=None, llm=None):
+        from app.services.digest import Digest
+
+        self.calls += 1
+        return Digest(kind=kind, messages=[], date_label="2026-09-27", empty=True)
+
+
+def _warn_lines(monkeypatch):
+    from app.scheduler import jobs as jobs_mod
+
+    warned: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "warning",
+                        lambda *a, **k: warned.append(str(a[0]) % a[1:] if a else ""))
+    return warned
+
+
+@pytest.mark.asyncio
+async def test_an_empty_briefing_is_not_logged_as_being_due(monkeypatch):
+    """旧日志：`evening digest for X skipped: due` —— 把判定结果当失败原因打印。"""
+    from app.scheduler.jobs import NewsJobs
+
+    warned = _warn_lines(monkeypatch)
+    jobs = NewsJobs(get_config())
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111])
+    user = {"paused": False, "daily_enabled": True, "evening_enabled": True,
+            "daily_time": "08:00", "evening_time": "20:00", "timezone": "Asia/Shanghai"}
+    monkeypatch.setattr(jobs.news, "user_for", lambda chat_id, **k: user)
+    monkeypatch.setattr(jobs, "_digest_due", lambda *a, **k: (True, "due"))
+    jobs.digest = _EmptyDigest()
+    assert await jobs._run_digests() == 0
+    assert any("found nothing to send" in w for w in warned), f"空简报必须说清原因：{warned}"
+    assert not any("skipped: due" in w for w in warned), warned
+
+
+@pytest.mark.asyncio
+async def test_the_empty_briefing_warning_is_not_repeated_every_five_minutes(monkeypatch):
+    from app.scheduler.jobs import NewsJobs
+
+    warned = _warn_lines(monkeypatch)
+    jobs = NewsJobs(get_config())
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111])
+    user = {"paused": False, "daily_enabled": False, "evening_enabled": True,
+            "daily_time": "08:00", "evening_time": "20:00", "timezone": "Asia/Shanghai"}
+    monkeypatch.setattr(jobs.news, "user_for", lambda chat_id, **k: user)
+    monkeypatch.setattr(jobs, "_digest_due", lambda *a, **k: (True, "due"))
+    jobs.digest = _EmptyDigest()
+    for _ in range(3):                   # 观察者每 5 分钟一轮
+        await jobs._run_digests()
+    assert jobs.digest.calls == 3
+    empties = [w for w in warned if "found nothing to send" in w]
+    assert len(empties) == 1, f"同一天的同一份简报只该警告一次：{empties}"

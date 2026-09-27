@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 517 个用例
+.venv/bin/python -m pytest            # 523 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 517 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 523 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1725,5 +1725,81 @@ taxonomy 里的键原样回显，所以一旦 `sources.yaml`/分类表被改名�
 真库 `users` 里还留着一行 `chat_id=111111111` 的订阅者（0 次推送，创建于 2026-09-26 18:59 UTC）：
 这是测试用的假 chat id 写进了生产库，而且它**不在 `ALLOWED_CHAT_IDS` 里**（线上 env 实测），
 所以永远不会收到任何东西，只会让"订阅者数"多 1。删它同样是一次写他库的操作，等他发话。
-**08:00 那次早报到底送没送**仍然是这一层唯一没拿到的直接证据：v1.28/v1.29 都只到"库里/日志里应该
-看得见"，真正的证明要等推送时刻之后去读 `push_logs` 与 `logs/telegram.log`。
+**08:00 那次早报到底送没送**：这一条现在拿到了，三个独立见证（2026-09-27 08:01 北京）：
+`sender.py:74 delivered 2603 chars to chat_id=… as HTML`、`jobs.py:281 morning digest delivered …
+in 1 message(s)`，以及 `push_logs` #15（00:01:39 UTC = 08:01:39 北京）。内容层面 11 条里
+**11/11 标题与摘要都是中文**，分数 47.9–65.8。仍然缺的只有 v1.28 那条多页/半份路径的线上样本。
+
+### v1.42 每六小时一次的体检，46 小时里只跑了 1 次（2026-09-27）
+`run_maintenance` 是唯一一个**没有** `next_run_time` 的作业：只有 `IntervalTrigger(hours=6)`，
+而 APScheduler 的间隔作业是在注册那一刻排下一次，也就是说它要求**连续 6 小时不重启**。
+这台机器的实际节奏不是这样：
+
+```
+logs/scheduler.log 覆盖 2026-09-25 20:55 → 09-27 18:45（46 小时）
+"scheduler configured" 出现 135 次       ← 调度器启动了 135 遍
+维护作业的输出出现 1 次                    ← 2026-09-26 19:39:48，唯一一次跑满 6 小时
+"processing backlog" 0 次，"MB free" 0 次
+```
+
+而那唯一一次运行说了什么：
+
+```
+19:39:48 WARNING source Linux.do 最新话题 has failed 5 times in a row (HTTP 403)
+19:39:48 WARNING source Linux.do 福利分类 has failed 29 times in a row (要求降速)
+19:39:48 WARNING source Reddit ChatGPTCoding has failed 5 times in a row (HTTP 429)
+19:39:48 WARNING source VentureBeat AI has failed 114 times in a row (HTTP 429)
+```
+
+**我第一版把这四行写成了"四个源现在还挂着"，那是错的**，是部署后自己被数据打脸的：新的启动体检
+19:08:06 打印的是 `0 failing source(s)`。查了才知道四个源在 `config/sources.yaml` 里**都已经是
+`enabled: false`**（VentureBeat 那段注释记着原因：数据中心 IP 拿到的 429 连 Retry-After 都没有，
+六小时失败 69 次），而 v1.26 的 `sync_sources` 在关掉源时顺手清了 `error_count`/`last_error`——
+所以 114 这个数字今天既不存在也不该存在。**这个更正本身就是本条的论点**：一份一天只出不来一次的报告，
+内容已经过期了也没人知道；它说过的话（无论是真故障还是当时的旧状态）都没有第二个读者。
+
+真正一直有效、且此刻仍然成立的两个告警目标是：
+- **磁盘**（`alerts.min_free_mb`）：写"满了之后采集会静默失败"的那句，触发条件是 `free <= floor`，
+  而作业本身跑不到——线上 46 小时里 `"MB free"` 出现 **0 次**。当前 1975MB 对 1024MB 告警线，
+  离出事只差 900MB，而唯一的哨兵一天响不了一次。
+- **积压**（`processing backlog`）：突发新闻的门禁在发布 24 小时后过期，队列排到 6 小时以上就该报警。
+  46 小时里 `"processing backlog"` 同样 **0 次**；这次部署后 27 秒它就报了 `2 row(s), oldest waiting 0.0h`
+  ——不是新故障，是终于有人开口。
+
+三处改动：
+1. 维护作业加 `MAINT_STARTUP_DELAY = 20` 秒的启动延迟——每活一次就至少体检一次，6 小时节拍照旧。
+2. `run_maintenance` 现在**排队拿 `_write_lock`**：它会 `archive_old()` 并提交事务，此前是唯一一个
+   在锁外写库的作业。启动即体检如果不排队，换来的就是 `database is locked`——那条恰恰是它自己要报的故障。
+   （20 秒落在 6 个采集作业 5–23 秒的起跑之后，所以它会先在锁上排队；实测 27 秒后打印。）
+3. 补一行无条件的心跳：`health check: N article(s) in db, N unprocessed, N failing source(s), NMB free`。
+   原来这个函数**每条日志都挂在 if 上**，全好时就一个字不说——于是"跑了但没事"和"根本没跑"在日志里
+   长得一模一样。我这次是靠"数日志行数"才发现的，这个发现方式本身就该被消掉。
+
+顺带修掉同一文件里另一句谎话：简报生成为空时，日志是
+`evening digest for … skipped: due` —— 它把 `_digest_due` 刚刚给出的**判定结果**当成了**失败原因**
+打印（`note` 在那个分支里恒等于 `"due"`）。空简报现在走 `_note_miss(…, "nothing to send")`，
+内容是 `found nothing to send at 20:00: no stored article cleared the score floor in the briefing
+window`，并且和另外三种一样按天去重（观察器每 5 分钟一轮，不去重会刷 9 条）。
+
+4 个反向验证（逐一撤销后必须有用例红）：去掉 `next_run_time`、去掉写锁、删掉心跳行、把空简报改回
+`log.info(… note)` —— 全部 CAUGHT。`app/scheduler/jobs.py` 覆盖率 66%→67%（307 句，新增的是维护
+与空简报两条路径），全量 **523 通过**（517+6）。
+
+线上验证（两台 `stamp=20260927T111254Z`，`service=active`、`schema=ok`）：
+anr-vps 启动于 19:07:39（`scheduler configured with 7 job(s)`），维护作业在 **19:08:06** 开口，
+距启动 27 秒：
+
+```
+19:08:06 INFO jobs.py:381 - processing backlog: 2 row(s), oldest waiting 0.0h
+19:08:06 INFO jobs.py:394 - health check: 810 article(s) in db, 2 unprocessed,
+                              0 failing source(s), 1975MB free (告警线 1024MB)
+```
+
+奇偶校验：`tree=5c6ee1bc6e63d5d317dacaaf47f9034d`（三台一致）。配方是
+`find app config scripts tests deploy requirements.txt ! -path "*__pycache__*" | LC_ALL=C sort | xargs md5sum | awk "{print \$1}" | md5sum`，
+**只取哈希列，且不含 README.md**：开发机的 md5sum 是 MSYS 版，输出路径前带 `*`（二进制模式），
+拿整行做摘要会让 100 个文件全部"不一致"；而把 README 算进去又会让文档一改、校验值就自指失效。
+
+同一份日志在这之前的 46 小时里，这类行只有 2026-09-26 19:39 那一条。anr-jump（只采集、不起 bot）
+同样在启动后打印了体检行。维护作业等 `_write_lock` 时没有产生 `database is locked`（部署后
+`grep -c "database is locked" logs/db.log` 与本轮日志均为 0 新增）。
