@@ -1353,3 +1353,85 @@ async def test_two_breaking_stories_in_one_round_are_both_sent(session, monkeypa
     assert sorted(delivered) == sorted([first, second]), \
         f"一轮里两条突发只发出去 {len(delivered)} 条：{delivered}"
     assert sent == len(delivered)
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_row_is_still_timestamped(session, monkeypatch):
+    """放弃一行也要写下放弃的时刻：is_processed=True 之后它再也不会被看过。"""
+    from sqlalchemy import insert
+    from app.database.models import Tag, article_tags
+    from app.processing.pipeline import process_pending
+
+    poison = repo.save_article(session, feed_item("OpenAI ships a reasoning router two",
+                                                  "https://openai.com/router2"))
+    tag = Tag(name="router2")
+    session.add(tag)
+    session.commit()
+    real = repo.attach_tags
+
+    def explode(_session, article, names):
+        if article.id == poison.id:
+            _session.execute(insert(article_tags).values(article_id=article.id, tag_id=tag.id))
+            _session.execute(insert(article_tags).values(article_id=article.id, tag_id=tag.id))
+            _session.flush()
+            return
+        real(_session, article, names)
+
+    monkeypatch.setattr(repo, "attach_tags", explode)
+    for _ in range(3):
+        await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=5)
+        session.commit()
+    row = session.get(Article, poison.id)
+    assert row.process_attempts == 3 and row.is_processed, \
+        f"三次失败后应被放弃：attempts={row.process_attempts} processed={row.is_processed}"
+    assert row.processed_at is not None, "永久结案却没有结案时刻，processed_at 就此留洞"
+
+
+@pytest.mark.asyncio
+async def test_a_dedup_twin_carries_a_processing_timestamp(session):
+    """第二家媒体报道同一事件时生成的孪生行，也是"结案件"，也必须带时刻。"""
+    from app.processing import pipeline
+    from app.processing.normalize import build_article
+
+    original = session.get(Article, repo.save_article(session, feed_item(
+        "Anthropic unveils Claude for classrooms", "https://anthropic.com/classrooms")).id)
+    original.is_processed = True
+    original.processed_at = datetime.utcnow() - timedelta(hours=1)
+    original.final_score = 70.0
+    original.event_id = None
+    session.commit()
+
+    twin_data = build_article(
+        title="Anthropic unveils Claude for classrooms", url="https://deepmind.blog/classrooms",
+        source_name="Google DeepMind", source_type="rss",
+        content="Anthropic unveils Claude for classrooms. " * 6,
+        published_at=datetime.utcnow() - timedelta(hours=2))
+    pipeline._merge_into_event(session, original, twin_data, method="title")
+    session.commit()
+
+    twin = session.scalars(select(Article).where(Article.url == "https://deepmind.blog/classrooms")).first()
+    assert twin is not None, "孪生行没建出来，用例前提就错了"
+    assert twin.meta.get("duplicate_of") == original.id
+    assert twin.is_processed and twin.processed_at is not None, \
+        "去重孪生行标了 is_processed 却没有 processed_at"
+
+
+@pytest.mark.asyncio
+async def test_requeueing_clears_the_finish_time(session):
+    """重新排队的行不能再声称自己已经结案件了。"""
+    from app.processing import enrich
+
+    row = session.get(Article, repo.save_article(session, feed_item(
+        "Mistral releases a small open reasoning model", "https://mistral.ai/small")).id)
+    row.is_processed = True
+    row.processed_at = datetime.utcnow() - timedelta(hours=2)
+    row.content = "too short"          # 低于正文下限才会被 requeue 挑中
+    row.published_at = datetime.utcnow() - timedelta(hours=1)
+    session.commit()
+
+    queued = enrich.requeue_stubs(session, config=get_config(), within_hours=36, limit=5)
+    session.commit()
+    assert queued >= 1
+    session.refresh(row)
+    assert not row.is_processed and row.processed_at is None, \
+        f"回到队列里还留着结案时刻：{row.processed_at}"

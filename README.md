@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 534 个用例
+.venv/bin/python -m pytest            # 537 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 534 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 537 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2027,3 +2027,34 @@ max 78.0 · p90 61.8 · p75 57.6 · p60 54.4 · p50 52.7 · p40 51.1 · p30 50.8
 影响要说清楚：这一改动让**一轮最多能连发 `max_per_day` 条**突发提醒（他手机上可能一次弹 2-3 条），
 这是修好之后的正确行为；如果嫌吵，该调的是 `breaking.max_per_day`（现在 5），不是把不同事件互相
 冷却掉。全量 534 通过（533+1），Windows 与 anr-jump Linux 双绿 `exit=0`，两台 `stamp=20260927T160841Z`、`service=active`，`tree=589a433cb4a51babfa1455274ae2457a` 三台一致。
+
+### v1.47 `is_processed=True` 却不写结案时刻：两条路径在库里留洞
+v1.46 那句"714/844 行没有 `processed_at`"查到底，是**两条路径只翻标志不写时刻**：
+
+1. **去重孪生行**（`_merge_into_event`，第二家媒体报道同一事件时生成的那一行）直接以
+   `is_processed=True` 落库，从不写 `processed_at`，也不动 `process_attempts`——线上特征就是
+   `attempts=0 + 有 final_score + processed_at IS NULL`，而且同一个标题会成对出现（实测
+   `Imbalanced VRAM usage between two GPUs…` 两条、分数都是 51.1）。
+2. **三次失败后放弃的行**：失败处理器写 `is_processed = attempts >= 3`，同样不写时刻；这一行
+   从此再不会被任何队列看到，NULL 就是**永久**的洞。
+
+第三条相反方向的谎也顺手补了：`enrich.requeue_stubs` 把行退回队列（`is_processed=False`、
+`attempts=0`）却留着 `processed_at`，于是"待处理的行"声称自己已经结案。现在退回时清空，
+`processed_at IS NOT NULL` 才真正等价于"这行已经落定"。
+
+`_settle_filtered`（规则过滤）和 `_apply`（正常处理）本来就写时刻，四个出口现在齐了。
+
+线上验证（部署 `stamp=20260927T231653Z` 之后，只读）：
+**部署之后新入库且已结案的行里，缺 `processed_at` 的 0 条**；另有 2 行仍为 NULL，`created_at`
+分别是 09-26 11:40 与 09-27 22:19，属于修复前入库、之后被翻译改写才把 `updated_at` 推过部署点的
+历史遗留。全库历史遗留共 721 行。
+
+**这 721 行我没有回填**，也不建议在没搞清楚之前回填：`created_at` 是入库时刻、`updated_at` 会被
+翻译/补写往前推（这正是 `run_maintenance` 的积压告警只能用 `created_at` 的原因），拿任何一个去填
+"处理完成时刻"都是编数据。要填的话得明确口径（比如统一按入库时刻并在 meta 里标
+`processed_at_backfilled`），那是一次批量写库，等他定。
+
+3 条新用例（孪生行 / 放弃行 / 退回清空），三处反向验证全部 CAUGHT——其中第一次跑反向时我把
+删掉赋值后的 `if` 块留空，结果 `rc=4` 的 IndentationError 被误判成"用例抓住了"；重跑时先
+`compile()` 确认语法仍然成立，才拿到真正的 `rc=1 FAILED`。
+全量 537 通过（534+3），Windows 与 anr-jump Linux 均 `exit=0`；两台 `service=active`、`stamp=20260927T231653Z`，`tree=9a14a5cd607ba43708235797d5651539` 三台一致。

@@ -168,6 +168,10 @@ def requeue_stubs(session: Session, *, config: AppConfig | None = None,
             continue            # already tried; the host refused or had no text
         row.is_processed = False
         row.process_attempts = 0
+        # A row that is waiting again must not keep claiming a finish time, or
+        # `processed_at IS NOT NULL` stops meaning "this row is settled" - the one
+        # thing the backlog and 突发 audits can otherwise rely on.
+        row.processed_at = None
         queued += 1
         if queued >= limit:
             break

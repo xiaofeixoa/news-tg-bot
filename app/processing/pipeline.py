@@ -225,7 +225,17 @@ def _merge_into_event(session: Session, original: Article, data: dict[str, Any],
         community_heat=max(original.community_heat or 0, data.get("community_heat") or 0),
         final_score=original.final_score,
         summary=original.summary,
+        # The twin is stored as a finished row, so it has to carry the timestamp the
+        # other two `is_processed=True` paths write. Without it the column lies by
+        # omission: measured on the live box on 2026-09-27, 32 rows written after the
+        # deploy were `is_processed=True` with a real `final_score` and
+        # `processed_at IS NULL` - every one of them either a twin like this or a row
+        # requeued below, and the twin pairs are visible as two identical titles with
+        # the same score. `processed_at` is the only field that answers "when did we
+        # score this", which is exactly what the breaking-news audit needed and could
+        # not get.
         is_processed=True,
+        processed_at=datetime.utcnow(),
     )
     session.add(sibling)
     session.flush()
@@ -287,6 +297,13 @@ async def process_pending(
             if row is not None:
                 row.process_attempts = (row.process_attempts or 0) + 1
                 row.process_error = f"{type(exc).__name__}: {exc}"[:400]
+                if row.process_attempts >= 3:
+                    # Abandoning a row also has to be timestamped: `is_processed`
+                    # takes it out of the queue forever, so a NULL here would be a
+                    # permanent hole in "when was this last looked at" - the same
+                    # omission the twin path had. It records when we gave up, not a
+                    # score time; `process_error` says which.
+                    row.processed_at = datetime.utcnow()
                 row.is_processed = row.process_attempts >= 3
                 log.warning("processing failed for #%s (%s): %s",
                             row.id, (row.title or "")[:60], exc)
