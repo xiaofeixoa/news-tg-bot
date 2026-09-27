@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 531 个用例
+.venv/bin/python -m pytest            # 533 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 531 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 533 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1950,3 +1950,35 @@ v1.43 修完"晚报 8/8 同一个源"之后，池子里那批并列 78.0 的行�
 验证：新增 7 条用例（5 条星数阶梯 + 并列必须破开 + 无信号字段时只准夹紧不准采信），
 两处反向验证（恢复原始计数直用 / 恢复共用 500 上限）全部 CAUGHT；本地 531 passed（524+7）、anr-jump Linux 531 passed `exit=0`（推送前先跑，见 v1.42 第 6 条）；
 两台 `stamp=20260927T124938Z`、`service=active`，奇偶校验 `tree=4bb314f47c4726c9abbc654b9b1a90cc` 三台一致。
+
+### v1.45 🔥 的真实含义是"这条来自 GitHub 趋势榜"：分线是照着 bug 的产物定的
+v1.44 把打分修好之后，回头一看简报的四层标记整个错位。`breaking.emoji_bars()` 的注释写着
+它的设计依据是"measured top score: 78"，配置注释也说"规则模式实测最高 78"——**而 78 正是
+v1.44 那个 bug 的产物**（46 条钉死在档位上限、全部来自 GitHub Trending）。照着它定的
+`hot_score: 72` 因此只有两种命中方式：要么真的是趋势仓库，要么根本没有。
+
+线上 24 小时窗口 110 行按 v1.44 之后的构建重算（只读，不改库），分位数是：
+
+```
+max 78.0 · p90 61.8 · p75 57.6 · p60 54.4 · p50 52.7 · p40 51.1 · p30 50.8 · p20 47.9 · min 45.9
+一手/媒体稿能到的最高分：65.8（The Verge）—— 低于 72 这条线，永远进不了 🔥
+```
+
+| 分线 | 🔥 | ⭐ | 🔹 | ▫️ |
+| --- | --- | --- | --- | --- |
+| 旧 72/62/52 | 2% | 6% | 43% | **47%** |
+| 新 62/54/49（p90/p60/p25） | 9% | 33% | 34% | 22% |
+
+旧线下**近一半入选池子的稿子被渲染成 ▫️"不重要"**，而 ⭐ 只有 6%。改完之后部署构建实测
+（`score_emoji`，同一台机器）：`65.8 → 🔥`（旧：⭐）、`61.8 → ⭐`（旧：🔹）、`49.7 → 🔹`（旧：▫️）。
+
+顺带修掉一个我自己刚写的假测试：`test_the_code_fallbacks_match_the_configured_bars` 第一版拿
+**带着配置的** config 去比 `emoji_bars()`，而那三个数永远是从配置读出来的，兜底值改成 72 也测不出
+差别——反向验证直接 NOT CAUGHT。改成用一个真正没有这些键的 `AppConfig(raw={})` 走兜底那条路，
+并在测试里断言"这条路确实返回 None"，否则检查本身是空的。三处反向（🔥 退回 72 / 兜底漂移 /
+🔹 抬到 60）现在全部 CAUGHT。
+
+**存量行仍带着 78.0 的旧分**，所以今天的 🔥 还是会偏向趋势仓库；和 v1.44 一样，等 24 小时窗口
+自然换完（明天 20:00 的晚报是第一个干净样本）。用例 +2（其中 1 条是把上面那条假测试修成真的），
+全量 533 通过：Windows 与 anr-jump Linux 都是 `exit=0`（推送前跑的）。两台
+`stamp=20260927T132656Z`、`service=active`，`tree=b5989b48754d5d578b9e5813f1b581fe` 三台一致。

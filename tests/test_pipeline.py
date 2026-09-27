@@ -702,9 +702,51 @@ def test_breaking_hot_bar_keeps_the_emoji_ladder_ordered():
 
     cfg = get_config()
     hot, star, dot = breaking.emoji_bars(cfg, ai_enabled=False)
-    assert hot < 78, "规则模式实测最高 78 分，🔥 必须够得着"
+    # 旧断言写的是 `hot < 78`，而"78"是 v1.44 那个并列值（46 条钉死在档位上限，全是
+    # GitHub 趋势仓库）。按修复后重算的 24 小时池子，一手/媒体稿能到的最高分是 65.8，
+    # 所以这条线必须压在它下面，🔥 才是"这条新闻很热"而不是"这条来自趋势榜"。
+    assert hot <= 66, f"规则模式里非趋势源实测最高 65.8，🔥 线 {hot} 永远够不着"
     assert hot > star > dot, "否则 ⭐ 比 🔥 还稀有，图例就反了"
     assert breaking.emoji_bars(cfg, ai_enabled=True)[0] == 90.0
+
+
+def test_the_emoji_ladder_covers_a_real_days_pool_without_a_dead_band():
+    """四条线必须把一天池子切成四层，任何一层都不许是空的或占掉一半。
+
+    分数不是编的：2026-09-27 线上 24 小时窗口 110 行**重算**后的分位阶梯
+    （max / p90 / p75 / p60 / p50 / p40 / p30 / p20 / min，只读重算不改库）。
+    整套池子上新线给出 🔥9% ⭐33% 🔹34% ▫️22%，旧线 72/62/52 给出 2% / 6% / 43% / 47%。
+    """
+    from app.services.format import score_emoji
+
+    pool = [78.0, 61.8, 57.6, 54.4, 52.7, 51.1, 50.8, 47.9, 45.9]
+    counts = {"🔥": 0, "⭐": 0, "🔹": 0, "▫️": 0}
+    for score in pool:
+        counts[score_emoji(score)] += 1
+    n = len(pool)
+    for band, count in counts.items():
+        assert count > 0, f"分线把 {band} 这一层完全清空了：{counts}"
+    assert counts["🔥"] * 100 <= n * 25, f"🔥 滥发了：{counts}"
+    assert counts["▫️"] * 100 <= n * 40, f"四成入选稿子被标成'不重要'：{counts}"
+
+
+def test_the_code_fallbacks_match_the_configured_bars():
+    """删掉配置键不该把 72/62/52 那套照着并列值定的旧线招回来。
+
+    反面教训：这条用例第一版拿**带着配置的** cfg 去比 emoji_bars()，而那三个数
+    永远是配置里读出来的——兜底值改成 72 也测不出来（反向验证 NOT CAUGHT）。
+    必须用一个真的没有这些键的 config 走兜底那条路。
+    """
+    from app.config import AppConfig
+    from app.processing import breaking
+
+    cfg = get_config()
+    configured = tuple(float(cfg.get(f"breaking.rule.{k}"))
+                       for k in ("hot_score", "star_score", "dot_score"))
+    bare = AppConfig(settings=cfg.settings, raw={}, sources=[])
+    assert bare.get("breaking.rule.hot_score") is None, "这个 config 没有真的走兜底路径，检查本身是空的"
+    assert breaking.emoji_bars(bare, ai_enabled=False) == configured, \
+        f"配置 {configured} 与代码兜底不一致：{breaking.emoji_bars(bare, ai_enabled=False)}"
 
 
 @pytest.mark.asyncio

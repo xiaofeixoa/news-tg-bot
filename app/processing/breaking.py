@@ -148,9 +148,14 @@ def gate(article: Any, *, config: AppConfig | None = None, ai_enabled: bool | No
 def emoji_bars(config: AppConfig | None = None, *, ai_enabled: bool | None = None) -> tuple[float, float, float]:
     """(🔥, ⭐, 🔹) cut-offs for briefing rows - the whole ladder, not just the top.
 
-    🔥 has to stay reachable. Under the AI bar of 90 no rule-mode article can
-    show it (measured top score: 78), and hard-coding the lower steps at 75/60
-    made ⭐ rarer than 🔥, which reads as a broken legend instead of a ranking.
+    The three fallbacks below must match `breaking.rule.*_score` in settings.yaml,
+    which carries the measurement they were set from (2026-09-27: p90/p60/p25 of a
+    110-row live window = 62/54/49). They used to sit at 72/62/52 because the
+    highest score anyone could measure was 78 - but that 78 was the tier cap being
+    slammed through by raw heat counts (v1.44), i.e. 46 rows were tied at it and
+    every one of them was a trending repo. Calibrating "how hot is this news"
+    against a scoring artifact made 🔥 mean "GitHub" and left 47% of a day's
+    eligible pool rendering as ▫️ "not important".
     """
     config = config or get_config()
     if ai_enabled is None:
@@ -158,9 +163,9 @@ def emoji_bars(config: AppConfig | None = None, *, ai_enabled: bool | None = Non
     if ai_enabled:
         return (as_float(config.get("breaking.threshold",
                                     config.settings.breaking_news_threshold), 90.0), 75.0, 60.0)
-    return (as_float(config.get("breaking.rule.hot_score"), 72.0),
-            as_float(config.get("breaking.rule.star_score"), 62.0),
-            as_float(config.get("breaking.rule.dot_score"), 52.0))
+    return (as_float(config.get("breaking.rule.hot_score"), 62.0),
+            as_float(config.get("breaking.rule.star_score"), 54.0),
+            as_float(config.get("breaking.rule.dot_score"), 49.0))
 
 
 def describe(config: AppConfig | None = None, *, ai_enabled: bool | None = None) -> str:
