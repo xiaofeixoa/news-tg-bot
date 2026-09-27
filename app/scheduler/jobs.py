@@ -231,9 +231,16 @@ class NewsJobs:
 
     async def send_breaking(self, article_ids: Iterable[int]) -> int:
         sent_total = 0
+        # One round may find several independent events. The cooldown is measured
+        # against the last *delivered* push, so the first send of the round would
+        # otherwise put every later story of that same round on "cooldown 60 min
+        # left" - which is how four qualifying rows in a week became one alert.
+        sent_this_round: set[int] = set()
         for article_id in article_ids:
             for chat_id in self.chat_ids():
-                ok, reason = self.digest.can_send_breaking(chat_id, article_id=article_id)
+                ok, reason = self.digest.can_send_breaking(
+                    chat_id, article_id=article_id,
+                    respect_cooldown=chat_id not in sent_this_round)
                 if not ok:
                     log.info("breaking #%s skipped for %s: %s", article_id, chat_id, reason)
                     continue
@@ -246,6 +253,7 @@ class NewsJobs:
                 sent = await self._sender.send_digest(chat_id, payload)
                 if sent:
                     self.digest.record_delivery(chat_id=chat_id, digest=payload)
+                    sent_this_round.add(chat_id)
                     sent_total += sent
         return sent_total
 

@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 533 个用例
+.venv/bin/python -m pytest            # 534 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 533 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 534 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1994,3 +1994,36 @@ max 78.0 · p90 61.8 · p75 57.6 · p60 54.4 · p50 52.7 · p40 51.1 · p30 50.8
 要么事件词表与真实标题用词脱节了，要么 `event_trigger` 的匹配方式（整词/大小写/短语）
 和这批标题对不上。v1.44 与这条无关，已单独排除：同一批行按新旧两套分数过门禁，
 判定翻转 0 条。
+
+> **这一段里"超时效 6 / 17"这两个数是坏的**（v1.46 复查时发现）：那次把 `at` 缺省成了
+> "现在"，于是七天前的稿子全被判成超时。按每行**自己**的处理时刻重跑，结论变成
+> "严格只有 0/130 合格、按入库时刻 8/539 合格"，而且真正的凶手是同轮冷却，见 v1.46。
+
+### v1.46 同轮第二条突发被自己刚发的那条冷却掉了（8 条里只发出去 1 条）
+顺着上一段"突发 7 天 0 条"的记账量下去，先把自己写错的结论纠正掉：那条**"按每行自己被处理的时刻
+4 行合格"**用的是 `processed_at or updated_at or created_at`，而 `updated_at` 会被翻译/补写不断往前推
+（这一点我在 v1.?? 的注释里自己写过，这次却拿它当了时刻）。全库实测：`is_processed=True` 的 844 行里
+**只有 130 行带 `processed_at`**，714 行为空（且空的那批最晚到 09-27 14:26 发的稿，不是历史遗留）。
+按**严格** `processed_at` 判定：130 行里 0 行合格；按 `created_at`（入库时刻）判定：7 天里 8 行合格
+（Anthropic 付 Akamai 116 亿、法院裁定、OpenAI 智能体黑进 Hugging Face 的细节、Nscale $3.36B……）。
+也就是说"突发到底有没有触发过"这个问题，**被缺时间戳这件事本身挡住了**——这一条记在下一轮。
+
+真正抓到并且修掉的缺陷在这里：`send_breaking` 是
+`for article_id: for chat_id: can_send_breaking(...)`，而 `can_send_breaking` 的冷却是
+**对照上一条已发出的 `push_logs` 行**算 `elapsed < cooldown_minutes(60)`。于是同一轮里第一条大新闻
+发出去之后，同一批的第二条立刻被判 `cooldown 59 min left`——**冷却把自己这一轮的后半截吃掉了**。
+用例 `test_two_breaking_stories_in_one_round_are_both_sent`（临时库，抓取式 sender，不碰生产库、
+不发他任何消息）先红：`一轮里两条突发只发出去 1 条：[1]`。
+
+修法：`can_send_breaking(..., respect_cooldown=True)`，同一轮里已经给这个 chat 发过一条之后传
+`False`；**每天上限（max_per_day=5）与"同一事件已发过"两道闸照旧生效**，跨轮的冷却一行没动
+（`test_breaking_guard_respects_cooldown_and_daily_cap` 在两次反向验证里都保持绿色）。
+两处反向验证：把参数写死 True、把 digest 里的 `and respect_cooldown` 去掉 —— 全部 CAUGHT。
+
+部署后的线上重放（VPS，`tempfile` 独立 DATA_DIR，抓取式 sender）：把 09-26 那一轮真实合格的标题
+喂进去，**送出 2 条 breaking**（修复前同一段代码只会送出 1 条）。第一次重放我把自己缩写过的标题
+也喂了进去，第三条被门禁以"没有事件词"拒绝——那是我构造的标题不像原文，改用库里的真标题后消失。
+
+影响要说清楚：这一改动让**一轮最多能连发 `max_per_day` 条**突发提醒（他手机上可能一次弹 2-3 条），
+这是修好之后的正确行为；如果嫌吵，该调的是 `breaking.max_per_day`（现在 5），不是把不同事件互相
+冷却掉。全量 534 通过（533+1），Windows 与 anr-jump Linux 双绿 `exit=0`，两台 `stamp=20260927T160841Z`、`service=active`，`tree=589a433cb4a51babfa1455274ae2457a` 三台一致。

@@ -205,8 +205,19 @@ class DigestService:
         message = F.breaking_card(item, config=self.config, tz_name=tz_name)
         return Digest(kind="breaking", messages=[message], article_ids=[item.id])
 
-    def can_send_breaking(self, chat_id: int, *, article_id: int | None = None) -> tuple[bool, str]:
-        """Cooldown + daily cap + user switch (design doc section 16.3)."""
+    def can_send_breaking(self, chat_id: int, *, article_id: int | None = None,
+                          respect_cooldown: bool = True) -> tuple[bool, str]:
+        """Cooldown + daily cap + user switch (design doc section 16.3).
+
+        `respect_cooldown=False` is for the 2nd..nth story of the *same* processing
+        round: the cooldown exists to stop a message cannon over time, but the
+        first delivery of a round starts that clock immediately, so a second,
+        independent event found in the very same round was rejected as
+        "cooldown 60 min left". Measured 2026-09-26: four rows cleared the gate in
+        a week and only one `breaking candidate` ever got logged - two of those
+        four were processed in the same minute. The daily cap below still bounds a
+        round, and "already sent as breaking" still stops repeats.
+        """
         cfg = self.config
         breaking_cfg = cfg.get("breaking", {}) or {}
         cooldown = int(breaking_cfg.get("cooldown_minutes", cfg.settings.breaking_cooldown_minutes))
@@ -248,7 +259,7 @@ class DigestService:
             if count >= max_per_day:
                 return False, f"daily cap reached ({count}/{max_per_day})"
             last = repo.last_push_of(session, user=user, kind="breaking")
-            if last is not None and cooldown > 0:
+            if last is not None and cooldown > 0 and respect_cooldown:
                 elapsed = (datetime.utcnow() - last.created_at).total_seconds() / 60
                 if elapsed < cooldown:
                     return False, f"cooldown {cooldown - elapsed:.0f} min left"

@@ -1312,3 +1312,44 @@ async def test_one_tied_source_cannot_own_the_whole_briefing(session):
     assert sources.count("GitHub Trending") <= cap, \
         f"{sources.count('GitHub Trending')} 条来自并列满分的同一个源，上限是 {cap}：{sources}"
     assert len(set(sources)) >= 3, f"一份简报不该只有一个声音：{sources}"
+
+
+def _breaking_row(session, title: str, url: str) -> int:
+    from app.services.news import get_news_service
+
+    get_news_service().user_for(111111111)
+    stored = repo.save_article(session, feed_item(title, url))
+    article = session.get(Article, stored.id)
+    article.final_score = 96
+    article.source_quality = 95
+    article.is_processed = True
+    article.category = "AI Models"
+    session.commit()
+    return int(stored.id)
+
+
+@pytest.mark.asyncio
+async def test_two_breaking_stories_in_one_round_are_both_sent(session, monkeypatch):
+    """同一轮里两条各自合格的大新闻，不该因为第一条刚发完就把第二条判成"冷却中"。
+
+    线上按每行自己被处理的时刻重算 7 天门禁：4 行合格，而日志里只有 1 条
+    `breaking candidate`。其中 TechCrunch 那两行是**同一分钟**被处理的同一轮。
+    """
+    from app.scheduler.jobs import NewsJobs
+
+    first = _breaking_row(session, "Anthropic announces Claude for Enterprise",
+                          "https://anthropic.com/a")
+    second = _breaking_row(session, "OpenAI unveils GPT-6 for agents", "https://openai.com/b")
+    delivered: list[int] = []
+
+    class Capturing:
+        async def send_digest(self, chat_id, digest):
+            delivered.extend(digest.article_ids)
+            return len(digest.messages)
+
+    jobs = NewsJobs(get_config(), sender=Capturing())
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111])
+    sent = await jobs.send_breaking([first, second])
+    assert sorted(delivered) == sorted([first, second]), \
+        f"一轮里两条突发只发出去 {len(delivered)} 条：{delivered}"
+    assert sent == len(delivered)
