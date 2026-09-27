@@ -176,7 +176,8 @@ def test_the_deploy_payload_carries_everything_a_fresh_box_needs():
     lines = [ln for ln in script.splitlines() if ln.strip().startswith("tar czf ")]
     assert len(lines) == 1, lines
     payload = lines[0].split()
-    required = {"app", "config", "scripts", "tests", "requirements.txt", "docs", "deploy"}
+    required = {"app", "config", "scripts", "tests", "requirements.txt", "docs",
+                "deploy", "README.md"}
     assert required <= set(payload), f"部署包少了：{sorted(required - set(payload))}"
     # 排除的必须是机器自己的状态，别把库或 venv 打包过去
     assert not any(t in payload for t in (".venv", "data", "logs", ".env")), payload

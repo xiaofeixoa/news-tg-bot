@@ -1548,7 +1548,13 @@ message=None   -> 「这条消息已经不可用了，请再用 /免费 打开�
   且不得包含 `.venv/data/logs/.env`；两个单元文件必须在位）。变异验证：把 `deploy`
   从清单里删掉 → 该测试红。
 
-507 passed（+1）。**已知这台机器的差异**：`huggingface.co` 从这条线路连不上
+同一轮还顺手去掉一个重复了八次的手工步骤：**`README.md` 本来不在部署包里**
+（清单只有 `app config scripts tests requirements.txt docs deploy`），所以文档只能一次次
+`scp` 上去 —— 一旦忘了，服务器上的 README 就和仓库漂移，而"两台 md5 一致"这条自检
+恰好照不到它。现在清单含 `README.md`，测试的必需要素集合也跟着加上；这一轮的三台
+`tree=e6caf74e…` / `readme=f4d003e8…` 是**纯靠 `deploy.sh` 一次跑出来的**，没有任何手工 scp。
+
+**507 passed**（用例数没变，是那条断言的覆盖面变宽了 —— 我先把 508 写进去，量了才发现是 507，按量出来的改回来）。**已知这台机器的差异**：`huggingface.co` 从这条线路连不上
 （`collector Hugging Face failed: ConnectTimeout`），所以它的库里没有 HF 行 —— 那部分仍由
 Bot 机覆盖，不是代码问题。另外它的库是**全新的空库**：09-25 之前的采集历史随快照一起没了，
 两边的 SQLite 本来就是各自独立的（不是副本），所以没有任何"他收到的东西变少"的后果。
