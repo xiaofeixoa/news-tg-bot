@@ -1785,18 +1785,67 @@ window`，并且和另外三种一样按天去重（观察器每 5 分钟一轮�
 `log.info(… note)` —— 全部 CAUGHT。`app/scheduler/jobs.py` 覆盖率 66%→67%（307 句，新增的是维护
 与空简报两条路径），全量 **523 通过**（517+6）。
 
-线上验证（两台 `stamp=20260927T111254Z`，`service=active`、`schema=ok`）：
-anr-vps 启动于 19:07:39（`scheduler configured with 7 job(s)`），维护作业在 **19:08:06** 开口，
-距启动 27 秒：
+线上验证（两台最终 `stamp=20260927T113619Z`，`service=active`、`schema=ok`）。anr-vps 本轮连续
+两次启动，正好是一次修复的前后对照——**19:26:22 那次还是时区未修的构建**（`stamp=…112608Z`），
+维护作业在 **19:26:45** 开口，距启动 23 秒：
 
 ```
-19:08:06 INFO jobs.py:381 - processing backlog: 2 row(s), oldest waiting 0.0h
-19:08:06 INFO jobs.py:394 - health check: 810 article(s) in db, 2 unprocessed,
+19:26:22 INFO jobs.py:527 - scheduler configured with 7 job(s)
+19:26:37 INFO jobs.py:124 - collect[rss] done: ...      ← 采集先跑
+19:26:45 INFO jobs.py:394 - health check: 813 article(s) in db, 2 unprocessed,
                               0 failing source(s), 1975MB free (告警线 1024MB)
+19:28:22 INFO jobs.py:352 - morning digest for …        ← 启动 +120s
 ```
 
-奇偶校验：`tree=5c6ee1bc6e63d5d317dacaaf47f9034d`（三台一致）。配方是
-`find app config scripts tests deploy requirements.txt ! -path "*__pycache__*" | LC_ALL=C sort | xargs md5sum | awk "{print \$1}" | md5sum`，
+同一台机器修复之前（19:13 那次启动）维护作业同样在 +26 秒开口——**它在生产上从来不是坏的**，
+原因见下面第 5 条。
+
+---
+
+**本条真正的收获是第 4、5 两段，而且它们是我推上去把 CI 跑红之后才掉出来的。**
+
+第一次推送（`d9486ca`）CI **两个 Python 版本全红**，红的正是我新加的两条用例：
+
+```
+AssertionError: 维护任务 -28780 秒后才跑；启动即体检才有效
+AssertionError: 采集作业启动延迟 -28795s，本应几秒内就开始
+```
+
+-28780 秒 ≈ **-8 小时**，恰好是上海的偏移。
+
+**4. `create_scheduler` 用的是系统时钟，作业排的是配置时区。**
+`next_run_time=datetime.now() + timedelta(seconds=…)` 里那个 `datetime.now()` 是**无时区**的
+系统本地时间，而 `AsyncIOScheduler(timezone="Asia/Shanghai")` 会把它按上海去解释。
+只要进程的系统时区不是上海（CI 的 ubuntu runner 是 UTC，测试跑在部署机上也是 UTC），
+七个作业的首次执行就全被排到 **8 小时前的过去**。
+本地为什么看不出来：开发机的系统时区就是上海，两边重合。
+
+**5. 生产上没错，是运气：单元文件里那一行 `Environment=TZ=Asia/Shanghai`。**
+`deploy/ai-news-radar.service:32` 给服务进程设了 TZ，而宿主本身是 `Etc/UTC`
+（`timedatectl show -p Timezone` = `Etc/UTC`，`date` = UTC；日志时间戳是北京时间就是这个原因）。
+所以服务进程里的 naive `datetime.now()` 恰好等于上海墙上时钟，120/150 秒的台阶一直是对的——
+**靠一个没人测的环境变量撑着**。修好之后：`now = datetime.now(tz)`，任何进程、任何系统时区
+得到的台阶都一样；修复后实测启动 19:29:00 → 体检 19:29:20（+20s）、简报观察者 19:31:00（+120s）、
+AI 处理 19:31:34（+154s）。
+
+**6. 顺带：部署机上有一个陈旧的 `scripts/__pycache__/test_sources.cpython-313-pytest-8.3.3.pyc`。**
+`scripts/test_sources.py`（查源是否活的诊断脚本）和 `tests/test_sources.py` **同名**，一旦哪个
+跑法把两个目录一起收集，pytest 会先记住 `test_sources` 来自 `scripts/`，再收集 tests/ 那个真测试时
+报 "import file mismatch"，**整个套件在收集阶段就中断**。这个不是猜测，在开发机上做了 A/B：
+
+| pyproject 里 `norecursedirs` | `pytest .` 的结果 |
+| --- | --- |
+| 没有 | 收集到 `scripts/test_sources.py` 1 个 → `ERROR tests/test_sources.py` → `Interrupted: 1 error during collection`，0 个用例执行 |
+| 有 | 收集到 `scripts/` 文件 **0 个**，套件正常 |
+
+处理：清掉部署机上的陈旧 `scripts/__pycache__`，在 `pyproject.toml` 里加
+`norecursedirs = ["scripts", "deploy", "docs", …]`；同时 `deploy.sh` 的载荷加上 `pyproject.toml`，
+这样"在 Linux 上跑一遍套件"才真的等价于 CI——**本轮之前我一直没做这一步，CI 才能红**：
+以后凡是改了调度/时钟/路径的用例，先在 anr-jump 上 `pytest` 全绿再推（hermetic：conftest 自带
+临时 DATA_DIR，碰不到生产库；实测 523 passed / exit=0，Linux + Python 3.13）。
+
+奇偶校验：`tree=88ced5a4efe4f091a57bc5ccf4aa2cee`（三台一致）。配方是
+`find app config scripts tests deploy requirements.txt pyproject.toml ! -path "*__pycache__*" | LC_ALL=C sort | xargs md5sum | awk "{print \$1}" | md5sum`，
 **只取哈希列，且不含 README.md**：开发机的 md5sum 是 MSYS 版，输出路径前带 `*`（二进制模式），
 拿整行做摘要会让 100 个文件全部"不一致"；而把 README 算进去又会让文档一改、校验值就自指失效。
 

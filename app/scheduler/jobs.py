@@ -456,11 +456,24 @@ def guarded(func: Callable[..., Coroutine[Any, Any, Any]], name: str):
 def create_scheduler(jobs: NewsJobs, config: AppConfig | None = None) -> AsyncIOScheduler:
     config = config or get_config()
     settings = config.settings
-    scheduler = AsyncIOScheduler(timezone=settings.timezone, job_defaults={
+    tz = zone(settings.timezone or "UTC")
+    scheduler = AsyncIOScheduler(timezone=tz, job_defaults={
         "coalesce": True,          # a missed run during a reboot must not fire 5x
         "max_instances": 1,        # never let two collection rounds overlap
         "misfire_grace_time": 300,
     })
+    # `next_run_time` is read in the scheduler's timezone, so the clock it is
+    # added to has to be that timezone's too. `datetime.now()` is the *system*
+    # clock, and these two were only equal by luck: the unit file sets
+    # `Environment=TZ=Asia/Shanghai` while the host itself is `Etc/UTC`, so the
+    # service got sane leads and every other process (CI, a test run on the box,
+    # a future box without that line) scheduled all seven jobs 8 hours in the
+    # past - measured as a lead of -28780 s. Nothing catastrophic came of it
+    # because an overdue interval job just fires on the next wakeup, which is
+    # exactly why the bug survived: the one thing a startup delay is for (do not
+    # let the AI pass start alongside the collectors) was only ever honoured by
+    # accident, in one process, because of an env line nobody was testing.
+    now = datetime.now(tz)
 
     interval_jobs: list[tuple[str, Sequence[str] | None, int]] = [
         ("rss", ("rss",), settings.rss_fetch_interval),
@@ -479,7 +492,7 @@ def create_scheduler(jobs: NewsJobs, config: AppConfig | None = None) -> AsyncIO
             kwargs={"types": types},
             id=f"collect:{label}",
             name=f"collect {label}",
-            next_run_time=datetime.now() + timedelta(seconds=5 + 3 * interval_jobs.index((label, types, seconds))),
+            next_run_time=now + timedelta(seconds=5 + 3 * interval_jobs.index((label, types, seconds))),
         )
 
     scheduler.add_job(
@@ -487,7 +500,7 @@ def create_scheduler(jobs: NewsJobs, config: AppConfig | None = None) -> AsyncIO
         IntervalTrigger(seconds=max(60, int(settings.process_interval or 600))),
         id="ai:process", name="AI pipeline",
         # After the collectors, never alongside them: both sides write.
-        next_run_time=datetime.now() + timedelta(seconds=FIRST_PROCESS_DELAY),
+        next_run_time=now + timedelta(seconds=FIRST_PROCESS_DELAY),
     )
     scheduler.add_job(
         guarded(jobs.run_digests, "digests"),
@@ -498,7 +511,7 @@ def create_scheduler(jobs: NewsJobs, config: AppConfig | None = None) -> AsyncIO
         # during today's deploy storm the service was cycled several times inside
         # the 08:00 window. Re-sending is already impossible - `_digest_due`
         # dedupes per local day - so running early costs nothing.
-        next_run_time=datetime.now() + timedelta(seconds=DIGEST_STARTUP_DELAY),
+        next_run_time=now + timedelta(seconds=DIGEST_STARTUP_DELAY),
     )
     scheduler.add_job(
         guarded(jobs.run_maintenance, "maintenance"),
@@ -511,7 +524,7 @@ def create_scheduler(jobs: NewsJobs, config: AppConfig | None = None) -> AsyncIO
         # floor and the processing backlog, the two conditions that are only ever
         # worth acting on early. The same trap caught the briefings before
         # DIGEST_STARTUP_DELAY existed.
-        next_run_time=datetime.now() + timedelta(seconds=MAINT_STARTUP_DELAY),
+        next_run_time=now + timedelta(seconds=MAINT_STARTUP_DELAY),
     )
     log.info("scheduler configured with %d job(s)", len(scheduler.get_jobs()))
     return scheduler

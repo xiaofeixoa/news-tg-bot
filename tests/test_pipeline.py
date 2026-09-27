@@ -1089,12 +1089,18 @@ def test_every_other_job_still_keeps_its_own_startup_delay():
     rss = _job("collect:rss")
     process = _job("ai:process")
     watcher = _job("digest:watcher")
+    maint = _job("maintenance")
     rss_lead = _lead(rss)
     assert 0 < rss_lead < 60, f"采集作业启动延迟 {rss_lead:.0f}s，本应几秒内就开始"
     lead_p = _lead(process)
     lead_d = _lead(watcher)
     assert lead_p >= FIRST_PROCESS_DELAY - 5, f"AI 处理只等 {lead_p:.0f}s，会和采集撞锁"
     assert 0 < lead_d <= DIGEST_STARTUP_DELAY + 60
+    # 起跑顺序本身就是设计：采集先跑，体检其次，写库的 AI 处理最后。
+    # 这条断言就是 CI 上把那个 -28780 秒抓出来的东西：系统时区（UTC）不等于
+    # 配置时区（上海）时，所有 next_run_time 都排到 8 小时前的过去去了。
+    assert rss_lead < _lead(maint) < lead_d < lead_p, \
+        f"启动次序错了：rss={rss_lead:.0f} maint={_lead(maint):.0f} 观察者={lead_d:.0f} AI={lead_p:.0f}"
 
 
 def _lead(job):

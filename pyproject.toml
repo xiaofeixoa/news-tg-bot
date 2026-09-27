@@ -6,6 +6,12 @@ requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# scripts/test_sources.py 与 tests/test_sources.py 同名：一旦被一起收集，
+# pytest 会先记住 `test_sources` 这个模块名来自 scripts/，随后收集 tests/ 里
+# 那个真测试时报 "import file mismatch"，整个套件在收集阶段就中断（部署机上
+# 留过一个 scripts/__pycache__/test_sources...pyc，就是某次跑宽的产物）。
+# testpaths 只挡住默认收集，这一条挡住 `pytest .` 这类显式给路径的跑法。
+norecursedirs = ["scripts", "deploy", "docs", "data", "logs", ".venv", "*.egg-info"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
