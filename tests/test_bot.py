@@ -9,13 +9,15 @@ scripts/telegram_smoke.py.
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, Chat as TgChat, InlineKeyboardMarkup
+from aiogram.types import Message as TgMessage, User as TgUser
 
 from app.bot.keyboards import inline as K
 from app.bot.middleware import REFUSAL, AccessMiddleware, chat_id_of, is_allowed
@@ -590,3 +592,267 @@ async def test_an_empty_category_answers_in_chinese_with_the_label(seeded):
     text = callback.message.last
     assert "论文与方法" in text and "还没有新闻" in text, text
     assert "Research" not in text, "分类名要出中文，不是数据库里的内部键"
+
+
+# ------------------------------------------------ 处理器崩溃时他看见什么
+class FakeBot:
+    """挂在 aiogram 对象的 bot 上下文上，记录它被要求做的方法。"""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[Any] = []
+        self.fail = fail
+
+    async def __call__(self, method, **_kwargs):
+        self.calls.append(method)
+        if self.fail:
+            raise RuntimeError("api.telegram.org 现在连不上")
+
+
+def _mounted(obj, bot: FakeBot):
+    payload = obj.model_dump()
+    return type(obj).model_validate(payload, context={"bot": bot})
+
+
+def _callback(bot: FakeBot):
+    cb = CallbackQuery(
+        id="cb-1",
+        from_user=TgUser(id=ALLOWED, is_bot=False, first_name="Tester"),
+        chat_instance="ci",
+        data="a:1",
+        message=None,
+    )
+    return _mounted(cb, bot)
+
+
+def _message(bot: FakeBot, *, chat_id: int = ALLOWED, text: str = "/news"):
+    msg = TgMessage(
+        message_id=7,
+        date=datetime.now(timezone.utc),
+        chat=TgChat(id=chat_id, type="private"),
+        from_user=TgUser(id=chat_id, is_bot=False, first_name="Tester"),
+        text=text,
+    )
+    return _mounted(msg, bot)
+
+
+# ------------------------------------------- 处理器崩溃：必须走真实 dispatcher
+def _error_event(target, exc):
+    """aiogram 3.15 是把错误包成一个 ErrorEvent 送进来的 —— 签名不对就整个失效。"""
+    from aiogram.types import ErrorEvent, Update
+
+    if isinstance(target, CallbackQuery):
+        update = Update(update_id=1, callback_query=target)
+    else:
+        update = Update(update_id=1, message=target)
+    return ErrorEvent(update=update, exception=exc)
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_callback_still_answers_so_the_button_stops_spinning():
+    """回调不 answer，Telegram 会让那个按钮转圈转满一分钟。"""
+    from app.bot.bot import on_error
+
+    bot = FakeBot()
+    cb = _mounted(CallbackQuery(id="cb-1", from_user=TgUser(id=ALLOWED, is_bot=False,
+                      first_name="Tester"), chat_instance="ci", data="a:1", message=None), bot)
+    assert await on_error(_error_event(cb, ValueError("article 12 has no url"))) is True
+    assert len(bot.calls) == 1, bot.calls
+    sent = bot.calls[0]
+    assert type(sent).__name__ == "AnswerCallbackQuery"
+    assert "这一步失败了" in (sent.text or "") and "article 12 has no url" in (sent.text or "")
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_command_replies_once_with_the_error_type():
+    from app.bot.bot import on_error
+
+    bot = FakeBot()
+    msg = _message(bot)
+    assert await on_error(_error_event(msg, KeyError("final_score"))) is True
+    assert len(bot.calls) == 1, bot.calls
+    sent = bot.calls[0]
+    assert type(sent).__name__ == "SendMessage"
+    assert "KeyError" in (sent.text or "") and "处理失败" in (sent.text or "")
+
+
+@pytest.mark.asyncio
+async def test_the_error_report_cannot_take_the_bot_down_too():
+    """报告失败本身如果抛出，一条坏更新就变成两条 —— 那才是真的把轮询带下水。"""
+    from aiogram.types import Update
+
+    from app.bot.bot import on_error
+
+    assert await on_error(_error_event(_callback(FakeBot(fail=True)), ValueError("boom"))) is True
+    assert await on_error(_error_event(_message(FakeBot(fail=True)), ValueError("boom"))) is True
+    plain = Update(update_id=9)
+    from aiogram.types import ErrorEvent
+
+    assert await on_error(ErrorEvent(update=plain, exception=ValueError("boom"))) is True
+
+
+@pytest.mark.asyncio
+async def test_the_real_dispatcher_wires_the_error_handler_at_all():
+    """这条是修 bug 的理由：签名错了的话，上面那一整组用例照样全绿。
+
+    只调用 `on_error(...)` 是在验证我自己的假设；把更新喂给真的 `Dispatcher`
+    才会经过 aiogram 的调用约定 —— 线上那句
+    `TypeError: on_error() missing 1 required positional argument: 'exception'`
+    就是这么露出来的。这里不复用 build_router()（那是模块级 Router 单例，
+    第二次挂到新 Dispatcher 上会 RuntimeError），只挂一个会抛的小处理器。
+    """
+    from aiogram import Bot, Dispatcher
+    from aiogram.client.session.base import BaseSession
+    from aiogram.methods import AnswerCallbackQuery
+    from aiogram.types import Update
+
+    from app.bot.bot import on_error
+
+    class CapturingSession(BaseSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sent: list[Any] = []
+
+        async def close(self) -> None:
+            return None
+
+        async def make_request(self, bot, method, timeout=None):
+            self.sent.append(method)
+            return SimpleNamespace(ok=True, result=None)
+
+        async def stream_content(self, *args, **kwargs):
+            yield b""
+
+    dp = Dispatcher()
+    bot = Bot(token="123456:LOCAL-TEST-TOKEN", session=CapturingSession())
+
+    async def explodes(callback):
+        raise RuntimeError("sqlite 读不到这一行")
+
+    dp.callback_query.register(explodes)
+    dp.errors.register(on_error)
+
+    cb = CallbackQuery(
+        id="wire-1", from_user=TgUser(id=ALLOWED, is_bot=False, first_name="Tester"),
+        chat_instance="ci", data="a:999999",
+        message=TgMessage(message_id=1, date=datetime.now(timezone.utc),
+                          chat=TgChat(id=ALLOWED, type="private"), text=None),
+    )
+    update = Update.model_validate(Update(update_id=1, callback_query=cb).model_dump(),
+                                   context={"bot": bot})
+    await dp.feed_update(bot, update)          # 旧签名会在这里把 TypeError 抛出来
+
+    kinds = [type(m).__name__ for m in bot.session.sent]
+    assert "AnswerCallbackQuery" in kinds, f"错误处理器没被走通：{kinds}"
+    toast = [m for m in bot.session.sent if isinstance(m, AnswerCallbackQuery)][0]
+    assert "sqlite 读不到这一行" in (toast.text or ""), toast.text
+
+
+# ------------------------------------- 白名单边界：陌生人看到什么、被记多少
+class _NobodyAllowed:
+    """替身 config：白名单为空 = fail-closed。
+
+    不能去改 `get_config()` 那个缓存单例 —— 第一版那么写了，于是这条用例把全局
+    配置洗成"谁都不许"，全量跑时打挂了 `test_sender.py` 里依赖白名单的用例，
+    而单跑本模块还是绿的。
+    """
+
+    class settings:
+        @staticmethod
+        def is_allowed_chat(chat_id):
+            return False
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_callback_is_answered_so_the_button_does_not_spin():
+    """未授权回调不 answer 的话，Telegram 会让那个按钮转圈转满一分钟。"""
+    from app.bot.middleware import AccessMiddleware
+
+    calls: list[str] = []
+
+    async def handler(event, data):
+        calls.append("ran")
+
+    bot = FakeBot()
+    result = await AccessMiddleware(_NobodyAllowed())(handler, _callback(bot), {})
+    assert result is None and calls == []
+    assert len(bot.calls) == 1 and type(bot.calls[0]).__name__ == "AnswerCallbackQuery"
+    assert bot.calls[0].text == "未授权"
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_is_sent_once_and_then_cools_down(monkeypatch):
+    """一次告知（把 chat id 说清楚才可能自己加白名单），但不陪聊。"""
+    from app.bot import middleware as mw_module
+    from app.bot.middleware import NOTICE_COOLDOWN, AccessMiddleware
+
+    mw_module._denied_notices.clear()
+    clock = {"t": 1_700_000_000.0}
+    monkeypatch.setattr(mw_module.time, "time", lambda: clock["t"])
+
+    async def handler(event, data):
+        return "ran"
+
+    mw = AccessMiddleware(_NobodyAllowed())
+    first = FakeBot()
+    await mw(handler, _message(first, chat_id=STRANGER), {})
+    assert len(first.calls) == 1 and "不在白名单里" in (first.calls[0].text or "")
+    assert str(STRANGER) in (first.calls[0].text or ""), "拒绝里要带上他自己的 chat id"
+    assert "<code>" in (first.calls[0].text or ""), "要能直接复制那串数字"
+
+    second = FakeBot()
+    await mw(handler, _message(second, chat_id=STRANGER), {})
+    assert second.calls == [], "冷却期内不该再回第二次"
+
+    clock["t"] += NOTICE_COOLDOWN + 1
+    third = FakeBot()
+    await mw(handler, _message(third, chat_id=STRANGER), {})
+    assert len(third.calls) == 1, "冷却过了可以再提醒一次"
+    mw_module.silence_notice(STRANGER)
+    assert STRANGER not in mw_module._denied_notices
+
+
+@pytest.mark.asyncio
+async def test_the_notice_bookkeeping_is_bounded():
+    """陌生人扫描时这个字典不能无限长大（它只是"最近提醒过谁"）。"""
+    from app.bot import middleware as mw_module
+
+    mw_module._denied_notices.clear()          # 模块级共享，别的用例会留残留
+    for i in range(mw_module.NOTICE_MEMORY):
+        mw_module._remember_notice(900_000 + i, 1.0)
+    assert len(mw_module._denied_notices) == mw_module.NOTICE_MEMORY
+    mw_module._remember_notice(999_999, 2.0)
+    assert len(mw_module._denied_notices) == 1, "满了该重开，而不是继续长"
+    mw_module._denied_notices.clear()
+
+
+@pytest.mark.asyncio
+async def test_logging_middleware_re_raises_and_only_keeps_the_first_line():
+    from app.bot import middleware as mw_module
+    from app.bot.middleware import LoggingMiddleware
+
+    records: list[tuple[str, str]] = []
+
+    class Recorder:
+        def debug(self, msg, *args):
+            records.append(("debug", str(msg % args if args else msg)))
+
+        def exception(self, msg, *args):
+            records.append(("exception", str(msg % args if args else msg)))
+
+    monkeypatch_log = Recorder()
+    original = mw_module.log
+    mw_module.log = monkeypatch_log
+    try:
+        async def explodes(event, data):
+            raise ValueError("boom")
+
+        two_lines = "第一行\n第二行是长正文，不该整段进日志"
+        with pytest.raises(ValueError):
+            await LoggingMiddleware()(explodes, _message(FakeBot(), text=two_lines), {})
+    finally:
+        mw_module.log = original
+
+    assert any(lvl == "exception" for lvl, _ in records), "错误必须原样抛出并留下记录"
+    debug_lines = [m for lvl, m in records if lvl == "debug"]
+    assert any("第一行" in m for m in debug_lines), debug_lines
+    assert not any("第二行" in m for m in debug_lines), "文档说只留一行，测试就得盯着它"

@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, TelegramObject
+from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, Message, TelegramObject
 from aiogram.utils.token import TokenValidationError
 
 from app.bot.handlers import build_router
@@ -68,9 +68,36 @@ def create_bot(config: AppConfig | None = None) -> Bot:
         raise BotNotConfigured(f"TELEGRAM_BOT_TOKEN 格式无效: {exc}") from exc
 
 
-async def on_error(event: TelegramObject, exception: Exception) -> bool:
-    """A handler crash must never take the polling loop down with it."""
-    log.exception("unhandled error in Telegram handler (%s): %s", type(event).__name__, exception)
+async def on_error(event: ErrorEvent) -> bool:
+    """A handler crash must neither take the polling loop down nor stay silent.
+
+    The signature is part of the bug fix: aiogram 3.15 dispatches errors as a
+    single `ErrorEvent`, so the previous `on_error(event, exception)` raised
+    `TypeError: on_error() missing 1 required positional argument: 'exception'`
+    the moment it was ever invoked - the safety net itself was dead, and unit
+    tests that called it with two arguments could not see that.
+
+    Before this, a crash also lived only in `logs/telegram.log`: an unanswered
+    callback spun for a minute and the chat heard nothing. The reporting step has
+    its own try/except, because a bot that cannot reply (blocked chat, flood
+    wait, no bot context) must not turn one failure into an unhandled second one.
+    """
+    exception = event.exception
+    update = event.update
+    log.exception("unhandled error in Telegram handler: %s", exception)
+    detail = str(exception).strip() or type(exception).__name__
+    # `Update.effective_message` 不在 aiogram 3.15 的字段里（用了就 AttributeError，
+    # 等于错误处理器第二次自己坏掉），所以按版本安全地取。
+    target = update.callback_query or update.message or getattr(update, "effective_message", None)
+    try:
+        if isinstance(target, CallbackQuery):
+            await target.answer(f"⚠️ 这一步失败了：{detail[:120]}")
+        elif isinstance(target, Message):
+            await target.answer(
+                f"⚠️ 这条消息处理失败了：{type(exception).__name__} · {detail[:160]}\n"
+                "已经记进日志，可以直接重发一次。")
+    except Exception as exc:  # noqa: BLE001 - 报告失败不能把处理器自己带下水
+        log.warning("could not report the handler error to Telegram: %s", exc)
     return True
 
 

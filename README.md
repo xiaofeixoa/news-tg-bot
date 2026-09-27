@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 509 个用例
+.venv/bin/python -m pytest            # 517 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 509 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 517 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1628,6 +1628,47 @@ v1.33 我量过 `agent→代理人` 之后**故意没做**，理由是"只看英
 的 N+1，实测 30 行 **55 ms**，一次 `in_()` 批量是 3 ms —— 不可感知，**不改**，把数字写在这里，
 以后谁再看到这条不要凭"看起来该优化"去动它。
 
+### v1.41 那个"防止轮询被带走"的处理器，自己一被触发就抛 TypeError（2026-09-27）
+`app/bot/bot.py` 的 `on_error` 从写下那天起就是 `on_error(event, exception)` 两个参数。
+aiogram 3.15 派发错误时只给**一个** `ErrorEvent`（`update` + `exception` 在里面），
+所以真出异常时的调用栈是：
+
+```
+TypeError: on_error() missing 1 required positional argument: 'exception'
+```
+
+也就是说：**安全网本身是死的**。它只在"确实有处理器崩了"的时候才被调用，而那一次它会二次抛错，
+原来的异常与"保住轮询"两件事一起落空。文档字符串还写着 "A handler crash must never take the
+polling loop down with it" —— 一句一直没人验证过的承诺。
+
+顺带把另一件事补上：以前处理器崩了只进 `logs/telegram.log`，他那边是**按钮转圈 60 秒、屏幕上一个字都没有**。
+现在 `on_error` 会：回调 → `⚠️ 这一步失败了：<原因>`（先停转圈）；命令 → 一段带回异常类型的中文回话。
+上报本身包在自己的 `try/except` 里（被屏蔽、限流、没有 bot 上下文时不能再炸一次）。
+写这个处理器时还踩到第二个版本坑：`Update.effective_message` 在 3.15 上不存在，
+直接用它等于让错误处理器第二次自己坏掉，所以取目标改成 `callback_query or message or getattr(...)`。
+
+**最重要的一条是方法论**：上面那组用例先按"我以为的签名"直接调 `on_error(...)`，全绿；
+把更新喂给**真的 `Dispatcher`**（`dp.errors.register(on_error)` + `feed_update`）才当场露出 TypeError。
+现在这个文件里有 `test_the_real_dispatcher_wires_the_error_handler_at_all` 专门走真调用约定，
+签名一退回旧写法它和另外三条一起红 —— **测契约要经过契约本身，不能测我对契约的想象**。
+（我自己的另一次错误也记在这儿：中途用 `head + 新尾部` 重写文件时把先追加的 5 条白名单边界用例
+整段删掉了，是 `grep -c` 归零才发现的，已补回；套件数从 513 回到 517。）
+
+同时补的白名单边界（`middleware.py 63% → 100%`）：陌生人点按钮也会拿到一次 `未授权` 而不再转圈；
+拒绝文案里带上他自己的 chat id（fail-closed，空名单拒绝所有人）但**每 5 分钟只说一次**；
+提醒记录表加了上限（那只是"最近提醒过谁"，不该跟着扫描流量无限长大）。
+第一条版本还写糟过：我直接改 `get_config()` 的缓存单例把白名单清空，
+结果全量跑时打挂了 `test_sender.py` 一条依赖白名单的用例（单模块跑看不出来）——
+现在换成替身 config，并在 `conftest` 里加了 settings 快照/还原的护栏，这类污染以后不会互相埋。
+
+517 passed（净 +8：4 条错误路径 + 4 条白名单边界，另有 1 条被我自己删掉后补回）。
+变异：签名退回旧写法 / `effective_message` 不加保护 / 上报整块关掉 / 陌生人回调不 answer /
+通知表无上限 / 日志改回整段正文 → **全部变红**。
+线上（两台 `stamp=20260927T084745Z`、active、Traceback 数不变）拿真 `Dispatcher` + 真白名单 +
+**捕获用的假 session**（不发任何 Telegram 请求）：崩溃的回调 → `⚠️ 这一步失败了：sqlite 读不到这一行`；
+崩溃的命令 → `⚠️ 这条消息处理失败了：ValueError · 服务临时不可用 …`；两次 `feed_update` 都正常返回。
+另外这台机器没带 env 文件时探针被白名单挡住（只回 `未授权`），顺手把 fail-closed 也验了一遍。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -1655,7 +1696,7 @@ NULL，所以只有新行有时间戳，历史归因还是只能靠日志时间�
 WAL checkpoint；v1.21 已经让它不再拖垮整轮，根因仍未查 —— 而且 v1.36 检查时发现 anr-jump
 那台的安装已经不在了，要复查只能等那台恢复或改在 Bot 机上复现）。
 覆盖率仍有薄处（v1.36 实测总 89%，语句口径）：`scheduler/jobs.py 65.7%`、
-`bot/middleware.py 63%`；`bot/handlers/free.py` 已在 v1.36 补到 74%（回调那块已全覆盖，剩下的
+`bot/handlers/free.py` 已在 v1.36 补到 74%；`bot/middleware.py` 已在 v1.41 补到 100%（回调那块已全覆盖，剩下的
 是 `_live` 与回落分支），
 `bot/handlers/news.py` 已在 v1.35 补到 80%、`app/main.py` 已在 v1.34 补到 72%、
 `bot/handlers/settings.py` 已在 v1.29 补到 90%、`bot/sender.py` 已在 v1.28 补到 86%。

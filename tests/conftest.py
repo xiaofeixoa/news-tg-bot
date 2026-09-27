@@ -71,6 +71,21 @@ def session():
 
 
 @pytest.fixture(autouse=True)
+def _restore_settings():
+    """一条用例改了缓存的 settings 就会污染后面所有模块：快照 + 还原。
+
+    真实的事故是 2026-09-27：一个白名单用例把 `allowed_chat_ids` 清空，
+    全量跑时把 `test_sender.py` 里依赖白名单的用例打挂，单模块跑却全绿。
+    """
+    from app.config import get_config
+
+    settings = get_config().settings
+    snapshot = (settings.allowed_chat_ids, settings.telegram_bot_token)
+    yield
+    settings.allowed_chat_ids, settings.telegram_bot_token = snapshot
+
+
+@pytest.fixture(autouse=True)
 def _clean_tables():
     """Each test starts from an empty database; row counts stay meaningful."""
     from sqlalchemy import delete
