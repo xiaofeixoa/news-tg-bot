@@ -163,3 +163,22 @@ def test_bot_not_configured_is_importable_without_the_sdk():
     from app.bot.bot import BotNotConfigured as from_bot
 
     assert from_bot is BotNotConfigured
+
+
+def test_the_deploy_payload_carries_everything_a_fresh_box_needs():
+    """快照回滚 / 换机时，`deploy.sh` 就是唯一的供给路径。
+
+    2026-09-27 重建 192.168.8.99 时清单里少了 `deploy/`：依赖装完、库 init 完，
+    才发现没有 systemd 单元可装 —— 而这台机器连不上 github，除了这个 tar 别无来源。
+    所以"能不能重建一台"必须是一条测试，不是一次运气。
+    """
+    script = (PROJECT_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    lines = [ln for ln in script.splitlines() if ln.strip().startswith("tar czf ")]
+    assert len(lines) == 1, lines
+    payload = lines[0].split()
+    required = {"app", "config", "scripts", "tests", "requirements.txt", "docs", "deploy"}
+    assert required <= set(payload), f"部署包少了：{sorted(required - set(payload))}"
+    # 排除的必须是机器自己的状态，别把库或 venv 打包过去
+    assert not any(t in payload for t in (".venv", "data", "logs", ".env")), payload
+    for name in ("ai-news-radar.service", "ai-news-override-no-bot.conf"):
+        assert (PROJECT_ROOT / "deploy" / name).is_file(), name

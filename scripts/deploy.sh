@@ -20,7 +20,10 @@ PAYLOAD=$(mktemp -t anr-deploy-XXXXXX.tgz)
 trap 'rm -f "$PAYLOAD"' EXIT
 
 cd "$(dirname "$0")/.."
-tar czf "$PAYLOAD" app config scripts tests requirements.txt docs
+# `deploy/` 必须在清单里：快照回滚或换机后，新机器的 systemd 单元与 --no-bot
+# drop-in 只能从这里来（2026-09-27 重建 192.168.8.99 时就是因为少了它，
+# 装完依赖才发现没有单元可装）。排除 .venv/data/logs：那是机器自己的状态。
+tar czf "$PAYLOAD" app config scripts tests requirements.txt docs deploy
 
 failures=()
 for host in "${HOSTS[@]}"; do

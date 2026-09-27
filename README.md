@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 506 个用例
+.venv/bin/python -m pytest            # 507 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 506 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 507 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1525,6 +1525,34 @@ message=None   -> 「这条消息已经不可用了，请再用 /免费 打开�
 
 两行对照说明这刀切对了：**告警没有被弄哑，只是不再说谎**。
 
+### v1.38 一台机器被快照回滚之后：重建 it，并补上"能不能重建"这条测试（2026-09-27）
+`192.168.8.99`（anr-jump，采集侧）被误回滚到 **09-25 13:04 的快照** —— 正好在安装之前，
+所以 `/opt/ai-news-radar`、`/etc/ai-news-radar/env`、uv、systemd 单元全没了，只有
+`news` 用户（uid 9）留着。这一轮把它重建回原状：
+
+- **先量再动手**：那台**连不上 github**（`curl https://github.com` → `000`），
+  官方 pypi 15 秒拉不完，而 **TUNA 1.17 秒 200** → 结论是"能重建，但代码只能靠 scp、
+  依赖必须走镜像"。磁盘 26 GB 空闲、内存 3.5 GB 可用，够用。
+- **env 里不放任何密钥**：这台跑 `--no-bot`，所以新写的 `/etc/ai-news-radar/env`（root:root 0600）
+  只有 `DATABASE_URL/DATA_DIR/LOG_DIR/TIMEZONE` 与两个空占位（`TELEGRAM_BOT_TOKEN=`、
+  `GITHUB_TOKEN=`）。**没有**把 VPS 上那份拷过来 —— 那里面有他的 chat id 与 token，
+  一台只需要采集的机器不该带着它们。
+- `deploy/ai-news-radar.service` + `ai-news-radar.service.d/no-bot.conf` 装上，
+  `systemctl enable --now` → `active / enabled`，`curl_cffi 0.16.3` 在位（`browser_tls` 的
+  中文源需要它），实测一轮：OpenAI 50/50 新、Google AI 20/20 新、DeepMind 46/50 新，
+  库内 120 条并开始处理；无 Traceback。
+- **供给缺口**：`scripts/deploy.sh` 的打包清单里**没有 `deploy/`**。所以第一次装到
+  "依赖装完、`init_db` 跑完"时才 `cp: cannot stat 'deploy/ai-news-radar.service'` ——
+  而这台机器无 github，除了这个 tar 别无来源。清单已补 `deploy`，并加了一条测试
+  `test_the_deploy_payload_carries_everything_a_fresh_box_needs`（清单 ⊇ 七个必需要素，
+  且不得包含 `.venv/data/logs/.env`；两个单元文件必须在位）。变异验证：把 `deploy`
+  从清单里删掉 → 该测试红。
+
+507 passed（+1）。**已知这台机器的差异**：`huggingface.co` 从这条线路连不上
+（`collector Hugging Face failed: ConnectTimeout`），所以它的库里没有 HF 行 —— 那部分仍由
+Bot 机覆盖，不是代码问题。另外它的库是**全新的空库**：09-25 之前的采集历史随快照一起没了，
+两边的 SQLite 本来就是各自独立的（不是副本），所以没有任何"他收到的东西变少"的后果。
+
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，
 这是唯一未动的质量杠杆；专名译错已由占位符挡住，但句子仍有机翻味）；
@@ -1563,7 +1591,7 @@ WAL checkpoint；v1.21 已经让它不再拖垮整轮，根因仍未查 —— �
 v1.24 只关住了新水：库里**已经存下的 30 条 `meta.stars=0` 仓库行还在**（它们会出现在
 `/搜索` 的 14-30 天结果里，只是再也挤不进简报，因为都过了 24 小时窗口）。
 把它们统一标 `filtered_out=1` 是一次批量写他库的操作，没有替他做决定 —— 一句话就能做，等他发话。
-**anr-jump（192.168.8.99）这台采集机没了**（v1.36 一节里有证据）：重启后 `/opt/ai-news-radar` 与它的 systemd 单元都不存在，采集量因此只剩 Bot 机一份。
+**anr-jump（192.168.8.99）曾在 09-27 被误回滚到 09-25 的快照**（应用与 env 全没），v1.38 已重建回 `--no-bot` 采集角色：`active/enabled`、无 Traceback、一轮入库 120 条。差异保留：这台到 `huggingface.co` 超时（HF 由 Bot 机覆盖），且它的库是重建后的新库。
 **没被接上的功能与"被注释掉的类型检查"是同一类信号**：v1.35 删掉 `sources_keyboard` 之前，
 它唯一的回调带着 `# type: ignore[arg-type]`。以后在任何文件里看到 `type: ignore` 遮住的
 **参数数量/类型**不匹配，先当作缺陷查，不要当作噪声略过。删掉这条之后**全仓库只剩一处** `type: ignore`（`app/config.py` 的 `ignore[prop-decorator]`，是 pydantic 计算字段的写法问题，不是被遮住的参数不匹配），已经逐条数过。
