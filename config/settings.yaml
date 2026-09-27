@@ -377,6 +377,7 @@ search:
     funding: [融资, 募资, 筹款, funding, rais]
     open-weight: [开源, 开放权重, 开放源码, open-source, open source]
     agent: [智能体, agent]
+    model: [模型, model, 模特]
     inference: [推理, inference]
     robot: [机器人, 具身, humanoid]
 

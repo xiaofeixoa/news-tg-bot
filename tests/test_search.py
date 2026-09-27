@@ -168,3 +168,21 @@ def test_clean_query_drops_question_tails():
     assert clean_query("开源模型有哪些") == ["开源模型"]
     assert clean_query("芯片涨价了吗") == ["芯片涨价"]
     assert clean_query("饱和度") == ["饱和度"], "结尾的度不是语气词"
+
+
+def test_a_row_stored_with_the_wrong_sense_is_still_found_by_the_right_word(session):
+    """v1.33 在渲染层改字，库里存量仍写着"模特"；检索读的是库列，不能跟着变瞎。
+
+    这行故意让中文列里**只有**"模特"、一个"模型"都没有：如果测试数据顺手写上"模型"，
+    它就在验证 LIKE 命中而不是验证别名表 —— 第一版就是这样假绿的。
+    """
+    add(session, title="OpenAI pauses training of its most capable ones",
+        title_zh="OpenAI暂停其“最有能力模特”的训练",
+        summary_zh="有关它失控的报道越堆越多，该公司决定暂停……")
+
+    found = service().search("模型", days=7, limit=5)
+    assert [a.title for a in found] == ["OpenAI pauses training of its most capable ones"], \
+        "用他看到的正确写法搜，要能捞到库里存了错译的那行（靠 search.aliases 的 model 组）"
+    # 反过来：他照着旧简报里的"模特"去搜，也该走到 AI 行的方向
+    assert [a.title for a in service().search("模特", days=7, limit=5)] == \
+        ["OpenAI pauses training of its most capable ones"]
