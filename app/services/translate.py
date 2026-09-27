@@ -92,6 +92,36 @@ def term_in(text: str | None, term: str) -> bool:
     return bool(text) and re.search(_boundary(term), text, re.I) is not None
 
 
+# 免密钥 MT 的义项错译：英文原文里确实有那个词，中文却给了另一个义项。
+# (英文触发词，中文错写，应写作) —— 顺序要紧，"模特儿"要先于"模特"。
+SENSE_FIXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("model", "models"), "模特儿", "模型"),
+    (("model", "models"), "模特", "模型"),
+    (("agentic",), "代理人工智能", "自主智能体"),
+)
+
+
+def fix_wrong_sense(text: str | None, english: str | None) -> str | None:
+    """改掉"model→模特"这一类义项错译，且只在英文原文确实带那个词时动手。
+
+    2026-09-27 从真库 620 行里量的：`模特` 命中 2 行，两条都是真错（#697
+    "most capable models"→"最有能力模特"，#691 "model leaderboard"→"模特排行榜"），
+    而这一份语料里没有走秀的模特；`agentic AI`→"代理人工智能" 1 行。
+    量过之后**故意不动**的：`token→令牌`（LLM 语境的标准说法）、
+    `agent→代理人`（英语里 agent 既可能是 AI 智能体也可能是真人代理，
+    只看英文词分不出来，自动改会把对的改成错的）。
+    """
+    if not text or not english:
+        return text
+    out = text
+    for keys, wrong, right in SENSE_FIXES:
+        if wrong not in out:
+            continue
+        if any(term_in(english, key) for key in keys):
+            out = out.replace(wrong, right)
+    return out
+
+
 def protect_terms(text: str, terms: Sequence[str]) -> tuple[str, dict[str, str]]:
     """Replace known brand names with pass-through placeholders.
 

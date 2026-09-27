@@ -65,7 +65,11 @@ class ArticleView:
     # 中文优先：显示层永远先看 zh 字段，缺失才回落到原文。
     @property
     def display_title(self) -> str:
-        return self.title_zh or self.title
+        if not self.title_zh:
+            return self.title
+        from app.services.translate import fix_wrong_sense
+
+        return fix_wrong_sense(self.title_zh, self.title)
 
     @property
     def display_summary(self) -> str | None:
@@ -78,6 +82,10 @@ class ArticleView:
         # instead of being hidden. A missing line teaches him nothing, and the
         # free translation quota runs out most evenings.
         text = self.summary_zh or self.summary
+        if self.summary_zh:
+            from app.services.translate import fix_wrong_sense
+
+            text = fix_wrong_sense(text, " ".join(filter(None, (self.title, self.content))))
         return unescape_entities(strip_feed_boilerplate(text)) or None
 
     @property
@@ -102,7 +110,11 @@ class ArticleView:
         """
         stored = self.meta.get("key_points_zh")
         if isinstance(stored, list) and stored:
-            return [str(point) for point in stored if str(point).strip()]
+            from app.services.translate import fix_wrong_sense
+
+            english = " ".join(str(point or "") for point in self.key_points)
+            return [fix_wrong_sense(str(point), english) for point in stored
+                    if str(point).strip()]
         from app.services.translate import has_cjk
 
         chinese = [point for point in self.key_points if has_cjk(point)]

@@ -983,3 +983,66 @@ async def test_an_exhausted_route_warns_once_not_once_per_call():
     warnings = [m for m in records if "out of free quota" in m]
     assert len(warnings) == 1, warnings
     assert "stay in English" in warnings[0]
+
+
+# ---------------------------------------------------------------- 义项错译
+def test_model_translated_as_runway_model_is_corrected_only_when_english_says_model():
+    from app.services.translate import fix_wrong_sense
+
+    fixed = fix_wrong_sense("OpenAI暂停其“最有能力模特”的培训",
+                            "OpenAI pauses training of its ‘most capable models’")
+    assert fixed == "OpenAI暂停其“最有能力模型”的培训", fixed
+    assert "模特" not in fixed, "错译要真的消失，不是旁边加一句说明"
+    assert fix_wrong_sense("Jev风格模特排行榜？", "Jev style model leaderboard?") == "Jev风格模型排行榜？"
+
+
+def test_the_boundary_rule_keeps_a_genuine_fashion_word_alone():
+    from app.services.translate import fix_wrong_sense
+
+    # "Supermodel" 里那串 model 不是一个独立词：不该触发修正
+    assert fix_wrong_sense("超级模特的日程表", "A supermodel's schedule") == "超级模特的日程表"
+    # 英文里根本没有 model，中文的模特就不是错译
+    assert fix_wrong_sense("走秀模特穿上新面料", "Runways show off new fabric") == "走秀模特穿上新面料"
+
+
+def test_the_diminutive_form_is_not_left_with_a_dangling_child_suffix():
+    from app.services.translate import fix_wrong_sense
+
+    assert fix_wrong_sense("最有能力的模特儿", "the most capable models") == "最有能力的模型"
+    assert "模型儿" not in fix_wrong_sense("模特儿", "the model")
+
+
+def test_agentic_ai_is_not_rendered_as_a_human_representative():
+    from app.services.translate import fix_wrong_sense
+
+    assert fix_wrong_sense("代理人工智能正在改变研究的方式",
+                           "Agentic AI is changing how research is done") == "自主智能体正在改变研究的方式"
+
+
+def test_token_and_agent_are_measured_and_deliberately_left_alone():
+    """量过之后不动手的那些：改成"对的"反而会把对的改错。"""
+    from app.services.translate import fix_wrong_sense
+
+    assert fix_wrong_sense("生成每个LLM令牌宽度相同的字体",
+                           "Generate fonts where every LLM token is the same width") == \
+        "生成每个LLM令牌宽度相同的字体"
+    assert fix_wrong_sense("OpenAI的代理人群一直在攻击在线数据库",
+                           "OpenAI's agent swarms have been attacking online databases") == \
+        "OpenAI的代理人群一直在攻击在线数据库"
+
+
+def test_the_display_layer_applies_the_correction_without_touching_the_database():
+    """库里那两行不回写：修正发生在渲染层，一次改错不影响数据。"""
+    from app.services.news import ArticleView
+
+    view = ArticleView(id=697, title="OpenAI pauses training of its ‘most capable models’",
+                       title_zh="OpenAI暂停其“最有能力模特”的培训",
+                       summary="It happens.", summary_zh="它的模型破坏了遏制。",
+                       source_name="The Verge AI", source_type="rss", category="AI Models",
+                       subcategory="GPT",
+                       final_score=65.8, published_at=None, url="https://example.org/697")
+    assert "模特" not in view.display_title
+    assert "最有能力模型" in view.display_title
+    view.meta["key_points_zh"] = ["最有能力模特被暂停训练"]
+    view.key_points = ["The most capable models are paused"]
+    assert "模特" not in view.display_key_points[0]
