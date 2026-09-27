@@ -13,6 +13,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
+from app.bot.context import store
 from app.bot.keyboards import inline as K
 from app.config import AppConfig, as_int
 from app.logging_setup import get_logger
@@ -24,6 +25,7 @@ log = get_logger("telegram")
 router = Router(name="free")
 
 DAY_CHOICES = (7, 30, 90)
+STALE_CALLBACK = "这条消息已经不可用了，请再用 /免费 打开一份"
 
 
 @router.message(Command("free", "免费", "mianfei", "coupon", "白嫖"))
@@ -36,6 +38,7 @@ async def cmd_free(message: Message, command: CommandObject, news: NewsService,
     text = fmt.clip(fmt.free_offer_list(items, config=app_config, tz_name=tz_name,
                                         days=days, tool=tool, live=live, note=note,
                                         live_checked=checked, unverified=bool(note)))
+    store.remember_days(message.chat.id, days)
     await message.answer(text, parse_mode="HTML",
                          reply_markup=K.free_keyboard(news.free_offer_tools(days=days), days=days))
     log.info("/免费 days=%s tool=%s keyword=%s -> %d item(s)", days, tool, keyword, len(items))
@@ -43,27 +46,42 @@ async def cmd_free(message: Message, command: CommandObject, news: NewsService,
 
 @router.callback_query(F.data.startswith(f"{K.FREE}:"))
 async def cb_free(callback: CallbackQuery, news: NewsService, app_config: AppConfig) -> None:
+    if callback.message is None:
+        await callback.answer(STALE_CALLBACK, show_alert=True)
+        return
+    chat_id = callback.message.chat.id
     payload = (callback.data or "").split(":", 1)[1]
     kind, _, value = payload.partition(":")
-    days, tool = int(app_config.get("free.days_default", 30)), None
-    if kind == "d" and value.isdigit():
-        days = int(value)
+    default_days = as_int(app_config.get("free.days_default"), 30)
+    days, tool = default_days, None
+    if kind == "d":
+        # 回调数据是客户端能乱填的：只认面板上真有的那三档
+        wanted = int(value) if value.isdigit() else 0
+        if wanted in DAY_CHOICES:
+            days = wanted
+        else:
+            log.warning("free callback asked for days=%r, not one of %s; using %d",
+                        value, DAY_CHOICES, default_days)
     elif kind == "t":
         tool = value.replace("_", " ") or None
-        days = as_int(app_config.get("free.days_default"), 30)
+        # 以前这里把 days 一把改回默认：先点「近 7 天」再点某个工具，面板会悄悄换成
+        # 30 天的结果，而 ✅ 还标在「近 7 天」上（键盘就是按 days 画的）。
+        days = store.saved_days(chat_id) or default_days
+    else:
+        log.warning("unknown free callback payload %r from chat %s; using the default window",
+                    payload, chat_id)
+    store.remember_days(chat_id, days)
     items, note = _collect(news, days=days, tool=tool, keyword=None, config=app_config)
     live, checked = await _live(app_config, term=tool)
-    tz_name = news.user_for(callback.message.chat.id if callback.message else 0).get("timezone") \
-        if callback.message else app_config.settings.timezone
+    tz_name = news.user_for(chat_id).get("timezone") or app_config.settings.timezone
     text = fmt.clip(fmt.free_offer_list(items, config=app_config, tz_name=tz_name or "UTC",
                                         days=days, tool=tool, live=live, note=note,
                                         live_checked=checked, unverified=bool(note)))
     keyboard = K.free_keyboard(news.free_offer_tools(days=days), days=days)
-    if callback.message is not None:
-        try:
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        except Exception as exc:  # "message is not modified"
-            log.debug("free callback edit failed: %s", exc)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as exc:  # "message is not modified"
+        log.debug("free callback edit failed: %s", exc)
     await callback.answer()
 
 
