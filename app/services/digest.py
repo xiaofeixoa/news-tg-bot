@@ -133,7 +133,18 @@ class DigestService:
         # per-source cap there must be something left to pick after it bites.
         # Already-briefed rows are skipped, which is what lets the 24h window
         # overlap the other briefing of the day without repeating it.
-        depth = top_items * BRIEFING_DEPTH
+        #
+        # `top_items * 4` was not deep enough to make that cap real. Measured on
+        # 2026-09-27: the 24h pool held 41 GitHub Trending rows tied at exactly
+        # 78.0 and the next best row anywhere was 76.0, so a 32-row window
+        # (evening: 8 * 4) contained *nothing but* that one source. The cap
+        # allowed 3 of them, `len(chosen) < top_items` tripped the thin-day
+        # backfill, the backfill re-admitted the overflow it had just rejected,
+        # and the delivered 晚报 was 8/8 "xx 收获 N 星" lines with The Verge,
+        # Hacker News and Reddit stories left out. A cap on the final list means
+        # nothing unless the pool it chooses from is wider than the flood.
+        depth = max(top_items * BRIEFING_DEPTH,
+                    as_int(cfg.get("digest.candidate_limit", 200), 200))
         items = self.news.latest(limit=depth, min_score=min_score, hours=window_hours,
                                  order_by_score=True, skip_sent=True)
         if len(items) < top_items:

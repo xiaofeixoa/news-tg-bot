@@ -281,6 +281,11 @@ digest:
   # the feed that polled last owns the whole digest; a thin day backfills past
   # the cap anyway. 0 disables it.
   max_per_source: 3
+  # 挑稿前先捞多少条候选。上限是给上一条用的：一个源在分数上打平（2026-09-27
+  # 实测 GitHub Trending 有 41 条并列 78.0，全池第二高才 76.0），候选窗口一旦被它
+  # 占满，max_per_source 就没有别的源可换，只能靠"薄了就放宽"的兜底把同一源的
+  # 溢出项再塞回来——那天的晚报因此 8/8 全是星数行。捞得比洪水宽，上限才有意义。
+  candidate_limit: 200
   # Show the one-line AI summary under each headline
   show_summary: true
   # Ask the strong model for a "今日总体判断" paragraph at the top

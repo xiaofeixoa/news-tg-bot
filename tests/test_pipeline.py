@@ -1205,3 +1205,68 @@ async def test_the_empty_briefing_warning_is_not_repeated_every_five_minutes(mon
     assert jobs.digest.calls == 3
     empties = [w for w in warned if "found nothing to send" in w]
     assert len(empties) == 1, f"同一天的同一份简报只该警告一次：{empties}"
+
+
+# ------------------------ 晚报 8/8 全是同一个源的星数行：候选窗口被并列分占满
+def _seed_pool(monopoly: int, others: dict[str, float]) -> None:
+    """`monopoly` 条并列满分的 A 源，加上几条分数各异的别家稿。"""
+    from datetime import timedelta
+
+    from app.processing.normalize import build_article
+
+    with session_scope() as s:
+        for i in range(monopoly):
+            title = f"gpt-oss/{i} released an open model with 1,422 stars"
+            data = build_article(
+                title=title, url=f"https://github.com/tied/{i}", source_name="GitHub Trending",
+                source_type="github", content=f"{title}. " + ("An open AI model release. " * 6),
+                published_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
+                quality="B",
+            )
+            article = repo.save_article(s, data)
+            assert article is not None
+            article.is_processed = True
+            article.final_score = 78.0
+        for name, score in others.items():
+            title = f"{name} ships a reasoning model update for AI agents"
+            data = build_article(
+                title=title, url=f"https://example.org/{name}", source_name=name,
+                source_type="rss", content=f"{title}. " + ("The company describes the AI model change. " * 6),
+                published_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2),
+                quality="A",
+            )
+            article = repo.save_article(s, data)
+            assert article is not None
+            article.is_processed = True
+            article.final_score = score
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_one_tied_source_cannot_own_the_whole_briefing(session):
+    """`max_per_source: 3` 写在配置里，交付的那份晚报却是 8/8 同一个源。
+
+    线上实测（2026-09-27 20:03）：池子里 GitHub Trending 有 41 条并列 78.0，
+    全池第二高只有 76.0，而简报只捞 top_items*4 = 32 条候选——32 条全是那一个源，
+    上限砍到 3 条之后没得可换，"薄了就放宽"的兜底把溢出的 5 条又请了回来。
+    """
+    from app.services.digest import DigestService
+    from app.services.news import NewsService
+
+    _seed_pool(45, {"The Verge AI": 65.8, "Hacker News": 63.9, "Reddit LocalLLaMA RSS": 70.6,
+                    "TechCrunch AI": 52.8, "OpenAI": 76.0})
+    cfg = get_config()
+    news = NewsService(cfg)
+    digest = DigestService(cfg, news, llm=None)
+    result = await digest._briefing("evening", chat_id=None, llm=None)
+
+    from app.database.database import session_scope as _scope
+    from app.database.models import Article as _A
+    with _scope() as s:
+        sources = [s.get(_A, i).source_name for i in result.article_ids]
+    top_items = int(cfg.get("digest.evening.top_items", 8))
+    cap = int(cfg.get("digest.max_per_source", 3))
+    assert len(sources) == top_items, f"晚报只凑到 {len(sources)} 条"
+    assert sources.count("GitHub Trending") <= cap, \
+        f"{sources.count('GitHub Trending')} 条来自并列满分的同一个源，上限是 {cap}：{sources}"
+    assert len(set(sources)) >= 3, f"一份简报不该只有一个声音：{sources}"

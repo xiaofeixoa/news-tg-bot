@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 523 个用例
+.venv/bin/python -m pytest            # 524 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 523 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 524 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1852,3 +1852,50 @@ AI 处理 19:31:34（+154s）。
 同一份日志在这之前的 46 小时里，这类行只有 2026-09-26 19:39 那一条。anr-jump（只采集、不起 bot）
 同样在启动后打印了体检行。维护作业等 `_write_lock` 时没有产生 `database is locked`（部署后
 `grep -c "database is locked" logs/db.log` 与本轮日志均为 0 新增）。
+
+### v1.43 晚报 8/8 是同一个源的星数行：上限写得明明白白，输出却没遵守（2026-09-27）
+20:03 那份晚报推送成功后（`sender.py:74 delivered 1636 chars` + `jobs.py:287 evening digest
+delivered … in 1 message(s)` + 账本 `本地 09-27 20:03:39`），我把它实际包含的 8 条拉出来看：
+
+```
+78.0  GitHub Trending  kodustech/kodus-ai 收获 1,422 星
+78.0  GitHub Trending  MIgHTy-alIeN/ai-trader-bot 收获 2,699 星
+… 8 条全部如此，源分布 = {'GitHub Trending': 8}
+```
+
+而 `config/settings.yaml` 里明明白白写着 `digest.max_per_source: 3`。**配置承诺过的东西，
+交付的那条消息里没有兑现**——这就是这一条要修的，跟中文无关（8 条全是中文，语言层没坏）。
+
+为什么会这样：`_briefing()` 只捞 `top_items * 4 = 32` 条候选，而当天 24 小时池子里
+
+```
+分数恰好 78.0 的行数: 41   ← 全部来自 GitHub Trending（星数驱动，规则分打平在天花板）
+全池第二高:          76.0   （The Verge 65.8 / Reddit 70.6 / HN 63.9 都在下面）
+```
+
+32 条候选于是**全是那一个源**。`select_briefing()` 的限额把前 3 条留下、其余 29 条丢进
+`overflow`，可它接着看到 `len(chosen) < top_items`，于是"薄了就放宽"的兜底把溢出项按源轮询
+再请回来——补足的 5 条还是同一个源。限额不是没生效，是**它选择的池子里根本没有别人**：
+`max_per_source` 要能兑现，候选窗口必须比洪水宽。
+
+改法只有一行判断：`depth = max(top_items * BRIEFING_DEPTH, digest.candidate_limit)`，
+新键 `candidate_limit: 200`（当天整个池子 109 行，读 200 行的代价在 `_views` 那一层，
+一次简报最多两次，实测不影响投递）。兜底逻辑一个字没动——它针对的"某天真的只有 3 条好稿"
+仍然成立，只是现在它拿到的是**看完全部池子之后**的"薄"。
+
+线上同一个池子、同一个 chat 的对照（`generate` 干跑，不发送）：
+
+| | 修复前（20:03 实发） | 修复后（20:11 干跑） |
+| --- | --- | --- |
+| 晚报源数 | 1（GitHub Trending） | **3** |
+| 单源最大占比 | 8/8 | **3/8**，正好等于 `max_per_source` |
+| 早报（10 条档） | — | 4 个源，3/10 |
+
+用例 `test_one_tied_source_cannot_own_the_whole_briefing` 把 45 条并列 78.0 + 5 条别家稿塞进
+临时库，**旧代码跑出来就是线上那句 `['GitHub Trending'] * 8`**（反向验证 CAUGHT，改回即绿）。
+全量 524 通过（523+1）：开发机 Windows 与 anr-jump（Linux/3.13，推送前先跑，见 v1.42 第 6 条）都是 exit=0。两台 `stamp=20260927T121039Z`、`service=active`，`tree=cdb064ae6a8ae940d1f0b83dfd93519b` 三台一致。
+
+**顺带记下一个新的义项错译线索**（还没动）：干跑里 `OpenAI 担心黑客新闻中可能出现的"光学"内容`
+—— 英文原文实测是 `OpenAI Feared "Optics" of what might appear on Hacker News`（optics = 观感/形象），
+免费 MT 给了物理光学；**全库 `title_zh LIKE '%光学%'` 只有这一行**，所以它现在只是一条记账，不值得为它单独发版。这和 v1.33 的 `model→模特` 同类，
+下一轮先量出现率再按 `SENSE_FIXES` 的规矩加（必须有英文触发词才动手）。
