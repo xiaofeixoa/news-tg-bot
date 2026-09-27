@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 505 个用例
+.venv/bin/python -m pytest            # 506 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 505 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 506 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -1490,6 +1490,40 @@ message=None   -> 「这条消息已经不可用了，请再用 /免费 打开�
 "两台代码树哈希一致"这条现在只对 anr-vps 成立，`deploy.sh` 不带参数会在 anr-jump 上失败。
 要么那台被重装/换机（需要重新供给：venv、`/etc/ai-news-radar/env`、systemd 单元、`data/` 里的库），
 要么 IP 现在指向了另一台机器 —— 这件事只有他能确认，我没有去装任何东西。
+
+### v1.37 一条会说谎的告警：已经送到的早报被报成"错过窗口"（2026-09-27）
+部署 v1.36 之后两分钟，`scheduler.log` 自己冒出来这么一行：
+
+```
+2026-09-27 14:31:56 WARNING jobs.py:331 - morning digest for 1985298804 missed its 08:00
+    window - no check ran within 45 minutes of it, so it will not be sent today
+```
+
+而这份早报**当天 08:01:39 就送到了**（§v1.31 闭环那节有三条见证：`delivered 2603 chars`、
+`jobs.py:281 morning digest delivered`、`push_logs #15`）。也就是说 v1.26 精心加的"漏发要说话"
+这条告警，会在**发成功之后的每一次过期检查**上谎报漏发。
+
+根因是判定顺序：`_digest_due()` 先看 `窗口是否已过`，再看 `今天是否已发`。一旦时间越过
+`slot + 45 分钟`，账本那一支永远走不到，返回值就固定是 `window closed`，
+而 `_note_miss()` 把它打成 WARNING 并附一句"今天不会再发"。
+修法是**先查账本再判窗口**：今天已发 → `already sent today`（INFO，且说的是真话）；
+今天没发且窗口过了 → 仍然是 `window closed`（WARNING，该响还是要响）。
+
+506 passed（+1 条按今天这个时刻写死的用例：14:31 + 一条 08:01:39 的账本行）。
+变异验证：把顺序退回旧写法 → `AssertionError: window closed` —— 正好是线上那句谎报，
+这条测试现在是踩着真实事故写的。（顺带记一次我自己的错误：第一次跑这个变异时锚点顺序
+写成了 `窗口 + 账本`，与文件里的实际顺序相反，`replace` 静默无效，输出"NOT CAUGHT"，
+差点又被我当成"测试没抓到"。这回加了 `assert mutated != src`。）
+
+线上（`stamp=20260927T063903Z`、active、`schema=ok`；只读判定，不发消息）：
+
+```
+他真实的订阅者   morning slot=08:00 -> due=False note=already sent today   ← 修前是 window closed
+他真实的订阅者   evening slot=20:00 -> due=False note=not yet due
+测试残留行       morning slot=08:00 -> due=False note=window closed        ← 真漏发时照样报
+```
+
+两行对照说明这刀切对了：**告警没有被弄哑，只是不再说谎**。
 
 ### 仍未解决
 头条"摘要 vs 标题"是否按来源类型区分未定；**`LLM_*` 仍未配置**（所有摘要都是规则式首句，

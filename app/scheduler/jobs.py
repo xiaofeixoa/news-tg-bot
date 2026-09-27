@@ -290,15 +290,19 @@ class NewsJobs:
         scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if local_now < scheduled:
             return False, "not yet due"
-        if (local_now - scheduled) > timedelta(minutes=DIGEST_GRACE_MINUTES):
-            return False, "window closed"
         with session_scope() as session:
             user = repo.ledger_user(session, chat_id, timezone=tz_name)
             midnight_local = scheduled.replace(hour=0, minute=0, second=0, microsecond=0)
             start_utc = midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
             count = repo.pushes_since(session, user=user, kind=kind, since=start_utc)
+        # 账本要在"窗口已过"之前问。顺序反了的时候，一份**当天已经送到**的简报会因为
+        # 下一次 5 分钟检查落在宽限期之外而被写成 `missed its 08:00 window`（WARNING，
+        # 还说"今天不会再发"）—— 2026-09-27 就是这么在 14:31 误报了一次早上 08:01:39
+        # 成功送达的那份早报。谎报的告警比没有告警更糟：它会让人去查一个不存在的故障。
         if count:
             return False, "already sent today"
+        if (local_now - scheduled) > timedelta(minutes=DIGEST_GRACE_MINUTES):
+            return False, "window closed"
         return True, "due"
 
     def _note_miss(self, chat_id: int, kind: str, note: str, hhmm: str) -> None:

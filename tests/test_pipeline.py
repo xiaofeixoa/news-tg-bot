@@ -986,6 +986,30 @@ def test_a_bad_clock_string_is_reported_not_crashed(monkeypatch):
     assert not ok and "bad time" in note
 
 
+def test_a_delivered_briefing_is_never_reported_as_missed(monkeypatch):
+    """2026-09-27 真实事故：早报 08:01:39 已送到，14:31 的检查却因为"窗口已过"
+    写出 `missed its 08:00 window … it will not be sent today`。谎报的告警比没有
+    告警更糟 —— 判定顺序必须先看账本。"""
+    from app.database import repository as repo
+    from app.database.models import PushLog
+
+    jobs = digest_jobs(monkeypatch, 14, 31)
+    with session_scope() as s:
+        user = repo.get_or_create_user(s, 111, timezone="Asia/Shanghai")
+        s.add(PushLog(user_id=user.id, kind="morning", created_at=naive_stamp(8, 1)))
+        s.commit()
+
+    ok, note = jobs._digest_due(111, "morning", "08:00", "Asia/Shanghai")
+    assert not ok and note == "already sent today", note
+
+    # 而"今天确实没发"的那种，还是要报窗口已过
+    with session_scope() as s:
+        s.query(PushLog).delete()
+        s.commit()
+    ok, note = jobs._digest_due(111, "morning", "08:00", "Asia/Shanghai")
+    assert not ok and note == "window closed", note
+
+
 def test_yesterdays_send_does_not_silence_today(monkeypatch, session):
     from app.database import repository as repo
     from app.database.models import PushLog
