@@ -93,29 +93,41 @@ def term_in(text: str | None, term: str) -> bool:
 
 
 # 免密钥 MT 的义项错译：英文原文里确实有那个词，中文却给了另一个义项。
-# (英文触发词，中文错写，应写作) —— 顺序要紧，"模特儿"要先于"模特"。
+# (英文触发词，中文错写，应写作) —— 顺序要紧："模特儿"先于"模特"，
+# "代理人工智能"必须先于通用的"代理人"，否则会写出"智能体工智能"。
 SENSE_FIXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("model", "models"), "模特儿", "模型"),
     (("model", "models"), "模特", "模型"),
     (("agentic",), "代理人工智能", "自主智能体"),
+    # agent 不能无条件改：真库 #323 是 `Feds Target AI Critics as "Foreign Agents"`
+    # → "外国代理人"，那是法律术语、是对的。所以要英文出现 AI 语境搭配才动手
+    # （搭配里含空格，`term_in` 的词边界照样管用）。
+    (("ai agent", "ai agents", "agentic", "agent swarm", "agent swarms", "coding agent",
+      "coding agents", "llm agent", "llm agents", "multi-agent", "ai safety"),
+     "代理人", "智能体"),
 )
+
+# 这些"代理人"指的是人/机构，不是 AI agent；中文里出现就让开整条规则。
+AGENT_HUMAN_ONLY = ("外国代理人", "境外代理人", "保险代理人", "房产代理人", "专利代理人",
+                    "货运代理人", "代理人签订", "委托代理人")
 
 
 def fix_wrong_sense(text: str | None, english: str | None) -> str | None:
-    """改掉"model→模特"这一类义项错译，且只在英文原文确实带那个词时动手。
+    """改掉"model→模特""agentic AI→代理人工智能"这类义项错译，只在英文确实带那个词时动手。
 
-    2026-09-27 从真库 620 行里量的：`模特` 命中 2 行，两条都是真错（#697
-    "most capable models"→"最有能力模特"，#691 "model leaderboard"→"模特排行榜"），
-    而这一份语料里没有走秀的模特；`agentic AI`→"代理人工智能" 1 行。
-    量过之后**故意不动**的：`token→令牌`（LLM 语境的标准说法）、
-    `agent→代理人`（英语里 agent 既可能是 AI 智能体也可能是真人代理，
-    只看英文词分不出来，自动改会把对的改成错的）。
+    2026-09-27 从真库量的：`模特` 2 行全是真错（这份语料没有走秀的模特）；
+    含 `代理人` 的 7 行里 5 行是错义（#206/#199/#184 的 agentic AI、#484 的 agent swarms、
+    #394 的 AI safety agents），#236 是 coding agent，而 **#323 的"外国代理人"是正确的**
+    —— 所以这里按搭配收窄，而不是一见 agent 就改。
+    量过之后仍**故意不动**的：`token→令牌`（LLM 语境的标准说法）、`protocol→协议`。
     """
     if not text or not english:
         return text
     out = text
     for keys, wrong, right in SENSE_FIXES:
         if wrong not in out:
+            continue
+        if wrong == "代理人" and any(keep in out for keep in AGENT_HUMAN_ONLY):
             continue
         if any(term_in(english, key) for key in keys):
             out = out.replace(wrong, right)

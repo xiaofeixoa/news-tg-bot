@@ -1019,16 +1019,55 @@ def test_agentic_ai_is_not_rendered_as_a_human_representative():
                            "Agentic AI is changing how research is done") == "自主智能体正在改变研究的方式"
 
 
-def test_token_and_agent_are_measured_and_deliberately_left_alone():
+def test_token_is_measured_and_deliberately_left_alone():
     """量过之后不动手的那些：改成"对的"反而会把对的改错。"""
     from app.services.translate import fix_wrong_sense
 
     assert fix_wrong_sense("生成每个LLM令牌宽度相同的字体",
                            "Generate fonts where every LLM token is the same width") == \
         "生成每个LLM令牌宽度相同的字体"
-    assert fix_wrong_sense("OpenAI的代理人群一直在攻击在线数据库",
-                           "OpenAI's agent swarms have been attacking online databases") == \
-        "OpenAI的代理人群一直在攻击在线数据库"
+
+
+def test_ai_agent_collocations_are_fixed_but_a_legal_agent_is_left_alone():
+    """v1.40：把"见 agent 就改"收窄成"见 AI 搭配才改"。
+
+    改动的根据是真库 7 行：#484 `agent swarms`→"代理人群"、#394 `AI safety ... agents`→
+    "代理人可能会将监督视为障碍" 是错义；而 #323
+    `Feds Target AI Critics as "Foreign Agents"`→"外国代理人" **是对的**，必须不动。
+    """
+    from app.services.translate import fix_wrong_sense
+
+    assert fix_wrong_sense("几个月来， OpenAI的代理人群一直在攻击在线数据库",
+                           "For months, OpenAI’s agent swarms have been attacking online databases"
+                           ) == "几个月来， OpenAI的智能体群一直在攻击在线数据库"
+    assert fix_wrong_sense("人工智能安全的一个核心问题是，代理人可能会将监督视为障碍",
+                           "A central concern in AI safety is that agents may treat oversight as an "
+                           "obstacle") == "人工智能安全的一个核心问题是，智能体可能会将监督视为障碍"
+    # 法律/人事意义的"代理人"：整条规则让开
+    assert fix_wrong_sense("美联储将人工智能批评者定位为“外国代理人”",
+                           'Feds Target AI Critics as "Foreign Agents"') == \
+        "美联储将人工智能批评者定位为“外国代理人”"
+    # 英文没有 AI 搭配，就不该动手（哪怕中文里有"代理人"）
+    assert fix_wrong_sense("他是我们家的代理人", "He is our family agent") == "他是我们家的代理人"
+
+
+def test_the_human_agent_carveout_is_the_only_thing_between_two_senses():
+    """构造用例（库里还没有这样的一行），专门盯"豁免"本身。
+
+    上面 #323 那条真实行**测不到豁免**：它的英文里没有 AI 搭配，规则根本不会触发。
+    真要把"外国代理人"保住，得是同一行里既有 AI 搭配、又有法律意义的人类代理人 ——
+    这时候只有豁免表拦得住，否则会被一起换成"外国智能体"。
+    """
+    from app.services.translate import AGENT_HUMAN_ONLY, fix_wrong_sense
+
+    assert fix_wrong_sense("文件说这些 AI agents 被用来识别外国代理人",
+                           "The filing says AI agents were used to flag foreign agents") == \
+        "文件说这些 AI agents 被用来识别外国代理人"
+    # 同一句里没有人类代理的说法时，就该换
+    assert fix_wrong_sense("这些代理人被用来识别风险",
+                           "These AI agents were used to flag risk") == \
+        "这些智能体被用来识别风险"
+    assert "外国代理人" in AGENT_HUMAN_ONLY
 
 
 def test_the_display_layer_applies_the_correction_without_touching_the_database():
