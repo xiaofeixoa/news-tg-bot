@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 541 个用例
+.venv/bin/python -m pytest            # 544 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 541 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 544 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2096,3 +2096,33 @@ from Aleph Alpha?`，中文"型号："在这个语境里是对的，见了就改
 `FAILED：这款新模型的风阻更低`。又一次"反向验证自己也得被验证"。
 
 全量 541 通过（537+4），Windows 与 anr-jump Linux 均 `exit=0`；两台 `service=active`、`stamp=20260928T002219Z`，`tree=1cc49e299d1d89d1e3ebf5487a5f09e6` 三台一致。
+
+### v1.49 特工、光学、"黑客新闻"：三个错义，和一次"声明的命令有没有处理器"的自查
+先把两件**没有**问题的查掉（都留了证据，免得下轮再猜）：
+- **16 个声明的命令全都有处理器**：`COMMANDS`（Telegram 菜单里那些）与 `app/bot/handlers/*.py`
+  里注册的命令逐个对过，两边集合一致（`start` 走 `CommandStart()`）。没有"菜单里有、点了没反应"的项。
+- **孪生行并不比原件少内容**：27 个孪生行里 22 个缺"要点/why_it_matters"，但把它们各自的原件拉出来
+  看，原件同样是 0 要点、无 why——规则模式（没有 LLM key）本来就不产这两个字段（全库 153/784 行有
+  中文要点）。所以不是孪生路径漏拷，别去"修"一个不存在的缺陷。
+
+真正修的是 `fix_wrong_sense` 的三条新规则，全部按英文触发词收窄，逐条从真库量出来：
+
+| 错写 | 行数 | 英文触发 | 应写作 | 证据 |
+| --- | --- | --- | --- | --- |
+| `特工` | 8 | agent/agents | 智能体 | 8 行逐条查过原文：全是 OpenAI/前沿实验室的 AI agent（`There are no "rogue" AI agents`→"没有"流氓"人工智能特工"），**没有一条是真特工报道** |
+| `光学` | 1 | optics | 观感 | `OpenAI Feared "Optics" of what might appear on Hacker News` |
+| `黑客新闻` | 1 | hacker news | Hacker News | 同一行：站点名被译成了中文 |
+
+`特工` 这条我上一轮（v1.33 时）是**故意没加**的，理由是"只看英文有 agent 分不出人还是智能体"；
+这次把 8 行原文逐条读完，确定这个语料里没有间谍报道，才加进来——并且把原来只管 `代理人` 的
+"指人搭配让开"收窄条件**推广到 `特工`**（`外国特工`/`双重特工`/`特工组织`…），所以哪天真来一条
+"foreign agents" 的起诉报道，`外国特工` 不会被改成"外国智能体"。这条负向用例专门钉住它。
+`型号`（`Model: Phoenix 2 from Aleph Alpha?`→"型号："）仍然不动：那个语境里它是对的。
+
+部署后实测（渲染层，走 `display_title`/`display_summary`）：库里仍含这三个词的 **9 行，渲染后
+仍错的 0 行**；`#792` 现在是 `OpenAI 担心Hacker News中可能出现的"观感"内容`（一条里两个修复同时
+生效），`#852` `OpenAI智能体试图"蛮力"联合国网站`，`#853` `没有"流氓"人工智能智能体`。
+
+3 条新用例 + 3 处反向验证全部 CAUGHT（每次替换先 `compile()` 过语法）。全量 544 通过（541+3），
+Windows 与 anr-jump Linux 均 `exit=0`，两台 `service=active`、`stamp=20260928T030222Z`，`tree=42328d8af6efac67aabb650643cae67e` 三台一致。今晚 20:00 的晚报会是
+第一批"打分、分线、突发同轮、中文渲染"四项修复同时生效的样本。

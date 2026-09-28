@@ -1124,3 +1124,33 @@ def test_the_slug_template_does_not_swallow_prose_or_numbers():
     assert localize_title("2024/01 revenue report on AI models") is None
     assert localize_title("OpenAI announces a new reasoning model") is None
     assert localize_title("12/34") is None, "纯数字不是仓库名"
+
+
+# ---------------- 09-28 量到的另外三个错义：特工 / 光学 / 把站点名译成中文
+def test_ai_agents_are_not_agents_of_espionage():
+    from app.services.translate import fix_wrong_sense
+
+    got = fix_wrong_sense("OpenAI特工试图“蛮力”联合国网站",
+                          "OpenAI agents tried to ‘bruteforce’ a UN website")
+    assert got == "OpenAI智能体试图“蛮力”联合国网站", got
+    got2 = fix_wrong_sense("没有“流氓”人工智能特工", 'There are no "rogue" AI agents')
+    assert "特工" not in got2 and "智能体" in got2, got2
+
+
+def test_the_human_agent_carveout_covers_the_new_word_too():
+    """真说"外国特工"的时候必须让开——那是人，不是智能体。"""
+    from app.services.translate import fix_wrong_sense
+
+    keep = fix_wrong_sense("他被指控为外国特工", "He was charged as a foreign agent")
+    assert "外国特工" in keep, keep
+
+
+def test_optics_is_appearance_here_not_a_physics_lab():
+    from app.services.translate import fix_wrong_sense
+
+    got = fix_wrong_sense("OpenAI 担心黑客新闻中可能出现的“光学”内容",
+                          'OpenAI Feared "Optics" of what might appear on Hacker News')
+    assert "光学" not in got and "观感" in got, got
+    assert "Hacker News" in got and "黑客新闻" not in got, got
+    keep = fix_wrong_sense("这组光学实验用了新透镜", "The lab built a new lens setup")
+    assert "光学" in keep, keep

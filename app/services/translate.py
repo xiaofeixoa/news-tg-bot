@@ -104,6 +104,16 @@ SENSE_FIXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("model", "models"), "车型", "模型"),
     (("model", "models"), "机型", "模型"),
     (("agentic",), "代理人工智能", "自主智能体"),
+    # 2026-09-28 量到的三个：`特工` 8 行（逐行查过原文，全是 OpenAI/前沿实验室的 AI
+    # agent，没有一条是真特工报道）、`光学` 1 行（`OpenAI Feared "Optics"`→观感/形象）、
+    # `黑客新闻` 1 行（Hacker News 是站点名，不该被译成中文）。
+    # 特工同样要过英文门槛：真出现 "foreign agents" 时中文该是"外国代理人/特工"，
+    # 所以下面那组"指人"的搭配会让开整条规则。
+    (("ai agent", "ai agents", "agentic", "agent", "agents", "agent swarm", "agent swarms",
+      "coding agent", "coding agents", "llm agent", "llm agents", "multi-agent", "ai safety"),
+     "特工", "智能体"),
+    (("optics",), "光学", "观感"),
+    (("hacker news",), "黑客新闻", "Hacker News"),
     # agent 不能无条件改：真库 #323 是 `Feds Target AI Critics as "Foreign Agents"`
     # → "外国代理人"，那是法律术语、是对的。所以要英文出现 AI 语境搭配才动手
     # （搭配里含空格，`term_in` 的词边界照样管用）。
@@ -112,9 +122,10 @@ SENSE_FIXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
      "代理人", "智能体"),
 )
 
-# 这些"代理人"指的是人/机构，不是 AI agent；中文里出现就让开整条规则。
+# 这些"代理人/特工"指的是人/机构，不是 AI agent；中文里出现就让开整条规则。
 AGENT_HUMAN_ONLY = ("外国代理人", "境外代理人", "保险代理人", "房产代理人", "专利代理人",
-                    "货运代理人", "代理人签订", "委托代理人")
+                    "货运代理人", "代理人签订", "委托代理人",
+                    "外国特工", "双重特工", "特工组织", "特工头子", "间谍特工")
 
 
 def fix_wrong_sense(text: str | None, english: str | None) -> str | None:
@@ -132,7 +143,7 @@ def fix_wrong_sense(text: str | None, english: str | None) -> str | None:
     for keys, wrong, right in SENSE_FIXES:
         if wrong not in out:
             continue
-        if wrong == "代理人" and any(keep in out for keep in AGENT_HUMAN_ONLY):
+        if wrong in ("代理人", "特工") and any(keep in out for keep in AGENT_HUMAN_ONLY):
             continue
         if any(term_in(english, key) for key in keys):
             out = out.replace(wrong, right)
