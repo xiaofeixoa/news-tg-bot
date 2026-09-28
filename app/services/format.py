@@ -85,16 +85,36 @@ def timezone_label(name: str | None) -> str:
     return f"{city} {stamp}" if city else stamp
 
 
-def score_emoji(score: float, config: AppConfig | None = None) -> str:
+def score_emoji(score: float, config: AppConfig | None = None,
+                *, cohort: Sequence[float] | None = None) -> str:
+    """🔥/⭐/🔹 - where this row stands among the rows on the same page.
+
+    An absolute cut-off cannot work here, and this file has now been re-tuned for
+    it twice: v1.45 set the bars at the live percentiles (62/54/49), and tonight's
+    晚报 still printed 🔥 on all 8 rows, because a briefing is by construction the
+    *top* of the pool - the evening's eight items spanned 65.6..78.0, entirely
+    above the 🔥 line. A marker that every row shares carries no information, and
+    here it actively fought the "🔥 今日重点" heading three rows above it.
+
+    Ranking inside the rendered page is immune to where the scale sits, so it needs
+    no recalibration when scoring changes. `dot_score` stays absolute: a row below
+    the briefing floor is ▫️ however it ranks, so a weak page never crowns anything.
+    Pages of one or two rows cannot be ranked, and fall back to the absolute bars.
+    """
     config = config or get_config()
     hot, star, dot = breaking.emoji_bars(config)
+    if score < dot:
+        return "▫️"
+    if cohort and len(cohort) >= 3:
+        ordered = sorted(cohort, reverse=True)
+        rank = ordered.index(score)                  # ties share the best band
+        third = max(1, len(ordered) // 3)
+        return "🔥" if rank < third else "⭐" if rank < 2 * third else "🔹"
     if score >= hot:
         return "🔥"
     if score >= star:
         return "⭐"
-    if score >= dot:
-        return "🔹"
-    return "▫️"
+    return "🔹"
 
 
 def digest_header(kind: str, config: AppConfig | None = None, *, date: str | None = None) -> str:
@@ -120,10 +140,13 @@ def news_list(
     if not items:
         return f"{esc(title)}\n\n还没有符合条件的新闻，稍后再试试。"
     lines = [esc(title)]
-    for index, item in enumerate(items[: len(CIRCLE)]):
+    shown = items[: len(CIRCLE)]
+    cohort = [float(i.final_score or 0) for i in shown]
+    for index, item in enumerate(shown):
         number = CIRCLE[index]
         head = item.display_line
-        marker = f" {score_emoji(item.final_score, config)}{item.final_score:.0f}" if show_scores else ""
+        marker = (f" {score_emoji(item.final_score, config, cohort=cohort)}{item.final_score:.0f}"
+                  if show_scores else "")
         date = short_date(item.published_at, tz_name)
         source = esc(item.source_name)
         if with_links:
@@ -210,6 +233,10 @@ def section_blocks(
     order: list[str] = list(config.get("digest.section_order", []) or [])
     emoji_table = config.get("digest.section_emoji", {}) or {}
     number = start_number
+    # One cohort for the whole briefing, so a category row and the 今日重点 rows
+    # are ranked against the same set instead of each section re-crowning its own
+    # leader.
+    cohort = [float(a.final_score or 0) for a in items]
 
     def line(item: ArticleView, idx: int) -> str:
         head = item.display_line
@@ -220,7 +247,8 @@ def section_blocks(
         second = item.display_summary if head == item.display_title else item.display_title
         if second and second.lower() != head.lower():
             row += f"\n   <i>{esc(shorten(second, 110))}</i>"
-        row += f"\n   {esc(item.source_name)} · {date} · {score_emoji(item.final_score, config)}{item.final_score:.0f}"
+        row += (f"\n   {esc(item.source_name)} · {date} · "
+                f"{score_emoji(item.final_score, config, cohort=cohort)}{item.final_score:.0f}")
         return row
 
     blocks: list[str] = []

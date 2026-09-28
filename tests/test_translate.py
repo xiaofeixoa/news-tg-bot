@@ -1285,3 +1285,69 @@ async def test_a_spent_run_budget_is_not_counted_as_a_refusal(session):
         row = s.get(Article, ids[0])
         assert not row.title_zh, f"没发出去的请求不该结案：{row.title_zh!r}"
         assert not ((row.meta or {}).get("zh_misses")), "没问出去却被记成拒绝"
+
+
+# --------------------------- 简报里的 🔥/⭐/🔹 按这一页的名次，不按绝对分数线
+TONIGHT = [78.0, 78.0, 78.0, 73.9, 73.5, 68.9, 65.6, 65.6]     # 09-28 20:00 实发的那 8 条
+
+
+def test_a_clustered_page_still_shows_a_ladder():
+    """09-28 晚报 8 条分数全在 65.6-78.0，绝对分线下 8/8 都是 🔥。"""
+    from app.services.format import score_emoji
+
+    marks = [score_emoji(s, cohort=TONIGHT) for s in TONIGHT]
+    assert marks.count("🔥") < len(marks), f"整页同一个标记等于没有标记：{marks}"
+    assert {"🔥", "⭐", "🔹"} <= set(marks), marks
+    assert marks[0] == "🔥" and marks[-1] == "🔹", marks
+
+
+def test_the_same_score_means_different_things_on_different_pages():
+    """同一个分数在强页里不该还是 🔥——它本来就是相对名次。"""
+    from app.services.format import score_emoji
+
+    weak = score_emoji(70.0, cohort=[70.0, 61.0, 52.0])
+    strong = score_emoji(70.0, cohort=[88.0, 85.0, 80.0, 70.0])
+    assert weak == "🔥" and strong != "🔥", (weak, strong)
+
+
+def test_a_row_under_the_floor_is_never_promoted_by_ranking():
+    from app.services.format import score_emoji
+
+    assert score_emoji(20.0, cohort=[20.0, 19.0, 18.0]) == "▫️"
+
+
+def test_a_one_or_two_row_page_falls_back_to_the_absolute_bars():
+    """凑不出名次的一两行页，只能照绝对线判——hot/star 两条线因此仍然有人读。"""
+    from app.config import get_config
+    from app.processing import breaking
+    from app.services.format import score_emoji
+
+    hot = breaking.emoji_bars(get_config(), ai_enabled=False)[0]
+    assert score_emoji(hot + 1, cohort=[hot + 1]) == "🔥"
+    assert score_emoji(50.0, cohort=[50.0]) == "🔹"          # 在 dot 线上、够不到 star 线
+
+
+def test_a_rendered_briefing_shows_three_different_marks(session):
+    """走真正的渲染函数，不只看 score_emoji。"""
+    from app.services import format as fmt
+
+    views = [make_view(id=10 + i, title=f"OpenAI ships model number {i} for agents",
+                       title_zh=f"OpenAI 发布第 {i} 号模型",
+                       summary_zh="推理更便宜，上下文更大。",
+                       final_score=s) for i, s in enumerate(TONIGHT)]
+    blocks = fmt.section_blocks(views, config=get_config())
+    joined = "\n".join(blocks)
+    for mark in ("🔥", "⭐", "🔹"):
+        assert mark in joined, f"渲染出来的简报里没有 {mark}：{joined[-260:]}"
+
+
+def test_a_rendered_news_list_uses_the_same_ladder():
+    """列表页（/最新 带分数）是另一个调用点，也得真的拿到 cohort。"""
+    from app.services import format as fmt
+
+    views = [make_view(id=20 + i, title=f"Anthropic model {i} announced for enterprises",
+                       title_zh=f"Anthropic 发布第 {i} 号模型",
+                       final_score=s) for i, s in enumerate(TONIGHT[:5])]
+    text = fmt.news_list(views, config=get_config(), show_scores=True)
+    marks = [m for m in ("🔥", "⭐", "🔹") if m in text]
+    assert len(marks) >= 2, f"列表页只出现 {marks}：{text[:200]}"
