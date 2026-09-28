@@ -1652,6 +1652,41 @@ def test_only_timing_rejections_are_worth_retrying():
         assert not deferral_worthwhile(final), final
 
 
+@pytest.mark.asyncio
+async def test_each_translation_round_starts_with_a_fresh_per_round_allowance(session, monkeypatch):
+    """`per_run_limit` 写在配置里是"每一轮"，可翻译器是进程级单例：不清零就等于"每个进程"。
+
+    线上的表现是：跑满 60 条之后 MyMemory 这一整天都不再被问，而每次部署重启都像是
+    "修好了"——`Budget.reset_run()` 本来就为此而写，但从来没人调用它。
+    """
+    import app.processing.pipeline as pipeline
+    from app.scheduler.jobs import NewsJobs
+    from app.services import translate as tr
+
+    seen: list[int] = []
+
+    async def spy(session_, *, config=None, translator=None, limit=None):
+        budget = tr.get_translator(config).budget
+        seen.append(budget.used_run)
+        return 0
+
+    cfg = get_config()
+    singleton = tr.get_translator(cfg)
+    singleton.budget.used_run = 999
+    # A non-zero day counter, or "the reset must not clear the day" passes by
+    # comparing 0 with 0 - which is what it did the first time this test was written.
+    singleton.budget.used_day = 7
+    monkeypatch.setattr(pipeline, "translate_pending", spy)
+    try:
+        await NewsJobs(cfg).run_translation()
+        assert seen, "这一轮根本没跑到翻译"
+        assert seen[0] == 0, f"新一轮没有清零每轮额度：{seen}"
+        assert singleton.budget.used_day == 7, "只能清「每轮」，把「每天」一起清了就是没有上限"
+    finally:
+        singleton.budget.used_run = 0
+        singleton.budget.used_day = 0
+
+
 def test_the_retry_queue_reads_only_marked_rows(session):
     """读标记必须用 `json_extract`，不能用 `Article.meta["key"].isnot(None)`。
 

@@ -738,12 +738,13 @@ class ChainClient:
     """One client that answers MyMemory and Google differently."""
 
     def __init__(self, *, mymemory_body=None, mymemory_status=200, google_body=None,
-                 google_error=None):
+                 google_error=None, google_parts=None):
         self.calls: list[str] = []
         self.mymemory_body = mymemory_body
         self.mymemory_status = mymemory_status
         self.google_body = google_body
         self.google_error = google_error
+        self.google_parts = google_parts
 
     async def get(self, url, params=None, **kwargs):
         self.calls.append(url)
@@ -760,7 +761,12 @@ class ChainClient:
         text = (params or {}).get("q", "")
         # Google gets the batch newline-joined, so each line is matched separately.
         answered = [self._answer(self.google_body or {}, line) for line in text.split("\n")]
-        lines = [[body, None] for body in answered if body]
+        if self.google_parts is not None:
+            answered = self.google_parts
+        # One segment per answer, each ending in a newline: that is the shape the
+        # endpoint actually returns for a newline-joined batch, and flattening the
+        # answers without it collapsed every batch into a single line.
+        lines = [[body + "\n", None] for body in answered if body]
         return StubResponse([lines, None, "en"], status_code=200)
 
     @staticmethod
@@ -840,11 +846,17 @@ def test_transliterated_brand_names_are_restored():
 
 @pytest.mark.asyncio
 async def test_google_route_refuses_a_misaligned_batch():
-    """One merged line for two titles must not be pasted onto the wrong news."""
-    client = ChainClient(google_body={"A": "甲"})   # only one part comes back
+    """One merged line for two titles must not be pasted onto the wrong news.
+
+    `google_parts` is given literally because the mapping stub answers one line per
+    input line - it could not otherwise produce the short answer the endpoint
+    sometimes returns when it merges two headlines into one segment.
+    """
+    client = ChainClient(google_parts=["两段被合成一段的回答"])
     service = translator_with(client)
     service.provider = "google"
-    assert await service.translate_many(["A", "B title that needs work"], hint="title") == {}
+    assert await service.translate_many(["First title that needs work",
+                                         "Second title that needs work"], hint="title") == {}
 
 
 @pytest.mark.asyncio
@@ -1503,3 +1515,45 @@ async def test_bullets_that_need_no_translation_leave_the_window(session):
         assert row_id not in ids, "结案的行还在队列里"
     finally:
         _restore_points_config(saved)
+
+
+# ------------------- 免费额度记账：走流量最多的那条路由以前根本不计数
+GOOGLE_URL = "translate.google.com/translate_a/t"
+
+
+@pytest.mark.asyncio
+async def test_a_google_batch_is_charged_as_the_one_request_it_is():
+    """一批字符串一次请求，那就记一次——`daily_budget` 说的就是请求数。
+
+    线上 2026-09-29 夜：标题翻译 23/26 轮走的是 Google，要点回补 1044 条字符串也走它，
+    而 `_via_google` 从来不碰 `self.budget`——额度保护看着有，其实只盯着几乎没在干活的
+    那条 MyMemory 路由。
+    """
+    client = ChainClient(google_body={
+        "OpenAI ships GPT-7 with a bigger window": "OpenAI 发布 GPT-7，上下文更长",
+        "Anthropic raises the Claude limit": "Anthropic 提高 Claude 上限",
+    })
+    service = translator_with(client)
+    service.provider = "google"
+    before_run, before_day = service.budget.used_run, service.budget.used_day
+    got = await service.translate_many(
+        ["OpenAI ships GPT-7 with a bigger window", "Anthropic raises the Claude limit"],
+        hint="title")
+    assert len(got) == 2, got
+    assert service.budget.used_run - before_run == 1, \
+        f"两条字符串一次请求，只该记 1 次：{service.budget}"
+    assert service.budget.used_day - before_day == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spent_budget_keeps_the_google_request_from_leaving():
+    """额度用完就该闭嘴：一条请求都不该发出去，否则配额是被我们打爆的。"""
+    client = ChainClient(google_body={"OpenAI ships GPT-7": "OpenAI 发布 GPT-7"})
+    service = translator_with(client)
+    service.provider = "google"
+    service.budget.per_day = 1
+    assert service.budget.available(), "先让日期落到今天"
+    service.budget.used_day = 1
+    assert await service.translate_many(["OpenAI ships GPT-7"], hint="title") == {}
+    assert not any(GOOGLE_URL in url for url in client.calls), \
+        f"每天额度已经用完还是发了请求：{client.calls}"

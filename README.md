@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 567 个用例
+.venv/bin/python -m pytest            # 570 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -410,7 +410,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 550 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 570 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2367,3 +2367,60 @@ MB 线路挂算拒绝、MC 没进批也记账、MD 不需翻的行不结案）�
 三台一致（第二次部署只带注释更正，逻辑与首次 16:29 那次相同）。
 剩下的账：642 行按每轮 ~28 行的速度在未来几小时内陆续翻完（额度仍排在标题/摘要之后），
 26 行是两次真实拒绝后停问的，属于"免费 MT 就是翻不出"，卡片会如实标为原文。
+
+### v1.55 额度保护只盯着没在干活的那条路由：Google 一整晚一次账都没记过
+v1.54 修完之后先看了一夜战果——要点回补 **37 轮翻出 556 行**，`有要点 801 / 已有中文 747 /
+结案 21 / 队列剩 0`。但同一份日志里有个数字对不上：
+
+```
+00:38 → 06:30  标题/摘要按路由：google 23 轮 / 81 条，mymemory 3 轮 / 7 条
+               要点回补送翻字符串：1044 条
+               `translation budget exhausted` 出现次数：0
+```
+
+配置写着 `per_run_limit: 60`（每轮）、`daily_budget: 400`（每天），1044 条字符串跑了一夜，
+而"额度用完"这句话一次都没说过。读代码就明白为什么：`Budget` 只在 `_via_mymemory` 里被
+`spend()` / `available()` 碰过，**`_via_google` 从头到尾不认识 budget**——而夜里 26 轮里有 23 轮
+是 Google 在答题。也就是说额度保护专门盯着那条几乎没干活的路由，真正扛流量的那条**没有上限**。
+第二个洞连着：`Budget.reset_run()` 本来就是为"每轮清零"写的，但全工程**没有任何地方调用它**，
+于是 `used_run` 只增不减，`per_run_limit` 的实际含义变成"每个进程"——跑满 60 条之后 MyMemory
+当天再也不被问，而每次部署重启都像是"修好了"。
+
+改三处：
+- `_via_google` 先查 `available()`（用完就一条请求都不发，并落下 `budget exhausted` 日志），
+  发请求前 `spend(1)`——**一次批处理请求记一次**，不是一批字符串记一次。
+- `run_translation` 每轮开头调用 `get_translator(...).budget.reset_run()`，让 `per_run_limit`
+  真等于配置上写的"每轮"；`per_day` 不动。
+- 单位写清楚：`Budget` 文档与 `settings.yaml` 注释现在都说**单位是请求次数**（MyMemory 一条
+  一个请求、Google 一批一个请求）。旧注释一句里混着"每轮翻多少条"和"每天多少次请求"两种单位，
+  正是这个洞能被长期忽略的原因。
+
+代价要说在前面：**400 次/天从这次起真的会生效**。以前它只约束 MyMemory（昨夜只占 3 轮），
+等于没约束。爆料密集的一天，翻译会在当天某个时刻停下、日志写
+`translation budget exhausted; N item(s) stay in English`，之后的卡片按他给的规矩显示英文原文。
+现在稳态需求很小（队列已被 v1.54 清空），但这是明确的取舍，不是"更保守所以更好"。
+
+三个我自己犯的错，都是这次量出来的：
+1. 第一条用例的断言是**空断言**：我写 `used_day == saved_day`，而当时 `saved_day` 是 0，
+   "连每天一起清"的变异也把它置 0 → 两边仍相等 → M4 报 NOT CAUGHT。改成显式 `used_day = 7`
+   再断言它还在，M4 才真的被抓到。
+2. 测试替身不忠实：`ChainClient` 拼多行答案时**没带换行**，于是"两行标题一次请求"这种批量在
+   测试里永远不可能成功，Google 的记账也就测不到。补上真实端点的形状（每段以 `\n` 结尾）之后，
+   顺带发现原来那条"批量错位"用例是靠这个缺陷碰巧通过的——改成显式 `google_parts=["…"]`
+   才是真的在测错位。
+3. 线上探针我自己写错一行：先 `used_day = 0` 再调 `reset_run()`，然后打印"每天也被清了"——
+   那是我自己设的值。重做（`used_run=500, used_day=77`）后确认只清每轮。
+
+线上验证（部署构建，VPS，假 HTTP 客户端、零真实请求、临时 DATA_DIR）：
+
+```
+配置的每轮/每天上限: 60 400
+两条字符串一次请求 -> used_run=1 used_day=1 | 发出的请求数: 1 | 答案: 2
+把每天额度打满后 available(): False → 再问一次：请求数 0、返回 {}
+reset_run 之后: used_run=0（每轮清零）used_day=77（每天不动）| 每天还剩 323 次
+```
+
+3 条新用例（567 → **570**）；4 处反向验证各自被抓到（M1 不记账、M2 打满还发请求、
+M3 每轮不清零、M4 把每天也清了）；全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；
+两台 `stamp=20260928T223913Z`、`service=active`，`tree=b63a18a1f0b6071783f1e6f8a1314e78` 三台一致；
+部署后 0 条新 Traceback（`db.log`/`scheduler.log` 里那 4 条仍是 09-26 的旧账）。

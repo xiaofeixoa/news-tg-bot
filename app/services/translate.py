@@ -303,7 +303,14 @@ def needs_translation(text: str | None) -> bool:
 
 @dataclass
 class Budget:
-    """Stops a free provider from burning its anonymous quota in one round."""
+    """Stops the key-free providers from burning their anonymous quota.
+
+    The unit is **requests**, because that is what a quota is counted in: MyMemory is
+    asked one string per request while Google takes a whole batch in one. `per_run` is
+    reset at the start of every translation round by the scheduler; `per_day` rolls
+    over on the UTC date. A route that never spends from it has no limit at all -
+    which is exactly how the Google route behaved until v1.55.
+    """
 
     per_run: int = 120
     per_day: int = 400
@@ -539,11 +546,21 @@ class Translator:
         Tried after MyMemory by `provider: auto`, and it is the better of the two
         at brand names: it passes the ⑴⑵ placeholders through untouched, while
         MyMemory transliterates them into junk like "锘洪噾" (measured live).
+
+        The batch still costs one request, and the request has to be charged. This
+        route used to be the only one that never touched `self.budget`, and it is the
+        route `auto` ends up using: overnight 2026-09-29 it answered 23 of 26 headline
+        calls and 1044 bullet strings while the budget counter never moved, so
+        `daily_budget` guarded a provider that carried almost none of the traffic.
         """
+        if not self.budget.available():
+            log.info("translation budget exhausted; %d item(s) stay in English", len(texts))
+            return {}
         client = await self._http()
         # One request for the whole batch, so names are guarded per line and the
         # alignment check below still counts the same number of answers.
         lines = [protect_terms(text, self.keep_terms) for text in texts]
+        self.budget.spend(1)
         response = await client.get(
             GOOGLE_WEB,
             params={"client": "gtx", "sl": "en", "tl": TARGET, "dt": "t",

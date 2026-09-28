@@ -196,10 +196,17 @@ class NewsJobs:
     async def run_translation(self) -> int:
         """Backfill Chinese titles/summaries for everything already processed."""
         from app.processing.pipeline import translate_pending
+        from app.services.translate import get_translator
 
         done = 0
         rounds = max(1, int(self.config.get("translate.rounds_per_run", 2)))
         for _ in range(rounds):
+            # `per_run_limit` is an allowance per round, and the translator is a
+            # process-lifetime singleton - so without this the counter only ever
+            # grew and the round in its name meant nothing: after 60 items the
+            # MyMemory route stayed off for the rest of the day, and every later
+            # restart looked like a fix.
+            get_translator(self.config).budget.reset_run()
             with session_scope() as session:
                 got = await translate_pending(session, config=self.config)
                 session.commit()
