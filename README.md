@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 537 个用例
+.venv/bin/python -m pytest            # 541 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 537 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 541 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2058,3 +2058,41 @@ v1.46 那句"714/844 行没有 `processed_at`"查到底，是**两条路径只�
 删掉赋值后的 `if` 块留空，结果 `rc=4` 的 IndentationError 被误判成"用例抓住了"；重跑时先
 `compile()` 确认语法仍然成立，才拿到真正的 `rc=1 FAILED`。
 全量 537 通过（534+3），Windows 与 anr-jump Linux 均 `exit=0`；两台 `service=active`、`stamp=20260927T231653Z`，`tree=9a14a5cd607ba43708235797d5651539` 三台一致。
+
+### v1.48 早报里有一行是英文：model 的第三个义项，加上 MT 根本翻不了的仓库名
+先记 08:04 那份早报（`delivered 2319 chars` + `morning digest delivered … in 1 message(s)` +
+08:09 观察者正确地说"今天这份已送达"）：10 条来自 **4 个源**，最大单源 3 条，标记
+🔥6 / ⭐4 —— v1.43/1.44/1.45 三件第一次同时生效，混合度和分线都对了。但其中**一行是纯英文**：
+
+```
+#883  Reddit LocalLLaMA  LuffyTheFox/Swift-Qwen3.8-27B-Genesis-GGUF
+```
+
+查下去是两件不同的事：
+
+**1. MT 对光杆 `owner/repo` 一个字都不返回。** 直接问部署中的翻译器：
+`translate_many(["LuffyTheFox/Swift-…"])` → `{}`（**不是回显**，是空）。而
+`needs_translation()` 判定它"值得翻"（拉丁字母多、CJK 少），于是这条每次排队、每次白花时间，
+最后 `display_title` 回落成英文整行。仓库名本来就翻不动——它需要的是**中文框架**，不是翻译。
+`localize_title()` 里已经有 GitHub 发布/趋势两个模板，补第三个：`项目：<owner>/<repo>`；
+`needs_translation` 因为"模板能给出中文"自动改判 False，**免费额度也不再为它花**。
+存量那行由正常翻译轮自己补上，我没有写库：部署后实测
+`title_zh = 项目：LuffyTheFox/Swift-Qwen3.8-27B-Genesis-GGUF, translated_by=template`。
+正则要求两侧都以字母开头，`12/34`、`2024/01 revenue report…` 不会被误接（用例钉住）。
+
+**2. `model` 的第三个义项错译：车型 / 机型。** v1.33 只挡了 `模特`。全库量：`车型` 2 行、
+`机型` 2 行，**四行的英文里都确实有 model/models**（`Which Local Models are the least
+'Claude' sounding`→"哪些本地车型"，就是今早那条；`tiny models`→"微型机型"）。加进
+`SENSE_FIXES` 同一条英文触发词门槛。`型号` **故意不加**：库里那行英文是 `Model: Phoenix 2
+from Aleph Alpha?`，中文"型号："在这个语境里是对的，见了就改反而是我把对的改成错的。
+`模特` 那两条仍然要留着：库里从 v1.33 的 2 行涨到 3 行，说明免费 MT 还在生产它。
+
+部署后实测（只读，走 `fix_wrong_sense` 即渲染层用的同一个函数）：四行全部渲染成"模型"，
+`仍错=[]`。
+
+用例 +4（正例、**英文门槛负例**、slug 模板、slug 不吃散文/数字）。四处反向验证全部 CAUGHT，
+其中第一版我把"去掉英文门槛"错做成"把 keys 清空"——`term_in("")` 永远不匹配，那次替换在
+行为上等价，`rc=0` 暴露了它；改成把 `if any(term_in(...))` 换成 `if True` 才拿到真的
+`FAILED：这款新模型的风阻更低`。又一次"反向验证自己也得被验证"。
+
+全量 541 通过（537+4），Windows 与 anr-jump Linux 均 `exit=0`；两台 `service=active`、`stamp=20260928T002219Z`，`tree=1cc49e299d1d89d1e3ebf5487a5f09e6` 三台一致。

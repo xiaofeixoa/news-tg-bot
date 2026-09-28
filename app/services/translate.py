@@ -98,6 +98,11 @@ def term_in(text: str | None, term: str) -> bool:
 SENSE_FIXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("model", "models"), "模特儿", "模型"),
     (("model", "models"), "模特", "模型"),
+    # 2026-09-28 从真库量的另两个义项：`车型` 2 行、`机型` 2 行，四行的英文里都确实
+    # 有 model/models——"Which Local Models are the least 'Claude' sounding"→"哪些本地
+    # 车型"（这条就在 09-28 08:04 发出的早报里）、"tiny models"→"微型机型"。
+    (("model", "models"), "车型", "模型"),
+    (("model", "models"), "机型", "模型"),
     (("agentic",), "代理人工智能", "自主智能体"),
     # agent 不能无条件改：真库 #323 是 `Feds Target AI Critics as "Foreign Agents"`
     # → "外国代理人"，那是法律术语、是对的。所以要英文出现 AI 语境搭配才动手
@@ -241,6 +246,12 @@ def restore_proper_nouns(text: str) -> str:
 
 
 REPO_TITLE_RE = re.compile(r"^[\w.\-]+/[\w.\-]+\s*\(.*\)\s*$")
+# 光秃秃的 `owner/repo`：Reddit 的模型发布帖常拿仓库名当标题。免费 MT 对这种串
+# **一个字都不返回**（实测 `translate_many` 回 `{}`，不是回显），所以它不可能靠翻译变中文，
+# 只会让 `display_title` 回落成英文整行 —— 09-28 早报里就有这么一行
+# （`LuffyTheFox/Swift-Qwen3.8-27B-Genesis-GGUF`）。和下面两个模板一样，给它一个不带断言的
+# 中文框架：这确实是一个项目，至于是谁的、叫什么，原样保留。
+SLUG_TITLE_RE = re.compile(r"^\s*([A-Za-z][\w.\-]*)/([A-Za-z][\w.\-]*)\s*$")
 
 # Feed titles that are templates, not prose. Machine-translating them costs
 # free-tier quota and produces wrong word order ("owner/repo中发布的v1.2") or
@@ -262,6 +273,9 @@ def localize_title(title: str | None) -> str | None:
     match = TRENDING_TITLE_RE.match(text)
     if match:
         return f"{match.group('repo')} 收获 {match.group('stars')} 星"
+    match = SLUG_TITLE_RE.match(text)
+    if match:
+        return f"项目：{match.group(1)}/{match.group(2)}"
     return None
 
 

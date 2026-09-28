@@ -1085,3 +1085,42 @@ def test_the_display_layer_applies_the_correction_without_touching_the_database(
     view.meta["key_points_zh"] = ["最有能力模特被暂停训练"]
     view.key_points = ["The most capable models are paused"]
     assert "模特" not in view.display_key_points[0]
+
+
+# ------------------- 09-28 早报里那两个 model 的第三个义项：车型 / 机型
+def test_car_and_aircraft_type_are_the_wrong_sense_of_model():
+    from app.services.translate import fix_wrong_sense
+
+    fixed = fix_wrong_sense("哪些本地车型听起来最少“Claude”",
+                            "Which Local Models are the least 'Claude' sounding")
+    assert fixed == "哪些本地模型听起来最少“Claude”", fixed
+    fixed2 = fix_wrong_sense("在 Apple Silicon 上运行微型机型",
+                             "Run tiny models on Apple Silicon")
+    assert "机型" not in fixed2 and "模型" in fixed2, fixed2
+
+
+def test_the_new_sense_rules_stay_gated_on_the_english_word():
+    """没有 model 就不许动手：真的在说汽车/飞机的时候，那是正确译法。"""
+    from app.services.translate import fix_wrong_sense
+
+    keep_car = fix_wrong_sense("这款新车型的风阻更低", "Aleph Alpha unveils a sleeker body")
+    assert "车型" in keep_car, keep_car
+    keep_plane = fix_wrong_sense("该机型将搭载新发动机", "The fleet gets a new engine")
+    assert "机型" in keep_plane, keep_plane
+
+
+def test_a_bare_repo_slug_gets_a_chinese_frame_instead_of_english():
+    """MT 对光杆 slug 一个字都不返回（实测 {}），所以它必须被模板接住。"""
+    from app.services.translate import localize_title, needs_translation
+
+    slug = "LuffyTheFox/Swift-Qwen3.8-27B-Genesis-GGUF"
+    assert localize_title(slug) == "项目：LuffyTheFox/Swift-Qwen3.8-27B-Genesis-GGUF"
+    assert not needs_translation(slug), "既然模板能给出中文，就不该再花免费额度"
+
+
+def test_the_slug_template_does_not_swallow_prose_or_numbers():
+    from app.services.translate import localize_title
+
+    assert localize_title("2024/01 revenue report on AI models") is None
+    assert localize_title("OpenAI announces a new reasoning model") is None
+    assert localize_title("12/34") is None, "纯数字不是仓库名"
