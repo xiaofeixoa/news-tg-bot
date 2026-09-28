@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 563 个用例
+.venv/bin/python -m pytest            # 567 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -2309,3 +2309,61 @@ NVIDIA Developer · 09-28 08:56 · 🔹66
 全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260928T143856Z`、`service=active`，
 `tree=52dbd4f660d074982fe41bb2092feea6` 三台一致；部署窗口之后 `scheduler.log` 新增 0 条 Traceback、
 0 条 ERROR，健康行 1106 篇 / 1 未处理 / 0 故障源 / 2056MB 空闲。
+
+### v1.54 核心内容回补被自己做完的高分行堵死：窗口 LIMIT 问错了对象
+09-28 那条突发修完，顺手量了一下"读者能点开的卡片有没有中文要点"：
+
+```
+00:16  有要点的行 754 | 已有中文要点 163 | 队列里还剩 687 行没翻
+       要点回补的扫描窗口（按分数取前 120 行）：120 行里 95 行已完成、0 行还能问
+```
+
+`translate.points_scan_rows: 120` 的语义是"每轮看 120 行"，但 SQL 里只筛了
+`key_points IS NOT NULL`，"已经翻好的 / 两次都翻不动的"是**取完 LIMIT 之后**才在 Python 里剔掉的。
+于是分数最高那 120 行做完之后，窗口就再也吐不出任何可问的行——下面 687 行（从分数 59~61 起步）
+**结构上永远进不来**。当时简报第 2 名 #1059（73.9）那两条英文要点就是这个形状。
+
+三处一起改：
+- **排除写进 SQL**：`json_extract(meta,'$."key_points_zh"') IS NULL` 且
+  `key_points_tried < POINTS_ATTEMPTS`（用 `func.json_extract`，不用 `Article.meta["key"]`——
+  v1.53 刚量过那个写法会命中所有行）。
+- **失败计数只在"真的被拒"时累加**：只有 provider 这轮确实答过话（`provider_calls` 增加）、
+  且**这一行自己的字符串在本次送出的 `points_per_run` 里**，才算一次失败。旧写法把所有
+  `got` 里没有中文的行一律 +1，包括根本没被送出去的行、以及线路挂掉的轮次——两轮就把一行的
+  核心内容永久静音，正是 v1.51 给标题修过的"把退化当拒绝"。
+- **无需翻译的行要结案退出队列**（要点本来就是中文、或没有要点），否则它每轮占一个名额，
+  和旧 LIMIT 堵死是同一个效果。
+
+我这次先写出了一个**错的证据**，必须更正：最初那句"三天里 `translated key points` 出现过 0 次"
+是 grep `scheduler.log` 得来的，而 pipeline 用的是 `get_logger("app")`，它落在 **`logs/app.log`**。
+换对文件后：app.log 里这条从 09-27 起出现过 **51 次**。所以这不是"功能从来没生效"，而是
+**吞吐被窗口堵死**——结论仍然成立（00:16 那组数字是直接调 repository 量的，不依赖日志），
+但范围比我先写的窄。代码文档与用例注释里那句已经改掉，并把"pipeline 的 `[news]` 日志在 app.log、
+判断'某段代码没跑过'之前先 grep 全部 logs/*.log"记进了运维笔记。
+
+另外两个自己造的坑：
+1. 第一版同时写了 `if not batch: 整窗结案` 和逐行 `elif not texts: 结案`——两道重复保险。
+   反向验证 MD 因此报 **NOT CAUGHT**（拆掉逐行那道，另一道照样兜住）。合成一条路径后 MD 才真被抓到；
+   而 `translate_many([])` 本来就返回 `{}`，那条 batch 守卫属于死代码，删掉。
+2. 四条新用例最初都从 `translate_pending` 驱动，**测的并不是要点这一层**：共享测试库里其他用例留下的
+   英文标题先把翻译器打进退避，要点层提前返回，断言是以错误的理由失败的。改成直接调被测函数
+   `_translate_key_points` 之后，四条各自对应一处真实缺陷。
+
+线上部署后（生产库、真实免费额度、00:32 那两轮）：
+
+```
+translated key points for 20 article(s), 40 of 40 string(s) asked
+settled 14 article(s) whose 核心内容 needs no translation
+translated key points for 8 article(s), 16 of 40 string(s) asked
+settled 5 article(s) whose 核心内容 needs no translation
+756 有要点 | 191 已有中文（原 163）| 队列剩 642（原 687）
+```
+
+分数 59~61 那批第一次被翻出来，就是窗口不再被顶替的直接证据。
+
+4 条新用例（563 → **567**），4 处反向验证各被自己那条用例抓到（MA 窗口不排除已完成、
+MB 线路挂算拒绝、MC 没进批也记账、MD 不需翻的行不结案）；全量 Windows 与 anr-jump Linux/UTC 均
+`exit=0`；两台 `stamp=20260928T163840Z`、`service=active`，`tree=6f0420d413f007983455abc8904772e1`
+三台一致（第二次部署只带注释更正，逻辑与首次 16:29 那次相同）。
+剩下的账：642 行按每轮 ~28 行的速度在未来几小时内陆续翻完（额度仍排在标题/摘要之后），
+26 行是两次真实拒绝后停问的，属于"免费 MT 就是翻不出"，卡片会如实标为原文。

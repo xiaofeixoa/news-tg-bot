@@ -1351,3 +1351,155 @@ def test_a_rendered_news_list_uses_the_same_ladder():
     text = fmt.news_list(views, config=get_config(), show_scores=True)
     marks = [m for m in ("🔥", "⭐", "🔹") if m in text]
     assert len(marks) >= 2, f"列表页只出现 {marks}：{text[:200]}"
+
+
+# ------------------- 核心内容回补：窗口曾被"已做完的高分行"永久堵死
+def _points_row(session, title: str, url: str, points, *, score: float,
+                meta: dict | None = None) -> int:
+    """A row whose headline is settled, so only the 要点 layer has work left."""
+    from app.processing.normalize import build_article
+
+    data = build_article(title=title, url=url, source_name="OpenAI",
+                         content=f"{title}. Details about the AI model release and benchmarks.",
+                         published_at=datetime.now(timezone.utc).replace(tzinfo=None))
+    row = repo.save_article(session, data)
+    row.is_processed = True
+    row.filtered_out = False
+    row.category = "AI Models"
+    row.final_score = score
+    row.key_points = list(points)
+    row.title_zh = title
+    row.summary_zh = "推理更便宜，上下文更大。"
+    if meta:
+        row.meta = dict(meta)
+    session.commit()
+    return int(row.id)
+
+
+def _points_translator(mapping, **kwargs) -> "Translator":
+    """A fresh translator for the 要点 pass alone.
+
+    Deliberately not driven through `translate_pending`: the headline pass shares
+    one Translator, and in this module's database other tests' English titles come
+    back refused, which puts the route in backoff before the bullets are ever
+    reached. That would test the wiring, not the queue.
+    """
+    client = StubClient(mapping, **kwargs)
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    return translator
+
+
+async def _run_points_pass(session, translator, cfg) -> set[int]:
+    from app.processing.pipeline import _translate_key_points
+
+    pointed = await _translate_key_points(session, translator, cfg)
+    session.commit()
+    return pointed
+
+
+def _points_config(**overrides):
+    """Temporarily retune translate.* - `raw` is what AppConfig.get reads."""
+    cfg = get_config()
+    node = cfg.raw.setdefault("translate", {})
+    saved = {key: node.get(key) for key in overrides}
+    node.update(overrides)
+    return cfg, saved
+
+
+def _restore_points_config(saved: dict) -> None:
+    node = get_config().raw.setdefault("translate", {})
+    for key, value in saved.items():
+        if value is None:
+            node.pop(key, None)
+        else:
+            node[key] = value
+
+
+@pytest.mark.asyncio
+async def test_finished_rows_cannot_starve_the_key_points_window(session):
+    """窗口 LIMIT 必须排除"已经翻好"的行，否则高分那批永远占着名额。
+
+    线上 2026-09-29 00:16 实测：要点回补的扫描窗口 120 行里 95 行已完成、**0 行还能问**，
+    下面还压着 687 行没翻。旧写法是"取分数最高的 N 行有要点的行"再在 Python 里剔除
+    已完成的——分数 59~61 那批永远进不到窗口里。修好后两轮就把 163 → 191 行翻了出来。
+    """
+    cfg, saved = _points_config(points_scan_rows=3, points_per_run=8)
+    try:
+        for i in range(3):
+            _points_row(session, f"OpenAI releases tuned model {i}", f"https://openai.com/starv-{i}",
+                        ["Tuned benchmark sentence one."], score=90 - i,
+                        meta={"key_points_zh": ["已翻好的中文要点。"]})
+        late = _points_row(session, "Anthropic ships Claude 5 for everyone",
+                           "https://anthropic.com/starv-late",
+                           ["Claude 5 scores higher on coding benchmarks."], score=87)
+        translator = _points_translator({"Claude 5 scores higher on coding benchmarks.":
+                                         "Claude 5 在编程基准上得分更高。"})
+        await _run_points_pass(session, translator, cfg)
+        session.expire_all()
+        row = session.get(Article, late)
+        assert (row.meta or {}).get("key_points_zh") == ["Claude 5 在编程基准上得分更高。"], \
+            f"高分那几行做完就把窗口占满，第 4 名永远轮不到：{(row.meta or {}).get('key_points_tried')}"
+    finally:
+        _restore_points_config(saved)
+
+
+@pytest.mark.asyncio
+async def test_a_route_outage_is_not_counted_as_a_refusal_for_bullets(session):
+    """线路挂了（一行都没答）不该消耗那行的两次机会——和 v1.51 对标题的处理一致。"""
+    cfg, saved = _points_config(points_scan_rows=20, points_per_run=8)
+    try:
+        row_id = _points_row(session, "Google announces a Gemini refresh today",
+                             "https://blog.google/outage-bullets",
+                             ["Gemini adds a longer context window."], score=99)
+        translator = _points_translator({}, fail_with=RuntimeError("upstream down"))
+        await _run_points_pass(session, translator, cfg)
+        session.expire_all()
+        meta = session.get(Article, row_id).meta or {}
+        assert not meta.get("key_points_tried"), f"没问出去却被记成拒绝：{meta}"
+        assert not meta.get("key_points_zh")
+    finally:
+        _restore_points_config(saved)
+
+
+@pytest.mark.asyncio
+async def test_bullets_that_never_entered_the_batch_are_not_charged(session):
+    """`points_per_run` 只送前若干条字符串；没被送出去的行不该被记一次失败。"""
+    cfg, saved = _points_config(points_scan_rows=20, points_per_run=1)
+    try:
+        first = _points_row(session, "Microsoft unveils an Azure AI tool today",
+                            "https://microsoft.com/batch-a",
+                            ["Azure adds a new inference endpoint."], score=99)
+        second = _points_row(session, "Amazon reports an AWS cost cut today",
+                             "https://amazon.com/batch-b",
+                             ["AWS cutting storage prices by a third."], score=98)
+        translator = _points_translator({"Azure adds a new inference endpoint.": "Azure 新增推理端点。"})
+        await _run_points_pass(session, translator, cfg)
+        session.expire_all()
+        assert (session.get(Article, first).meta or {}).get("key_points_zh") == ["Azure 新增推理端点。"]
+        meta = session.get(Article, second).meta or {}
+        assert not meta.get("key_points_tried"), f"这条根本没被送翻，却记了一次失败：{meta}"
+    finally:
+        _restore_points_config(saved)
+
+
+@pytest.mark.asyncio
+async def test_bullets_that_need_no_translation_leave_the_window(session):
+    """本来就是中文的要点要结案退出队列，不然它每轮都占一个窗口名额。"""
+    from app.database import repository as repo_mod
+
+    cfg, saved = _points_config(points_scan_rows=20, points_per_run=8)
+    try:
+        row_id = _points_row(session, "DeepMind publishes a new paper today",
+                             "https://deepmind.com/native-bullets",
+                             ["这篇论文说明新的推理方法。", "已经在中文里了。"], score=99)
+        translator = _points_translator({})
+        await _run_points_pass(session, translator, cfg)
+        session.expire_all()
+        meta = session.get(Article, row_id).meta or {}
+        assert meta.get("key_points_zh") == [], f"无翻可做的行该结案：{meta}"
+        ids = [int(r.id) for r in repo_mod.rows_needing_key_points(session, limit=40)]
+        assert row_id not in ids, "结案的行还在队列里"
+    finally:
+        _restore_points_config(saved)

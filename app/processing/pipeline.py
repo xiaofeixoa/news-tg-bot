@@ -27,6 +27,11 @@ from app.services.llm import LLMService
 
 log = get_logger("app")
 
+# How often a row's 核心内容 may be asked and refused before the pass stops asking.
+# One number, used by both the queue query and the counter, so "两次都没翻出来就不再问"
+# cannot drift apart from what the code actually does.
+POINTS_ATTEMPTS = 2
+
 
 @dataclass
 class CollectStats:
@@ -754,6 +759,13 @@ async def _translate_key_points(session: Session, translator: Any, config: AppCo
     other row showed no block at all (295 of 423 openable rows on the live box).
     Two attempts per row, then it stops asking - a body sentence the free provider
     refuses must not take the whole budget every round for ever.
+
+    A "try" is only charged when the provider actually answered and this row's own
+    strings were part of what we sent. The old code charged every row that came back
+    without Chinese - including rows whose bullets never entered the batch (only
+    `points_per_run` strings go out) and rounds where the route was down. That is the
+    outage/refusal confusion v1.51 removed for titles, and here two bad rounds were
+    enough to silence a row's 核心内容 for good.
     """
     from app.services.news import CARD_POINTS
     from app.services.translate import needs_translation
@@ -762,33 +774,55 @@ async def _translate_key_points(session: Session, translator: Any, config: AppCo
         return set()
     scan = int(config.get("translate.points_scan_rows", 120))
     limit = int(config.get("translate.points_per_run", 40))
-    rows = [row for row in repo.rows_with_key_points(session, limit=scan)
-            if not (row.meta or {}).get("key_points_zh")
-            and (row.meta or {}).get("key_points_tried", 0) < 2]
+    rows = list(repo.rows_needing_key_points(session, limit=scan, max_tried=POINTS_ATTEMPTS))
     if not rows:
         return set()
+
+    mine: dict[int, list[str]] = {}
     asked: list[str] = []
     for row in rows:
+        texts: list[str] = []
         for point in (row.key_points or [])[:CARD_POINTS]:
             text = str(point or "").strip()
-            if text and needs_translation(text) and text not in asked:
-                asked.append(text)
-    if not asked:
-        return set()
-    got = await translator.translate_many(asked[:limit], hint="summary")
+            if text and needs_translation(text) and text not in texts:
+                texts.append(text)
+                if text not in asked:
+                    asked.append(text)
+        mine[row.id] = texts
+
+    settled: set[int] = set()
+    batch = asked[:limit]
+    calls_before = getattr(translator, "provider_calls", 0)
+    got = await translator.translate_many(batch, hint="summary")
+    # An outage is not a refusal: only a provider that actually answered may cost a
+    # row one of its two attempts. Same rule v1.51 applies to titles - and the same
+    # mistake lived here, where an empty `got` charged every row in the window and
+    # two bad rounds silenced a row's 核心内容 for good.
+    answered = getattr(translator, "provider_calls", 0) > calls_before
+    batch_set = set(batch)
     pointed: set[int] = set()
     for row in rows:
-        points = [got[str(point).strip()] for point in (row.key_points or [])[:CARD_POINTS]
-                  if str(point or "").strip() in got]
+        texts = mine[row.id]
+        points = [got[text] for text in texts if text in got]
         if points:
             row.meta = {**(row.meta or {}), "key_points_zh": points}
             pointed.add(row.id)
-        else:
-            row.meta = {**(row.meta or {}),
-                        "key_points_tried": (row.meta or {}).get("key_points_tried", 0) + 1}
+        elif not texts:
+            # Nothing to ask (bullets are already Chinese, or there are none). Settle
+            # it, or an unaskable row keeps its place in the window every round and
+            # starves the rows underneath exactly like the old LIMIT did.
+            row.meta = {**(row.meta or {}), "key_points_zh": []}
+            settled.add(row.id)
+        elif answered and all(text in batch_set for text in texts):
+            tried = int((row.meta or {}).get("key_points_tried") or 0) + 1
+            row.meta = {**(row.meta or {}), "key_points_tried": tried}
+            if tried == POINTS_ATTEMPTS:
+                log.info("gave up translating 核心内容 for #%s after %s refusals", row.id, tried)
     if pointed:
         log.info("translated key points for %d article(s), %d of %d string(s) asked",
-                 len(pointed), len(got), min(len(asked), limit))
+                 len(pointed), len(got), len(batch))
+    if settled:
+        log.info("settled %d article(s) whose 核心内容 needs no translation", len(settled))
     return pointed
 
 

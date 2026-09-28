@@ -249,17 +249,30 @@ def untranslated_articles(session: Session, limit: int = 120) -> list[Article]:
     return list(session.scalars(stmt))
 
 
-def rows_with_key_points(session: Session, *, limit: int = 200) -> list[Article]:
-    """Visible rows that have bullets but no Chinese version of them.
+def rows_needing_key_points(session: Session, *, limit: int = 200,
+                            max_tried: int = 2) -> list[Article]:
+    """Visible rows whose 核心内容 still has no Chinese version, best first.
 
-    Score-ordered, because the free provider's leftover budget should go to the
-    stories that can reach a briefing or a tap. On the deployed box 295 of the 423
-    rows a reader can open carried `key_points` and showed no 核心内容 block at all.
+    The exclusion has to happen in SQL. This used to select "the top N rows that
+    have bullets" and let the caller drop the finished ones in Python, so the
+    already-translated rows at the top of the score order owned the window and
+    nothing below it was ever read: measured on the deployed box at 2026-09-29
+    00:16, the 120-row window held 95 finished rows and **0 askable ones**, while
+    687 unfinished rows sat underneath it. Two rounds after the fix the queue had
+    moved (191 rows with Chinese bullets instead of 163, 642 still queued) because
+    rows scoring 59-61 - outside the old window - were reachable for the first time.
+
+    Both markers live in `meta`, so they are read with `json_extract`, never with
+    `Article.meta["key"]`, which compiles to `JSON_QUOTE(JSON_EXTRACT(...))` and
+    matches every row because `json_quote(NULL)` is the text 'null'.
     """
+    done = func.json_extract(Article.meta, '$."key_points_zh"')
+    tried = func.json_extract(Article.meta, '$."key_points_tried"')
     stmt = (
         select(Article)
         .where(Article.is_processed.is_(True), Article.is_archived.is_(False),
-               Article.filtered_out.is_(False), Article.key_points.isnot(None))
+               Article.filtered_out.is_(False), Article.key_points.isnot(None),
+               done.is_(None), or_(tried.is_(None), tried < max_tried))
         .order_by(Article.final_score.desc(), Article.published_at.desc())
         .limit(limit)
     )
