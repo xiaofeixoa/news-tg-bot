@@ -28,6 +28,23 @@ log = get_logger("app")
 # The briefing reads 4x its length so the per-source cap has material left over.
 BRIEFING_DEPTH = 4
 
+# The two guards that close on their own. They are constants because
+# `deferral_worthwhile` below has to match them exactly, and a reason string that
+# drifts away from its prefix silently turns "retry later" into "drop forever".
+_COOLDOWN = "cooldown"
+_DAILY_CAP = "daily cap"
+
+
+def deferral_worthwhile(reason: str) -> bool:
+    """Is this rejection about *timing*, so the same row may pass a later round?
+
+    Cooldown and the daily cap are the only two gates that open again on a clock.
+    Everything else - the gate no longer passing, the story ageing out, already
+    sent, breaking switched off - will read the same way next round, so keeping it
+    in the retry queue would be a query with no possible outcome.
+    """
+    return reason.startswith(_COOLDOWN) or reason.startswith(_DAILY_CAP)
+
 
 def select_briefing(items: Sequence[ArticleView], *, top_items: int,
                     max_per_source: int) -> list[ArticleView]:
@@ -254,12 +271,12 @@ class DigestService:
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             count = repo.pushes_since(session, user=user, kind="breaking", since=today_start)
             if count >= max_per_day:
-                return False, f"daily cap reached ({count}/{max_per_day})"
+                return False, f"{_DAILY_CAP} reached ({count}/{max_per_day})"
             last = repo.last_push_of(session, user=user, kind="breaking")
             if last is not None and cooldown > 0 and respect_cooldown:
                 elapsed = (datetime.utcnow() - last.created_at).total_seconds() / 60
                 if elapsed < cooldown:
-                    return False, f"cooldown {cooldown - elapsed:.0f} min left"
+                    return False, f"{_COOLDOWN} {cooldown - elapsed:.0f} min left"
         return True, "ok"
 
     # --------------------------------------------------------------- sending

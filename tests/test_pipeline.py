@@ -1491,3 +1491,182 @@ async def test_the_same_event_dedupe_is_per_reader_too(session):
     assert not same_reader and "same event" in why_same, why_same
     other_reader, why_other = svc.can_send_breaking(222222222, article_id=second)
     assert other_reader, f"事件去重也不该跨读者：{why_other}"
+
+
+class _Sender:
+    """Records what actually reached a chat, so 补发 can be asserted, not hoped for."""
+
+    def __init__(self) -> None:
+        self.delivered: list[int] = []
+        self.sends = 0
+
+    async def send_digest(self, chat_id, digest):
+        self.delivered.extend(digest.article_ids)
+        self.sends += 1
+        return len(digest.messages)
+
+
+def _age_breaking_pushes(minutes: int) -> None:
+    from app.database.models import PushLog
+
+    with session_scope() as s:
+        for entry in s.scalars(select(PushLog)):
+            entry.created_at = datetime.utcnow() - timedelta(minutes=minutes)
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_breaking_story_blocked_by_cooldown_comes_back_later(session, monkeypatch):
+    """被冷却挡下的突发不会自己回来：那一行已是 is_processed=True，再没人看它。
+
+    线上 2026-09-28：#1083 于 21:41 发出，#1101 在 22:12 过了门禁却被
+    `cooldown 29 min left` 挡回，此后再未出现在任何一轮里——而它的时效窗口
+    一直开到次日 22:00。三行合格、一行永久消失。
+    """
+    from app.scheduler.jobs import NewsJobs
+
+    first = _breaking_row(session, "Anthropic announces Claude for Enterprise",
+                          "https://anthropic.com/d1")
+    sender = _Sender()
+    jobs = NewsJobs(get_config(), sender=sender)
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111])
+    await jobs.send_breaking([first])
+    assert sender.delivered == [first]
+
+    second = _breaking_row(session, "OpenAI unveils GPT-6 for agents", "https://openai.com/d2")
+    await jobs.send_breaking([second])
+    assert second not in sender.delivered, "冷却期内就该先挡住：这条测的是它之后会不会回来"
+    with session_scope() as s:
+        info = (s.get(Article, second).meta or {}).get("breaking_defer")
+        assert info, "被时间类门禁挡下的行必须留下重试标记"
+        assert info.get("tries") == 1 and "cooldown" in str(info.get("reason"))
+
+    _age_breaking_pushes(61)
+    await jobs.send_breaking([])          # 下一轮：本轮没有新的突发，只有欠着的
+    assert second in sender.delivered, f"冷却结束后没有补发：{sender.delivered}"
+    with session_scope() as s:
+        assert not (s.get(Article, second).meta or {}).get("breaking_defer"), "补发成功后标记该清掉"
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_story_that_stopped_qualifying_is_dropped(session, monkeypatch):
+    """重试队列要会自己清空：门禁再也不认的行，留着标记只是每轮白花一次查询。"""
+    from app.processing import breaking
+    from app.scheduler.jobs import NewsJobs
+
+    art = _breaking_row(session, "Anthropic announces a new reasoning model",
+                        "https://anthropic.com/d3")
+    with session_scope() as s:
+        row = s.get(Article, art)
+        breaking.note_deferral(row, "cooldown 59 min left")
+        row.published_at = datetime.utcnow() - timedelta(hours=48)   # 早已出窗
+        s.commit()
+
+    sender = _Sender()
+    jobs = NewsJobs(get_config(), sender=sender)
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111])
+    await jobs.send_breaking([])
+    assert sender.sends == 0, "过期行不该被发出去"
+    with session_scope() as s:
+        assert not (s.get(Article, art).meta or {}).get("breaking_defer"), "不可能再送的重试不该留着"
+
+
+@pytest.mark.asyncio
+async def test_one_reader_having_it_does_not_cancel_another_readers_retry(session, monkeypatch):
+    """标记写在共享行上、冷却却按读者：A 收过不该把 B 还欠着的重试一起清掉。"""
+    from app.database.models import User
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import get_news_service
+
+    get_news_service().user_for(222222222)
+    art = _breaking_row(session, "OpenAI announces an agent platform today", "https://openai.com/d4")
+    other = _breaking_row(session, "Google announces a TPU refresh today", "https://blog.google/d5")
+    with session_scope() as s:
+        a_user = s.scalar(select(User).where(User.telegram_chat_id == 111111111))
+        b_user = s.scalar(select(User).where(User.telegram_chat_id == 222222222))
+        # A 已经收过这条；B 只是刚被另一条突发占了冷却。
+        repo.record_push(s, user=a_user, kind="breaking", article_id=art)
+        repo.record_push(s, user=b_user, kind="breaking", article_id=other)
+        s.commit()
+
+    sender = _Sender()
+    jobs = NewsJobs(get_config(), sender=sender)
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111, 222222222])
+    await jobs.send_breaking([art])
+    assert art not in sender.delivered, "两位读者都还没轮到：A 收过、B 在冷却"
+    with session_scope() as s:
+        assert (s.get(Article, art).meta or {}).get("breaking_defer"), \
+            "B 还欠着这条，重试标记不能被 A 的收取记录清掉"
+
+    _age_breaking_pushes(61)
+    await jobs.send_breaking([])
+    assert art in sender.delivered, f"B 冷却结束后没补发：{sender.delivered}"
+    with session_scope() as s:
+        assert not (s.get(Article, art).meta or {}).get("breaking_defer")
+
+
+@pytest.mark.asyncio
+async def test_a_row_one_reader_got_stays_booked_for_the_reader_in_cooldown(session, monkeypatch):
+    """同一轮里 A 收到了、B 还在冷却：标记不能被 A 的成功清掉，否则 B 永远收不到。
+
+    补发账记在共享行上、冷却却按读者算——这正是 v1.50 那个"一个人收过就全体闭嘴"
+    的毛病换了个位置。写成 `deferred - delivered` 就会踩进去。
+    """
+    from app.database.models import User
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import get_news_service
+
+    get_news_service().user_for(222222222)
+    art = _breaking_row(session, "Anthropic announces a compute deal today",
+                        "https://anthropic.com/d6")
+    other = _breaking_row(session, "Google announces a chip refresh today", "https://blog.google/d7")
+    with session_scope() as s:
+        b_user = s.scalar(select(User).where(User.telegram_chat_id == 222222222))
+        repo.record_push(s, user=b_user, kind="breaking", article_id=other)
+        s.commit()
+
+    sender = _Sender()
+    jobs = NewsJobs(get_config(), sender=sender)
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111, 222222222])
+    await jobs.send_breaking([art])
+    assert art in sender.delivered, "A 不在冷却里，这一轮就该收到"
+    with session_scope() as s:
+        assert (s.get(Article, art).meta or {}).get("breaking_defer"), "B 还在冷却里，标记必须留着"
+
+    _age_breaking_pushes(61)
+    await jobs.send_breaking([])
+    assert sender.delivered.count(art) == 2, f"B 冷却结束后没有补发：{sender.delivered}"
+    with session_scope() as s:
+        assert not (s.get(Article, art).meta or {}).get("breaking_defer"), "两位都收到后标记该清掉"
+
+
+def test_only_timing_rejections_are_worth_retrying():
+    """推迟只认会自己重新打开的两道门禁；其余理由每轮都一样。"""
+    from app.services.digest import deferral_worthwhile
+
+    assert deferral_worthwhile("cooldown 29 min left")
+    assert deferral_worthwhile("daily cap reached (5/5)")
+    for final in ("already sent to this reader", "same event already sent to this reader",
+                  "not breaking: published 30h ago, older than 24h",
+                  "breaking news disabled in config", "user paused / breaking off"):
+        assert not deferral_worthwhile(final), final
+
+
+def test_the_retry_queue_reads_only_marked_rows(session):
+    """读标记必须用 `json_extract`，不能用 `Article.meta["key"].isnot(None)`。
+
+    后者在 sqlite 上编译成 `JSON_QUOTE(JSON_EXTRACT(...)) IS NOT NULL`，而
+    `json_quote(NULL)` 是文本 `'null'` 不是 NULL——实测它命中**所有**行，于是每一轮都
+    会把分数最高的若干未标记行当"待补发"重新问一遍门禁，合格就直接发出去。
+    """
+    from app.processing import breaking
+
+    marked = _breaking_row(session, "Anthropic announces a marked story", "https://anthropic.com/q1")
+    _breaking_row(session, "OpenAI announces an unmarked story", "https://openai.com/q2")
+    with session_scope() as s:
+        breaking.note_deferral(s.get(Article, marked), "cooldown 12 min left")
+        s.commit()
+    with session_scope() as s:
+        assert s.get(Article, marked).meta is not None
+        ids = [int(row.id) for row in repo.breaking_deferrals(s)]
+        assert ids == [marked], f"重试队列只该读到被标记的行：{ids}"

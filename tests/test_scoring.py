@@ -202,6 +202,27 @@ def test_the_settings_text_describes_the_gate_that_is_actually_in_force():
     assert "热度" in text and "250" in text, f"/设置 说的门必须就是代码里的门：{text}"
 
 
+def test_the_settings_text_follows_the_configured_freshness_window():
+    """"24 小时内"曾经写死在文案里：把窗口调成 6 小时，/设置 照样说 24。"""
+    from dataclasses import replace
+
+    from app.processing import breaking
+
+    cfg = get_config()
+    assert "24 小时" in breaking.describe(cfg, ai_enabled=False)
+
+    base = dict(cfg.raw or {})
+    node = dict(base.get("breaking") or {})
+    rule = dict(node.get("rule") or {})
+    rule["max_age_hours"] = 6
+    node["rule"] = rule
+    base["breaking"] = node
+    moved = replace(cfg, raw=base)
+
+    text = breaking.describe(moved, ai_enabled=False)
+    assert "6 小时" in text and "24 小时" not in text, f"文案没跟着配置走：{text}"
+
+
 # ------------------- 采集器交来的是原始计数，不是 0..100 的分量（线上 51 条并列）
 def trending(stars: int) -> dict:
     """GitHub Trending 的形状：meta 里有 stars，同时把原始星数当 community_heat 交进来。"""

@@ -26,10 +26,10 @@ from app.collectors import build_collectors, close_client
 from app.config import AppConfig, as_int, get_config
 from app.database import repository as repo
 from app.database.database import session_scope
-from app.database.models import User
+from app.database.models import Article, User
 from app.logging_setup import get_logger
 from app.processing.pipeline import collect, process_pending, translate_pending
-from app.services.digest import DigestService
+from app.services.digest import DigestService, deferral_worthwhile
 from app.services.llm import LLMService
 from app.services.news import NewsService
 
@@ -174,8 +174,9 @@ class NewsJobs:
                 break
         await self.run_translation()
         log.info("AI processing done: %s", total)
-        if total.breaking:
-            await self.send_breaking(total.breaking)
+        # Called even with nothing new: rows an earlier round turned away for cooldown
+        # only ever get retried here, and this is the only cadence they have.
+        await self.send_breaking(total.breaking)
         await self.send_free_alerts()
         return total
 
@@ -229,6 +230,69 @@ class NewsJobs:
                 await asyncio.sleep(wait)
         raise RuntimeError("unreachable")  # pragma: no cover
 
+    def _retry_breakings(self) -> list[int]:
+        """突发 ids that a cooldown or the daily cap turned away in an earlier round.
+
+        Without this the rejection is final: `send_breaking` is handed only the rows
+        the current round processed, and a row rejected for timing is already
+        `is_processed=True`, so nobody looks at it again. Measured on the live box:
+        #1083 alerted at 21:41, #1101 cleared the gate at 22:12, was answered
+        `cooldown 29 min left`, and stayed undelivered while its freshness window
+        still ran to 22:00 the next day.
+        """
+        try:
+            with session_scope() as session:
+                return [int(row.id) for row in repo.breaking_deferrals(session)]
+        except Exception as exc:  # noqa: BLE001 - a retry pass must not kill the round
+            log.warning("breaking retry queue skipped: %s", exc)
+            return []
+
+    def _settle_breaking_deferrals(self, *, reasons: dict[int, str], deferred: set[int],
+                                   settled: set[int], delivered: set[int]) -> None:
+        """Re-book what is still waiting, drop what never will, and say so.
+
+        The marker sits on a shared row while the cooldown is per reader, so the
+        rule is: re-book a row whenever *any* reader is still waiting for it - even
+        when another reader already received it this same round. Writing that as
+        `deferred - delivered` loses the second reader's alert exactly the way the
+        old global `is_breaking` flag used to (v1.50), which is why the two passes
+        below are keyed off disjoint sets instead of a guard inside one loop.
+        """
+        keep = set(deferred)
+        clear = (settled | delivered) - keep
+        if not keep and not clear:
+            return
+        from app.processing import breaking
+
+        try:
+            with session_scope() as session:
+                for article_id in sorted(keep):
+                    row = session.get(Article, article_id)
+                    if row is None:
+                        continue
+                    tries = breaking.note_deferral(row, reasons.get(article_id, ""))
+                    if tries >= 3:
+                        log.warning("breaking #%s 已连续 %s 轮被推迟，仍未送达：%s",
+                                    article_id, tries, reasons.get(article_id, ""))
+                    else:
+                        log.info("breaking #%s 排入稍后重试（第 %s 次）：%s",
+                                 article_id, tries, reasons.get(article_id, ""))
+                for article_id in sorted(clear):
+                    row = session.get(Article, article_id)
+                    if row is None:
+                        continue
+                    info = breaking.clear_deferral(row)
+                    if not info:
+                        continue
+                    waited = f"（曾推迟 {info.get('tries')} 次，上次原因：{info.get('reason')}）"
+                    if article_id in delivered:
+                        log.info("breaking #%s 补发成功%s", article_id, waited)
+                    else:
+                        log.info("breaking #%s 不再重试%s", article_id, waited)
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not kill the round
+            log.warning("breaking retry bookkeeping skipped: %s", exc)
+
     async def send_breaking(self, article_ids: Iterable[int]) -> int:
         sent_total = 0
         # One round may find several independent events. The cooldown is measured
@@ -236,16 +300,28 @@ class NewsJobs:
         # otherwise put every later story of that same round on "cooldown 60 min
         # left" - which is how four qualifying rows in a week became one alert.
         sent_this_round: set[int] = set()
-        for article_id in article_ids:
+        fresh = [int(i) for i in article_ids]
+        ids = fresh + [i for i in self._retry_breakings() if i not in fresh]
+        reasons: dict[int, str] = {}
+        deferred: set[int] = set()
+        settled: set[int] = set()
+        delivered: set[int] = set()
+        for article_id in ids:
             for chat_id in self.chat_ids():
                 ok, reason = self.digest.can_send_breaking(
                     chat_id, article_id=article_id,
                     respect_cooldown=chat_id not in sent_this_round)
                 if not ok:
                     log.info("breaking #%s skipped for %s: %s", article_id, chat_id, reason)
+                    if deferral_worthwhile(reason):
+                        deferred.add(article_id)
+                        reasons[article_id] = reason
+                    else:
+                        settled.add(article_id)
                     continue
                 payload = await self.digest.generate_breaking(article_id, chat_id=chat_id)
                 if not payload.messages:
+                    settled.add(article_id)
                     continue
                 if self._sender is None:
                     log.warning("no Telegram sender configured; breaking news #%s not delivered", article_id)
@@ -254,7 +330,10 @@ class NewsJobs:
                 if sent:
                     self.digest.record_delivery(chat_id=chat_id, digest=payload)
                     sent_this_round.add(chat_id)
+                    delivered.add(article_id)
                     sent_total += sent
+        self._settle_breaking_deferrals(reasons=reasons, deferred=deferred,
+                                        settled=settled, delivered=delivered)
         return sent_total
 
     async def run_digests(self) -> int:

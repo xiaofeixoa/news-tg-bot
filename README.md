@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 556 个用例
+.venv/bin/python -m pytest            # 563 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -382,6 +382,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 URL 与标题去重（tracking 参数、同标题、改写标题、跨来源、版本号差异）；
 评分（权重可配置、可信度分级、热度归一、兴趣加权、突发门槛）；
 突发判定（规则模式的事件词/一手来源/时效三重门槛，AI 模式仍按分数，🔥⭐🔹 阶梯按模式给）；
+突发补发（冷却/日上限挡下的行留标记、下一轮重问门禁，终局理由立刻清标记，多读者共享行的优先级）；
 中文输出（免费路由与配额、退避、品牌名占位符守护与还原、要点翻译入库、显示层中文优先）；
 Pipeline（关键词门、分类、中文摘要、AI 故障兜底、事件合并、简报渲染、冷却与上限）；
 Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/sources`
@@ -2240,3 +2241,71 @@ NVIDIA Developer · 09-28 08:56 · 🔹66
 6 条新用例（分层、同分不同页、地板、1–2 行回落、`section_blocks` 与 `news_list` 各一条真渲染），
 全量 **556 通过**（550+6），Windows 与 anr-jump Linux 均 `exit=0`；两台 `stamp=20260928T135928Z`、
 `service=active`，`tree=e81c40bf9260d8c00d109bcd2fd96720` 三台一致。
+
+### v1.53 被冷却挡下的那条突发，永远不会有人再来问它
+22:12 日志里那一行看着像正常节流：
+
+```
+2026-09-28 22:12:32,733 INFO jobs.py:245 - breaking #1101 skipped for 1985298804: cooldown 29 min left
+```
+
+冷却 60 分钟、每 10 分钟一轮处理，听起来"下一轮再发就是了"。查库不是：**3 行过门禁、2 行送达、
+1 行永久消失**。`send_breaking` 只拿到本轮 `process_pending` 新处理出来的 id，而 #1101 那时已经
+`is_processed=True`——它再也不会进入任何一轮。它 14:00 UTC 发布，时效窗口开到次日 22:00，
+门禁这 24 小时里一直会认它，只是没人再去问。
+
+改法：被**时间类**门禁挡下时，在行上留一个 `meta.breaking_defer`；处理轮结束时读这张队列，
+把它和本轮新合格行一起交给 `send_breaking`。三条约束：
+- **只重试会自己重新打开的门禁**（`cooldown` / `daily cap`）。`already sent to this reader`、
+  `not breaking: published 30h ago`、"突发已关闭"每轮都长一样，留着标记只是白花一次查询。
+  理由串由 `digest._COOLDOWN`/`_DAILY_CAP` 两个常量同时生成和匹配，不靠字符串前缀碰运气。
+- **门禁继续重算**：补发时分数、时效、事件词都以**当下**为准，不是"当初过过就该发"。
+- **按读者的优先级**：标记写在共享行上、冷却却按读者算，所以规则是"只要还有一个读者在等，
+  就不清标记"。这条差点被我写反（下面第 1 点）。
+
+两个我自己的错，都留在这儿，因为它们各自藏了很久：
+1. 我第一版写的是 `keep = deferred - delivered`，**和它自己的文档注释矛盾**（注释说"任何读者还在等
+   就重订"）。那一写法下：A 这一轮收到、B 还在冷却 → 标记被 A 的成功清掉 → B 永远收不到——正是
+   v1.50 修过的"共享行上的一个标记"换了个位置。是反向验证 M3b 逼出来的：我先把 M4 的锚点改成
+   `clear = settled | delivered`，它报了 **NOT CAUGHT**，查下去发现代码里有**两道重复的保险**
+   （集合运算 + 循环里 `if article_id in keep: continue`），两道同时存在时任何一道单独改动都看不出来。
+   改成"两个互斥集合 + 两个循环"后，M3b 与 M4 各自被独立抓到，也为 M3b 补了一条真用例
+   `test_a_row_one_reader_got_stays_booked_for_the_reader_in_cooldown`。
+2. 读标记我先用了最顺手的 `Article.meta["key"].isnot(None)`。它在 sqlite 上编译成
+   `JSON_QUOTE(JSON_EXTRACT(...)) IS NOT NULL`，而 `json_quote(NULL)` 是文本 `'null'` 不是 NULL——
+   实测**每一行都命中**，包括 `meta={}` 和 `meta IS NULL` 的行。真按这个写，每轮都会把分数最高的
+   若干**未标记**行当"待补发"重新问一遍门禁，合格就发出去。改用 `func.json_extract` 并加了
+   `test_the_retry_queue_reads_only_marked_rows` 钉住它。
+
+顺手修了一处会说谎的文案：`/设置` 里"标题里有大事件 + 一手来源 + **24** 小时内"的 24 是写死的，
+把 `breaking.rule.max_age_hours` 调成 6 它照样说 24。现在从配置读（`MAX_AGE_DEFAULT` 单点定义，
+门禁、文案、重试窗口共用），并有用例锁住。
+
+同一轮还量了一件挂着没结案的事：分类名会不会漏英文。生产库 8 个分类**全部**渲染成中文
+（开源生态 261 / 其他 242 / 模型发布 233 / 论文与方法 113 / 智能体 89 / 算力与推理 84 /
+产品与应用 49 / 公司动态 33，`category_label(None)` = 其他）。所以"未知分类键回显英文内部名"
+这条**目前只是代码里的兜底路径，不是他手机上正在发生的事**——记为阴性结论，不动它。
+
+线上验证用的是生产库的**副本**、假读者 chat `900000003`、抓取型 sender（不发任何真实消息），
+复刻 21:41 那次真实送达后：
+
+```
+第一轮（22:12 那一次）: delivered=[] 标记={'tries': 1, 'reason': 'cooldown 60 min left'}
+（第 3 轮）           : breaking #1101 已连续 3 轮被推迟，仍未送达：cooldown 60 min left
+冷却结束            : delivered=[1101] 标记=None is_sent=True sent_at=14:41:46
+队列里剩下的标记数  : 0
+该读者突发账本      : [(1083, 13:40), (1101, 14:41)]
+```
+
+回放本身我搞砸过两次，也写下来：第一次 `record_push` 顺手把 `event_id` 填了，于是被
+`same event already sent to this reader` 挡下——**这条路径的表现其实是对的**（终局理由不留标记）；
+第二次推老账本时按 `PushLog.user_id == telegram_chat_id` 过滤，而那里存的是内部 id，一条没改到，
+`tries` 一路涨到 2。修好过滤才看到真正的补发。
+
+还没生效的一件事，留给他决定：#1101 是**在修复之前**被丢的，行上没有标记，所以它不会被自动补发。
+现在手动补也就是一则迟到 60 分钟的突发——要不要补、还是就这样过去，一句话的事。
+
+7 条新用例（556 → **563**）、7 处反向验证全部 CAUGHT（锚点唯一性逐条断言）；
+全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260928T143856Z`、`service=active`，
+`tree=52dbd4f660d074982fe41bb2092feea6` 三台一致；部署窗口之后 `scheduler.log` 新增 0 条 Traceback、
+0 条 ERROR，健康行 1106 篇 / 1 未处理 / 0 故障源 / 2056MB 空闲。

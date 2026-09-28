@@ -528,6 +528,27 @@ def breaking_already_sent(session: Session, *, user: User | None,
     return False
 
 
+def breaking_deferrals(session: Session, *, limit: int = 10) -> list[Article]:
+    """Rows that cleared the 突发 gate but were turned away by a guard that reopens.
+
+    The marker lives in `meta`, so this is a `json_extract` predicate rather than a
+    scan-and-filter: the obvious-looking `Article.meta["key"].isnot(None)` form
+    compiles to `JSON_QUOTE(JSON_EXTRACT(...)) IS NOT NULL`, and `json_quote(NULL)`
+    is the text `'null'`, so measured on sqlite it matches **every** row, marked or
+    not. Nothing is filtered by freshness here on purpose: an aged-out row is still
+    offered once, the gate rejects it, and the caller clears the marker - so a
+    deferral can never sit in the table uncleaned.
+    """
+    from app.processing.breaking import DEFERRAL_KEY
+
+    marker = func.json_extract(Article.meta, f'$."{DEFERRAL_KEY}"')
+    stmt = (select(Article)
+            .where(Article.is_archived.is_(False), marker.isnot(None))
+            .order_by(Article.final_score.desc(), Article.published_at.desc())
+            .limit(max(1, limit)))
+    return list(session.scalars(stmt))
+
+
 def ledger_user(session: Session, chat_id: int | None, *,
                 timezone: str = "Asia/Shanghai") -> User | None:
     """The row the push ledger is keyed on - never a global fall-through.

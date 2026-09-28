@@ -41,6 +41,9 @@ from typing import Any
 from app.config import AppConfig, as_float, get_config
 
 _PATTERN_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
+DEFERRAL_KEY = "breaking_defer"
+# Fallback for the freshness bar, and the window the retry queue reads itself by.
+MAX_AGE_DEFAULT = 24.0
 
 
 def _combined(patterns: Any) -> re.Pattern[str] | None:
@@ -134,7 +137,7 @@ def gate(article: Any, *, config: AppConfig | None = None, ai_enabled: bool | No
     if score < min_score and not rescued:
         return False, f"score {score:.0f} below {min_score:.0f}"
     published = getattr(article, "published_at", None)
-    max_age = as_float(config.get("breaking.rule.max_age_hours"), 24.0)
+    max_age = as_float(config.get("breaking.rule.max_age_hours"), MAX_AGE_DEFAULT)
     if isinstance(published, datetime) and max_age > 0:
         age_hours = ((at or datetime.utcnow()) - published).total_seconds() / 3600.0
         if age_hours > max_age:
@@ -180,4 +183,40 @@ def describe(config: AppConfig | None = None, *, ai_enabled: bool | None = None)
         return f"评分 ≥ {bar:.0f}"
     heat_bar = as_float(config.get("breaking.rule.min_community_heat"), 0.0)
     rescued = f"，或全站热度 ≥{heat_bar:.0f} 的大事件（社区来源也可破例）" if heat_bar > 0 else ""
-    return f"标题里有大事件 + 一手来源 + 24 小时内{rescued}"
+    hours = as_float(config.get("breaking.rule.max_age_hours"), MAX_AGE_DEFAULT)
+    return f"标题里有大事件 + 一手来源 + {hours:.0f} 小时内{rescued}"
+
+
+def note_deferral(row: Any, reason: str) -> int:
+    """Remember that a qualified 突发 was turned away by a gate that reopens.
+
+    `send_breaking` is only ever offered the ids the current round processed, and a
+    row rejected for cooldown is already `is_processed=True` - so without a marker
+    on the row the rejection is final. Measured 2026-09-28: 3 rows cleared the gate,
+    #1101 was rejected with `cooldown 29 min left` at 22:12 and never appeared again,
+    while its freshness window ran until 22:00 the next day.
+
+    Returns the attempt count so the caller can say how long it has been waiting.
+    """
+    meta = dict(row.meta or {})
+    info = dict(meta.get(DEFERRAL_KEY) or {})
+    tries = int(info.get("tries") or 0) + 1
+    info.update({"tries": tries, "reason": reason})
+    meta[DEFERRAL_KEY] = info
+    row.meta = meta
+    return tries
+
+
+def clear_deferral(row: Any) -> dict[str, Any]:
+    """Drop the marker once the story is delivered or the reason is final.
+
+    Returns what was recorded ({} when there was nothing to clear), so the caller
+    can log why a deferred story finally went away instead of a silent disappearance.
+    """
+    meta = dict(row.meta or {})
+    info = meta.get(DEFERRAL_KEY)
+    if info is None:
+        return {}
+    meta.pop(DEFERRAL_KEY)
+    row.meta = meta
+    return dict(info)
