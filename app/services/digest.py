@@ -246,14 +246,11 @@ class DigestService:
                                         user_threshold=user.breaking_threshold if cfg.ai_enabled else None)
                 if not ok:
                     return False, f"not breaking: {why}"
-                if article.is_breaking:
-                    return False, "already sent as breaking"
-                if article.event_id:
-                    same_event = session.scalars(
-                        select(Article).where(Article.event_id == article.event_id, Article.is_breaking.is_(True))
-                    ).first()
-                    if same_event is not None:
-                        return False, "same event already sent as breaking"
+                if repo.breaking_already_sent(session, user=user, article_id=article.id):
+                    return False, "already sent to this reader"
+                if article.event_id and repo.breaking_already_sent(
+                        session, user=user, event_id=article.event_id):
+                    return False, "same event already sent to this reader"
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             count = repo.pushes_since(session, user=user, kind="breaking", since=today_start)
             if count >= max_per_day:

@@ -1435,3 +1435,59 @@ async def test_requeueing_clears_the_finish_time(session):
     session.refresh(row)
     assert not row.is_processed and row.processed_at is None, \
         f"回到队列里还留着结案时刻：{row.processed_at}"
+
+
+@pytest.mark.asyncio
+async def test_a_second_subscriber_still_gets_the_breaking_alert(session):
+    """突发曾经一个人收过就全体闭嘴：`articles.is_breaking` 是 shared row 上的一个标记。"""
+    from app.services.digest import DigestService
+    from app.services.news import NewsService, get_news_service
+
+    cfg = get_config()
+    get_news_service().user_for(111111111)
+    get_news_service().user_for(222222222)
+    art_id = _breaking_row(session, "Anthropic announces a $1 billion compute deal",
+                           "https://anthropic.com/deal-x")
+    svc = DigestService(cfg, NewsService(cfg), llm=None)
+
+    ok, why = svc.can_send_breaking(111111111, article_id=art_id)
+    assert ok, why
+    payload = await svc.generate_breaking(art_id, chat_id=111111111)
+    svc.record_delivery(chat_id=111111111, digest=payload)
+
+    ok2, why2 = svc.can_send_breaking(222222222, article_id=art_id)
+    assert ok2, f"第二个订阅者被别人的收取记录挡住了：{why2}"
+    again, why_again = svc.can_send_breaking(111111111, article_id=art_id)
+    assert not again and "already sent to this reader" in why_again, why_again
+
+
+@pytest.mark.asyncio
+async def test_the_same_event_dedupe_is_per_reader_too(session):
+    """同一事件的第二家媒体：第一位读者已收过，第二位读者照收。"""
+    from app.processing import deduplicate
+    from app.services.digest import DigestService
+    from app.services.news import NewsService, get_news_service
+
+    cfg = get_config()
+    get_news_service().user_for(111111111)
+    get_news_service().user_for(222222222)
+    first = _breaking_row(session, "OpenAI announces an agent platform for enterprise",
+                          "https://openai.com/agenthub")
+    second = _breaking_row(session, "OpenAI announces an agent platform, The Verge reports",
+                           "https://theverge.com/agenthub")
+    with session_scope() as s:
+        a = s.get(Article, first)
+        b = s.get(Article, second)
+        ev = repo.get_or_create_event(s, deduplicate.make_event_key(a.title), a.title, a)
+        a.event_id = ev.id
+        b.event_id = ev.id
+        s.commit()
+
+    svc = DigestService(cfg, NewsService(cfg), llm=None)
+    payload = await svc.generate_breaking(first, chat_id=111111111)
+    svc.record_delivery(chat_id=111111111, digest=payload)
+
+    same_reader, why_same = svc.can_send_breaking(111111111, article_id=second)
+    assert not same_reader and "same event" in why_same, why_same
+    other_reader, why_other = svc.can_send_breaking(222222222, article_id=second)
+    assert other_reader, f"事件去重也不该跨读者：{why_other}"

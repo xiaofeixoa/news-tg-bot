@@ -501,6 +501,33 @@ def trending(session: Session, hours: int = 48, limit: int = 10) -> list[Article
 
 
 # ------------------------------------------------------------------- users
+def breaking_already_sent(session: Session, *, user: User | None,
+                          article_id: int | None = None,
+                          event_id: int | None = None) -> bool:
+    """Has THIS reader already been alerted about this article, or this event?
+
+    `articles.is_breaking` cannot answer that: it is one flag on a shared row, so
+    the first reader who receives an alert switches it off for everybody else - and
+    the same-event lookup built on it did the same across readers. The push ledger
+    is already keyed per user and carries `article_id`/`event_id` for breaking
+    sends, so the question gets asked where the answer actually lives.
+    """
+    if user is None:
+        return False
+    if article_id is not None:
+        stmt = select(PushLog.id).where(PushLog.kind == "breaking",
+                                        PushLog.user_id == user.id,
+                                        PushLog.article_id == article_id).limit(1)
+        if session.scalar(stmt) is not None:
+            return True
+    if event_id:
+        stmt = select(PushLog.id).where(PushLog.kind == "breaking",
+                                       PushLog.user_id == user.id,
+                                       PushLog.event_id == event_id).limit(1)
+        return session.scalar(stmt) is not None
+    return False
+
+
 def ledger_user(session: Session, chat_id: int | None, *,
                 timezone: str = "Asia/Shanghai") -> User | None:
     """The row the push ledger is keyed on - never a global fall-through.

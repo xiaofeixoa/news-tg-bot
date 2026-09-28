@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 544 个用例
+.venv/bin/python -m pytest            # 546 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 544 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 546 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2002,7 +2002,7 @@ max 78.0 · p90 61.8 · p75 57.6 · p60 54.4 · p50 52.7 · p40 51.1 · p30 50.8
 ### v1.46 同轮第二条突发被自己刚发的那条冷却掉了（8 条里只发出去 1 条）
 顺着上一段"突发 7 天 0 条"的记账量下去，先把自己写错的结论纠正掉：那条**"按每行自己被处理的时刻
 4 行合格"**用的是 `processed_at or updated_at or created_at`，而 `updated_at` 会被翻译/补写不断往前推
-（这一点我在 v1.?? 的注释里自己写过，这次却拿它当了时刻）。全库实测：`is_processed=True` 的 844 行里
+（`run_maintenance` 里关于积压的注释明明就写着 `updated_at` 会被后面的翻译/补写一路往前推，我自己写的这句话我这次却没照做）。全库实测：`is_processed=True` 的 844 行里
 **只有 130 行带 `processed_at`**，714 行为空（且空的那批最晚到 09-27 14:26 发的稿，不是历史遗留）。
 按**严格** `processed_at` 判定：130 行里 0 行合格；按 `created_at`（入库时刻）判定：7 天里 8 行合格
 （Anthropic 付 Akamai 116 亿、法院裁定、OpenAI 智能体黑进 Hugging Face 的细节、Nscale $3.36B……）。
@@ -2126,3 +2126,32 @@ from Aleph Alpha?`，中文"型号："在这个语境里是对的，见了就改
 3 条新用例 + 3 处反向验证全部 CAUGHT（每次替换先 `compile()` 过语法）。全量 544 通过（541+3），
 Windows 与 anr-jump Linux 均 `exit=0`，两台 `service=active`、`stamp=20260928T030222Z`，`tree=42328d8af6efac67aabb650643cae67e` 三台一致。今晚 20:00 的晚报会是
 第一批"打分、分线、突发同轮、中文渲染"四项修复同时生效的样本。
+
+### v1.50 突发新闻"一个人收过就全体闭嘴"：去重问错了对象
+`articles.is_breaking` 是**共享行上的一个标记**，而 `send_breaking` 是逐读者发的。第一位读者
+收到之后 `record_delivery` 把它置为 True，于是第二位读者走到同一个函数时拿到的是
+`already sent as breaking`——**同一条大新闻，第二个人永远收不到**。紧接着的"同一事件去重"
+更是拿这个全局标记去查别的文章，跨读者互相屏蔽。这和 v1.26 修过的"账本是全局的所以第二个
+订阅者永远收不到简报"是同一族缺陷，只是换了张表。
+
+问对了地方就行：`push_logs` 本来就按读者存，还带着 `article_id`/`event_id`。新增
+`repo.breaking_already_sent(user=…, article_id=…, event_id=…)`，两道去重都改读账本；
+`is_breaking` 继续写（作为"这条曾被当突发发过"的审计位，渲染层没人读它）。
+
+部署构建上的实测（VPS，`tempfile` 独立 DATA_DIR，两个假 chat，不写生产库、不发消息）：
+
+```
+读者 A 第一次问: (True, 'ok')
+标记位 is_breaking: True            ← 全局标记确实被置上了，正是它以前会挡住 B
+读者 A 再问同一篇: (False, 'already sent to this reader')
+读者 B 第一次问同一篇: (True, 'ok')  ← 修复前这里是 (False, 'already sent as breaking')
+```
+
+2 条新用例（第二读者收取、同事件按读者去重）；反向验证把两道检查还原成全局标记后
+**两条全红**，报的正是线上那句"第二个订阅者被别人的收取记录挡住了：already sent as breaking"。
+写用例时自己也踩了一次：第二条用例的标题先用了 "launches"，而事件词表里没有这个词，
+于是门禁在"没有事件词"就返回、根本走不到要去重的地方——换成 "announces" 才是真的在测那件事。
+
+线上今天只有一个白名单 chat，所以这是**尚未在他手机上产生差别**的修复；但它决定的是"以后加
+第二个订阅者时突发是不是只发一个人"。全量 546 通过（544+2），Windows 与 anr-jump Linux 均 `exit=0`；两台
+`service=active`、`stamp=20260928T083044Z`，`tree=26e636da4aa98bef0d8bfbcb451eb0db` 三台一致。
