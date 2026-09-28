@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 546 个用例
+.venv/bin/python -m pytest            # 550 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -409,7 +409,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 546 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 550 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2155,3 +2155,41 @@ Windows 与 anr-jump Linux 均 `exit=0`，两台 `service=active`、`stamp=20260
 线上今天只有一个白名单 chat，所以这是**尚未在他手机上产生差别**的修复；但它决定的是"以后加
 第二个订阅者时突发是不是只发一个人"。全量 546 通过（544+2），Windows 与 anr-jump Linux 均 `exit=0`；两台
 `service=active`、`stamp=20260928T083044Z`，`tree=26e636da4aa98bef0d8bfbcb451eb0db` 三台一致。
+
+### v1.51 翻不动的那几行，每 10 分钟把免费额度重新吃一遍
+08:04 那份早报里有 23/200 条摘要是英文、342 条要点里 225 条没中文——一开始像是"额度不够"，
+量下去是**队列自己把自己饿死**。`untranslated_articles` 的条件是
+`title_zh IS NULL OR summary_zh IS NULL`，而 `translate_pending` 里**没有任何"问过但没用"的出口**：
+一条 MT 永远翻不出来的行会永远留在队列里，每 10 分钟 × 2 轮地被重新发一遍。线上抓到的真实队列
+里就有这种行：`Estuve analizando el último inform…`（西班牙语标题）、
+`Naive-N0.5-Flash - 309B-A15.5B`（模型名当标题）。我直接问部署中的翻译器要这些串：
+`translate_many(["LuffyTheFox/Swift-Qwen3.8-27B-Genesis-GGUF"])` 回的是 `{}`——**不是回显，是空**；
+而按长度、按批量（1/3/6/10/20 条）分别测，成功率都是 100%，所以不是大小或长度问题，是这些行本身翻不动。
+它们占着的额度，正是让别的能翻的行留在英文的那部分。
+
+改法：一条**只在"真的问出去了、 provider 也确实答了别的东西"时**才累计的拒绝计数
+（`meta.zh_misses`，累计 `translate.give_up_after` = 3 次就把原文结案、退出队列，
+`translated_by="source"`；卡片本来就会把原文标成"以下为原文"，不改语义）。两个必须区分的场景：
+- **额度耗尽/线路退避不算拒绝**：`provider_calls` 只在拿到可用应答（非 429、非
+  `MYMEMORY WARNING`、非 HTTP≥400）时才 +1，所以"我们没问出去"永远不会被当成"这行被拒了"。
+  一次退避就结案会把整个队列永久冻成英文——那是最糟的一天做的事。
+- **已经结案的标题不再重问**：`titles`/`summaries` 只收还缺那个字段的行。成功翻过的行有
+  `Translator.cache` 挡着，但**模板结案**（GitHub 趋势/发布那一类）和原文结案的行不在缓存里，
+  没有这道过滤就每轮再花一次额度。
+
+两处我自己制造又自己拆掉的问题，都写在这儿：
+1. 我先写了 `reachable()`（额度 + 退避）作为第二个闸门，结果反向验证 M2 `NOT CAUGHT`——两个
+   闸门重叠，只有其中一个在起作用，等于一条没人验证过的保险。现在**只留一个**机制
+   （`provider_calls`），`reachable()` 删掉，两条退避用例（429 与本轮额度为 0）都能抓到它。
+2. 我为了"确认锚点唯一"跑过一次 `git checkout app/processing/pipeline.py`，那是**未提交**的
+   v1.51 改动，被整文件回滚了一次。已重做并用 `cp` 备份代替。规则记住：撤销只对自己刚做的、
+   已知的改动做，且永远先 `git status`。
+
+线上验证（两台 `stamp=20260928T091829Z`、`service=active`）：部署后一轮 10 分钟里
+**待翻译队列 10 行 → 4 行**，其中 748/841/863 三行已经带上 `zh_misses={'title': 2}`——
+下一轮就到 3 次、退出队列。之前同一台机器的 `translated 7/34` 那类分母（每轮 34 行重问）
+现在是 `7/11`。
+
+4 条新用例（拒绝结案、429 不算、额度 0 不算、模板结案不重问；546 → 550），
+3 处反向验证 CAUGHT（M3 那次锚点缩进写错、`rc=4` 直接暴露，修正后 CAUGHT）。
+全量 550 通过（546+4），Windows 与 anr-jump Linux 均 `exit=0`；`tree=ad7908fcb4e6bb8bb7ac3f7c0c273e6d` 三台一致。

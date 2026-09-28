@@ -349,6 +349,9 @@ class Translator:
         # Which route actually served the last batch: `mode()` reports the
         # configured preference, and provenance written to the DB must be true.
         self.last_route: str | None = None
+        # 真正向 provider 发出去过几次请求。用来区分"这一行被拒了"（该记一次拒绝）
+        # 和"我们根本没问出去"（额度没了、线路在退避、请求没发起来）——后者不该记账。
+        self.provider_calls = 0
 
     @property
     def llm(self) -> Any:
@@ -508,6 +511,11 @@ class Translator:
                         # no point asking again for the rest of the day.
                         self._mark_route_down("mymemory")
                         break
+                    # Only a usable answer counts: this is how the caller tells
+                    # "the provider looked at this line and refused it" apart from
+                    # "we never got an answer out of anybody" (429 above, quota
+                    # warning above, or a request that never went out at all).
+                    self.provider_calls += 1
                     if (status == 200 and translated and has_cjk(translated)
                             and translated.strip().lower() != segment.strip().lower()
                             and "QUERY LENGTH LIMIT" not in translated.upper()
@@ -544,6 +552,7 @@ class Translator:
         status = getattr(response, "status_code", 200)
         if status >= 400:
             raise RuntimeError(f"google returned HTTP {status}")
+        self.provider_calls += 1
         if not response.headers.get("content-type", "").startswith("application/json"):
             raise RuntimeError("google returned a non-JSON body (rate limited)")
         joined = flatten_google(response.json())

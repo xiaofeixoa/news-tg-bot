@@ -10,6 +10,7 @@ import pytest
 
 from app.config import get_config
 from app.database import repository as repo
+from app.database.database import session_scope
 from app.database.models import Article
 from app.services import format as fmt
 from app.services.news import ArticleView, get_news_service
@@ -1154,3 +1155,133 @@ def test_optics_is_appearance_here_not_a_physics_lab():
     assert "Hacker News" in got and "黑客新闻" not in got, got
     keep = fix_wrong_sense("这组光学实验用了新透镜", "The lab built a new lens setup")
     assert "光学" in keep, keep
+
+
+@pytest.mark.asyncio
+async def test_a_declined_line_stops_being_re_asked_after_three_rounds(session):
+    """翻不动的行不能每轮重问：它把免费额度吃光，连能翻的行也跟着变英文。"""
+    from app.database import repository as repo
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import Translator, get_translator, reset_translator
+
+    ids = seed(session, ("OpenAI releases GPT-5 for everyone", "https://openai.com/gpt5"),
+               ("Naive-N0.5-Flash - 309B-A15.5B", "https://reddit.com/r/naive"))
+    client = StubClient({"OpenAI releases GPT-5 for everyone": "OpenAI 面向所有人发布 GPT-5"})
+    reset_translator()
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    for _ in range(5):
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+    reset_translator()
+
+    with session_scope() as s:
+        stuck = s.get(Article, ids[1])
+        assert stuck.title_zh == stuck.title, f"三轮拒绝后该退出队列：{stuck.title_zh!r}"
+        assert stuck.translated_by == "source"
+        assert (stuck.meta or {}).get("zh_misses", {}).get("title", 0) == 3
+        queued = {a.id for a in repo.untranslated_articles(s, limit=50)}
+        assert ids[1] not in queued, "它还在队列里，下一轮又会花一次额度"
+    asked = [c for c in client.calls if c.strip() == "Naive-N0.5-Flash - 309B-A15.5B"]
+    assert len(asked) == 3, f"问了几次：{len(asked)}，上限应是 3"
+    # 已经翻好的标题不该在后面的轮里再问一遍（那是白花的额度）。
+    # 摘要另说：这个桩从不回答摘要，它每轮都该被问。
+    repeated = [c for c in client.calls
+                if "for everyone" in c and "summary sentence" not in c]
+    assert len(repeated) == 1, f"标题被反复重问 {len(repeated)} 次"
+
+
+@pytest.mark.asyncio
+async def test_a_quota_outage_is_not_counted_as_a_refusal(session):
+    """429（线路被标退避）不等于"这行翻不动"：一次额度耗尽就把英文永久冻住是错的。"""
+    from app.database.database import session_scope as _scope
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import Translator, reset_translator
+
+    ids = seed(session, ("Anthropic ships Claude Opus 4.6", "https://anthropic.com/opus46"))
+    client = StubClient({})
+    client.get = client.quota_exceeded          # 和线上那条 "out of free quota" 同一形状
+    reset_translator()
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    for _ in range(4):
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+    reset_translator()
+
+    with _scope() as s:
+        row = s.get(Article, ids[0])
+        print('DBG settled:', repr(row.title_zh), 'by', row.translated_by,
+              'misses', (row.meta or {}).get('zh_misses'), 'down', translator._down_until)
+        assert not row.title_zh, f"额度耗尽不该结案：{row.title_zh!r}"
+        assert not ((row.meta or {}).get("zh_misses")), "退避/挂线不该记成拒绝"
+
+
+@pytest.mark.asyncio
+async def test_a_title_finished_by_template_is_never_sent_again(session):
+    """模板/原文结案过的标题不在 MT 缓存里，不挡住就会每轮重新花钱。
+
+    成功的行有 `Translator.cache` 兜着（第二问不发请求），所以"只问还缺的字段"
+    这件事必须用**没有缓存**的那类行来测：标题是模板拼出来的、还欠一条摘要。
+    """
+    from datetime import timedelta
+
+    from app.database import repository as repo
+    from app.processing.normalize import build_article
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import Translator, reset_translator
+
+    data = build_article(title="someorg/somerepo (12,345 stars) — a new open model",
+                         url="https://github.com/somerepo", source_name="GitHub Trending",
+                         content="Release notes for the model.",
+                         published_at=datetime.utcnow() - timedelta(hours=1))
+    row = repo.save_article(session, data)
+    row.is_processed = True
+    row.final_score = 70
+    row.title_zh = "someorg/somerepo 收获 12,345 星"      # 模板结案的标题
+    row.summary = "This repository ships a new open model for agents."  # 还欠摘要
+    session.commit()
+    row_id = row.id
+
+    client = StubClient({})                     # 什么都不答：摘要会一次一次被问
+    reset_translator()
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    for _ in range(2):
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+    reset_translator()
+
+    sent_titles = [c for c in client.calls if "somerepo (12,345" in c and "repository" not in c]
+    assert not sent_titles, f"已结案的标题又被发出去 {len(sent_titles)} 次：{sent_titles[:2]}"
+    with session_scope() as s:
+        assert s.get(Article, row_id).title_zh == "someorg/somerepo 收获 12,345 星"
+
+
+@pytest.mark.asyncio
+async def test_a_spent_run_budget_is_not_counted_as_a_refusal(session):
+    """请求根本没发出去（本轮额度用完了）就不是"这行被拒了"——一次计数都不能记。"""
+    from app.processing.pipeline import translate_pending
+    from app.services.translate import Budget, Translator, reset_translator
+
+    ids = seed(session, ("Which local models sound the least Claude-like today",
+                         "https://reddit.com/r/naive-nobody-answers"))
+    client = StubClient({})
+    reset_translator()
+    translator = Translator(get_config())
+    translator.provider = "mymemory"
+    translator._http = lambda: _coro(client)
+    translator.budget = Budget(per_run=0, per_day=0)      # 一次也发不出去
+    for _ in range(4):
+        await translate_pending(session, config=get_config(), translator=translator)
+        session.commit()
+    reset_translator()
+
+    assert not client.calls, "额度为 0  yet 仍然发出了请求，那这条用例的前提就失效了"
+    with session_scope() as s:
+        row = s.get(Article, ids[0])
+        assert not row.title_zh, f"没发出去的请求不该结案：{row.title_zh!r}"
+        assert not ((row.meta or {}).get("zh_misses")), "没问出去却被记成拒绝"

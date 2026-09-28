@@ -624,6 +624,32 @@ def repair_lost_units(session: Session, *, limit: int = 1500) -> int:
         log.info("dropped %d Chinese field(s) that lost a guarded unit; requeued", dropped)
     return dropped
 
+def _note_zh_miss(row: Article, field: str, give_up_after: int) -> int:
+    """Count a refusal for one line; after `give_up_after` of them, stop asking.
+
+    The lines that never come back are a real population, not a hypothesis: the
+    live queue held a Spanish headline (`Estuve analizando el último inform…`) and
+    model-name titles like `Naive-N0.5-Flash - 309B-A15.5B`, and every 10-minute
+    round re-sent them. That spend is what pushes the free route into a 60-minute
+    backoff and leaves the rows which *can* be translated in English - the queue
+    starves itself. Settling keeps the original text (the card already shows
+    source text under an honest heading) but takes the row out of the queue.
+    """
+    meta = dict(row.meta or {})
+    misses = dict(meta.get("zh_misses") or {})
+    count = int(misses.get(field) or 0) + 1
+    misses[field] = count
+    meta["zh_misses"] = misses
+    if count >= give_up_after:
+        if field == "title":
+            row.title_zh = row.title
+            row.translated_by = "source"
+        else:
+            row.summary_zh = row.summary
+    row.meta = meta
+    return count
+
+
 async def translate_pending(
     session: Session,
     *,
@@ -652,10 +678,28 @@ async def translate_pending(
         # never runs at all, which is how the config's promise stayed a promise.
         return len(await _translate_key_points(session, translator, config))
 
-    titles = [row.title for row in rows if needs_translation(row.title)]
-    summaries = [row.summary for row in rows if needs_translation(row.summary)]
+    # Ask only for what is still missing. A row can be in the queue because of its
+    # summary while its headline was settled long ago by a template or by the
+    # source text - and those never enter the translator's cache, so without this
+    # filter every round pays again for a line that is already done. The live
+    # queue held 29 rows and most were "title done, summary missing".
+    titles = [row.title for row in rows if not row.title_zh and needs_translation(row.title)]
+    summaries = [row.summary for row in rows
+                 if not row.summary_zh and row.summary and needs_translation(row.summary)]
+    calls_before_titles = getattr(translator, "provider_calls", 0)
     translated_titles = await translator.translate_many(titles, hint="title")
+    titles_asked = getattr(translator, "provider_calls", 0) > calls_before_titles
+    calls_before_summaries = getattr(translator, "provider_calls", 0)
     translated_summaries = await translator.translate_many(summaries, hint="summary")
+    summaries_asked = getattr(translator, "provider_calls", 0) > calls_before_summaries
+    # A refusal means a provider actually answered *some* of what we sent; the
+    # line we got nothing for was looked at and declined. If no usable answer came
+    # back at all (run budget spent, 429, the route's own quota warning), that is
+    # an outage, not a refusal - counting it would freeze the queue in English on
+    # exactly the days it matters most.
+    gave_up_after = max(1, as_int(config.get("translate.give_up_after", 3), 3))
+    declined_titles = titles_asked and len(titles) > len(translated_titles)
+    declined_summaries = summaries_asked and len(summaries) > len(translated_summaries)
 
     mode = getattr(translator, "last_route", None) or translator.mode()
     done = 0
@@ -675,6 +719,8 @@ async def translate_pending(
                 elif not needs_translation(row.title):
                     row.title_zh = row.title      # already Chinese: leave the queue
                     row.translated_by = "native"
+                elif declined_titles:
+                    _note_zh_miss(row, "title", gave_up_after)
         # Handled independently of the title. The old `continue` in the templated
         # branch meant every GitHub release row kept an English summary forever,
         # and a queue keyed only on `title_zh` never looked at them again.
@@ -684,6 +730,8 @@ async def translate_pending(
                 row.summary_zh = zh_summary
             elif not needs_translation(row.summary):
                 row.summary_zh = row.summary
+            elif declined_summaries:
+                _note_zh_miss(row, "summary", gave_up_after)
         if (row.title_zh, row.summary_zh) != before:
             done += 1
     session.flush()
