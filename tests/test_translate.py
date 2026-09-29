@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -281,6 +284,13 @@ def translator_with(client: StubClient) -> Translator:
     async def _http():
         return client
     service._http = _http
+    # `Translator.__init__` now reads the persisted daily counter, and every test in
+    # this module shares one DATA_DIR - so without isolating it, whichever test spent
+    # two requests first decides whether the next one is "out of budget". That is
+    # exactly how this suite broke when the counter became persistent.
+    service.budget.path = Path(tempfile.mkdtemp(prefix="anr-budget-")) / "translate_budget.json"
+    service.budget.used_run = service.budget.used_day = 0
+    service.budget.day_of = ""
     return service
 
 
@@ -1557,3 +1567,117 @@ async def test_a_spent_budget_keeps_the_google_request_from_leaving():
     assert await service.translate_many(["OpenAI ships GPT-7"], hint="title") == {}
     assert not any(GOOGLE_URL in url for url in client.calls), \
         f"每天额度已经用完还是发了请求：{client.calls}"
+
+
+# ------------------- 每天额度要跨进程：重启不是新的一天
+def test_the_daily_budget_survives_a_restart(tmp_path):
+    """上一个进程问掉的那几百次请求，重启之后还得算数。
+
+    线上 2026-09-29 数过：这台机器在同一个 UTC 日里启动了 3 次（00:30、00:39、06:39），
+    而 `used_day` 只在内存里——每次重启都白送 400 次匿名额度，v1.55 刚把上限做成真的，
+    又被重启乘了一遍。`github_rate.json` 早就是同样的问题、同样的解法。
+    """
+    from app.services.translate import Budget
+
+    path = tmp_path / "translate_budget.json"
+    first = Budget(per_run=60, per_day=400, path=path)
+    assert first.available()
+    first.spend(120)
+    assert first.save() is True
+
+    second = Budget(per_run=60, per_day=400, path=path)
+    assert second.load() == 120, "重启后没把今天的用量读回来"
+    assert second.available() and second.used_day == 120
+
+
+def test_a_restart_does_not_hand_back_a_spent_daily_cap(tmp_path):
+    from app.services.translate import Budget
+
+    path = tmp_path / "translate_budget.json"
+    first = Budget(per_run=60, per_day=5, path=path)
+    first.available()
+    first.spend(5)
+    first.save()
+
+    second = Budget(per_run=60, per_day=5, path=path)
+    second.load()
+    assert not second.available(), "重启把用完的每天额度又充满了，等于没有上限"
+
+
+def test_yesterdays_counter_does_not_leak_into_today(tmp_path):
+    from datetime import datetime, timezone
+
+    from app.services.translate import Budget
+
+    path = tmp_path / "translate_budget.json"
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    path.write_text(json.dumps({"day": yesterday, "used_day": 400}), encoding="utf-8")
+
+    budget = Budget(per_run=60, per_day=400, path=path)
+    assert budget.load() == 0, "昨天用完的额度不该压住今天"
+    assert budget.available()
+
+
+def test_a_budget_file_that_cannot_be_written_never_breaks_translation(tmp_path):
+    """目录、只读、坏 JSON 都不能让一轮翻译炸掉——额度记录是附属信息。"""
+    from app.services.translate import Budget
+
+    directory = tmp_path / "not-a-file"
+    directory.mkdir()
+    budget = Budget(per_run=60, per_day=400, path=directory)
+    budget.available()
+    budget.spend(3)
+    assert budget.save() is False, "写不进去要安静返回，不是抛异常"
+    assert budget.used_day == 3
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    fresh = Budget(per_run=60, per_day=400, path=broken)
+    assert fresh.load() == 0, "状态文件坏了就当作没记过，继续翻译"
+    assert fresh.available()
+
+
+@pytest.mark.asyncio
+async def test_the_translator_reads_the_persisted_counter_at_startup(tmp_path):
+    """接线也要测：Translator 建立时真的去读那个文件。"""
+    from datetime import datetime, timezone
+
+    from app.services.translate import Budget
+
+    cfg = get_config()
+    path = cfg.settings.data_path / "translate_budget.json"
+    seed = Budget(per_run=60, per_day=400, path=path)
+    seed.day_of = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    seed.used_day = 400
+    assert seed.save()
+    try:
+        service = Translator(cfg)
+        assert service.budget.used_day == 400, "新进程没把今天的用量读回来"
+        assert not service.budget.available()
+        client = ChainClient(google_body={"OpenAI ships GPT-9": "OpenAI 发布 GPT-9"})
+        service.provider = "google"
+        service._http = lambda: _coro(client)
+        assert await service.translate_many(["OpenAI ships GPT-9"], hint="title") == {}
+        assert not client.calls, "读回来的额度没能挡住请求"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_what_a_round_spent_is_written_back():
+    """花掉的额度要落到文件里，否则下一个进程读到的永远是 0。"""
+    cfg = get_config()
+    path = cfg.settings.data_path / "translate_budget.json"
+    path.unlink(missing_ok=True)
+    try:
+        service = Translator(cfg)
+        client = ChainClient(google_body={"OpenAI ships GPT-8": "OpenAI 发布 GPT-8"})
+        service.provider = "google"
+        service._http = lambda: _coro(client)
+        got = await service.translate_many(["OpenAI ships GPT-8"], hint="title")
+        assert got, "这一轮什么都没翻出来，测不到记账"
+        assert path.exists(), "请求发了，但额度文件根本没写出来"
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert int(stored["used_day"]) >= 1, f"额度文件里还是空的：{stored}"
+    finally:
+        path.unlink(missing_ok=True)

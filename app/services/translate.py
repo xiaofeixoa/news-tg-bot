@@ -19,10 +19,13 @@ in its original language and the pipeline carries on.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import httpx
@@ -308,7 +311,8 @@ class Budget:
     The unit is **requests**, because that is what a quota is counted in: MyMemory is
     asked one string per request while Google takes a whole batch in one. `per_run` is
     reset at the start of every translation round by the scheduler; `per_day` rolls
-    over on the UTC date. A route that never spends from it has no limit at all -
+    over on the UTC date and is carried across restarts through `path`, because a
+    restart is not a new day. A route that never spends from it has no limit at all -
     which is exactly how the Google route behaved until v1.55.
     """
 
@@ -317,6 +321,7 @@ class Budget:
     used_run: int = 0
     used_day: int = 0
     day_of: str = ""
+    path: Any = None
 
     def available(self) -> bool:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -331,6 +336,45 @@ class Budget:
     def reset_run(self) -> None:
         self.used_run = 0
 
+    def load(self) -> int:
+        """Take over the counter the previous process was holding.
+
+        A restart is not a new day. Measured 2026-09-29: the collector box restarted
+        three times inside one UTC day (00:30, 00:39, 06:39), and every one of those
+        restarts handed the anonymous endpoints a fresh `daily_budget` - so the cap
+        we only just made real (v1.55) was still being multiplied by however many
+        times the service was pushed that day. `github_rate.json` had the same hole
+        and is persisted for the same reason.
+        """
+        if self.path is None:
+            return 0
+        try:
+            data = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if not isinstance(data, dict) or str(data.get("day")) != today:
+            return 0
+        try:
+            used = int(data.get("used_day") or 0)
+        except (TypeError, ValueError):
+            return 0
+        self.day_of, self.used_day = today, max(0, used)
+        return self.used_day
+
+    def save(self) -> bool:
+        """Persist the counter; never let a write failure stop a translation."""
+        if self.path is None or not self.day_of:
+            return False
+        tmp = Path(str(self.path) + ".tmp")
+        try:
+            tmp.write_text(json.dumps({"day": self.day_of, "used_day": self.used_day}),
+                           encoding="utf-8")
+            os.replace(tmp, self.path)      # atomic, so a concurrent round cannot
+        except OSError:                     # leave a half-written file behind
+            return False
+        return True
+
 
 class Translator:
     def __init__(self, config: AppConfig | None = None, *, llm: Any = None) -> None:
@@ -341,7 +385,9 @@ class Translator:
         self.budget = Budget(
             per_run=int(self.config.get("translate.per_run_limit", 120)),
             per_day=int(self.config.get("translate.daily_budget", 400)),
+            path=self.config.settings.data_path / "translate_budget.json",
         )
+        self.budget.load()
         self.cache: dict[str, str] = {}
         self._down_until: dict[str, float] = {}
         # Names the free engines must not turn into Chinese words.
@@ -412,11 +458,13 @@ class Translator:
                 got = await self._via_llm(todo, hint=hint)
                 out.update(got)
                 self.budget.spend(1)  # one model call for the whole batch
+                self.budget.save()
                 self.last_route = "llm"
                 return out
             except Exception as exc:  # noqa: BLE001 - fall through to the free tier
                 log.info("llm translation unavailable (%s), using %s", exc, mode)
         out.update(await self._via_free_routes(todo))
+        self.budget.save()
         return out
 
     async def _via_free_routes(self, todo: list[str]) -> dict[str, str]:
