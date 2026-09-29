@@ -286,3 +286,132 @@ async def test_cooldown_zero_really_disables_the_cooldown(config, session, tmp_p
         s.commit()
     ok, reason = service._may_send(111)
     assert ok, reason
+
+
+# ------------------------------------------------- the gateway ledger, written last
+class StubWatcher:
+    """Stands in for the OpenRouter watcher so the tests can see *when* it is written."""
+
+    source_name = "OpenRouter"
+
+    def __init__(self, *models: FreeModel) -> None:
+        self.models = list(models)
+        self.announced: set[str] = set()
+        self.marked: list[str] = []
+
+    async def snapshot(self, *, force: bool = False) -> list[FreeModel]:
+        return list(self.models)
+
+    def unannounced(self, models):
+        return [model for model in models if model.id not in self.announced]
+
+    def mark_announced(self, ids) -> None:
+        ids = list(ids)
+        self.marked.extend(ids)
+        self.announced.update(ids)
+
+
+def use_watcher(monkeypatch, watcher: StubWatcher) -> None:
+    # free_alerts imports the factory inside the method, so patching the module
+    # attribute is what the running code actually sees.
+    monkeypatch.setattr("app.services.free_models.get_free_model_watcher",
+                        lambda config=None: watcher)
+
+
+def model_config(config, tmp_path, **overrides):
+    return alert_config(config, tmp_path, new_models=True, **overrides)
+
+
+async def test_a_new_free_model_is_pushed_even_when_no_news_found_it(config, session, tmp_path,
+                                                                    monkeypatch):
+    """A free tier can appear with no press; the push used to need an article row anyway.
+
+    `if not ids: continue` sat before the gateway was ever asked, so the ⚡ block could
+    only ride along inside a message the news had already justified - the exact case
+    `free_models.py` says it exists to cover was unreachable.
+    """
+    watcher = StubWatcher(_model("a/new:free"))
+    use_watcher(monkeypatch, watcher)
+    sender = FakeSender()
+    service = FreeAlertService(model_config(config, tmp_path), sender=sender)
+
+    assert await service.run([111]) == 1
+    text = sender.sent[0][1]
+    assert "a/new:free" in text and "网关新出现的免费模型" in text
+    assert "OpenRouter 现在免费可用的模型" in text
+    # honest wording: nothing here claims the news came up empty for this reader
+    assert "没有采到" not in text
+    assert watcher.marked == ["a/new:free"]
+    assert await service.run([111]) == 0, "记账之后不该再推同一个模型"
+
+
+async def test_a_failed_send_does_not_burn_the_new_free_model(config, session, tmp_path,
+                                                             monkeypatch):
+    """Mark-before-send was the whole loss: one Telegram failure, and no reader ever
+    hears about that model again (`unannounced()` reads the ledger we just wrote)."""
+    watcher = StubWatcher(_model("a/new:free"))
+    use_watcher(monkeypatch, watcher)
+    blocked = FreeAlertService(model_config(config, tmp_path), sender=FakeSender(ok=False))
+    assert await blocked.run([111]) == 0
+    assert watcher.marked == [], "消息没发出去就记账，等于这条通告永久消失"
+
+    sender = FakeSender()
+    retry = FreeAlertService(model_config(config, tmp_path), sender=sender)
+    assert await retry.run([111]) == 1
+    assert "a/new:free" in sender.sent[0][1]
+    assert watcher.marked == ["a/new:free"]
+
+
+async def test_two_readers_see_the_same_model_and_the_ledger_is_written_once(
+        config, session, tmp_path, monkeypatch):
+    watcher = StubWatcher(_model("a/new:free"))
+    use_watcher(monkeypatch, watcher)
+    sender = FakeSender()
+    service = FreeAlertService(model_config(config, tmp_path), sender=sender)
+    assert await service.run([111, 222]) == 2
+    assert [chat for chat, _ in sender.sent] == [111, 222]
+    assert watcher.marked == ["a/new:free"], "同轮两个读者：账只记一次"
+
+
+async def test_a_models_only_push_still_counts_against_the_cooldown(config, session, tmp_path,
+                                                                    monkeypatch):
+    """Without a ledger row the promo feed paces only its news half."""
+    watcher = StubWatcher(_model("a/new:free"))
+    use_watcher(monkeypatch, watcher)
+    service = FreeAlertService(model_config(config, tmp_path), sender=FakeSender())
+    assert await service.run([111]) == 1
+    ok, reason = service._may_send(111)
+    assert not ok and "cooldown" in reason, "刚推完模型就该进入冷却"
+
+
+async def test_nothing_to_say_is_not_logged_as_a_withheld_alert(config, session, tmp_path,
+                                                                monkeypatch):
+    """204 log lines on the live box claimed an alert was withheld; almost all of them
+    were rounds with nothing pending - the pacing check ran before the content check."""
+    lines: list[str] = []
+
+    class Recorder:
+        def info(self, msg, *args):
+            lines.append(msg % args)
+
+        def warning(self, msg, *args):
+            lines.append(msg % args)
+
+        def debug(self, msg, *args):
+            lines.append(msg % args)
+
+    monkeypatch.setattr("app.services.free_alerts.log", Recorder())
+    with session_scope() as s:
+        user = repo.get_or_create_user(s, 111)
+        repo.update_user(s, user, paused=True)
+        s.commit()
+    quiet = FreeAlertService(alert_config(config, tmp_path), sender=FakeSender())
+    assert await quiet.run([111]) == 0
+    assert lines == [], f"没有东西可说的一轮不该留下任何'被拦下'的记录：{lines}"
+
+    lines.clear()
+    seed_offer(session, url="https://linux.do/t/11")
+    assert await quiet.run([111]) == 0
+    withheld = [line for line in lines if "withheld" in line]
+    assert len(withheld) == 1, lines
+    assert "1 offer(s)" in withheld[0] and "paused" in withheld[0], withheld[0]

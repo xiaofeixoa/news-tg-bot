@@ -2,8 +2,9 @@
 
 /免费 answers when asked; this pushes. It reuses the breaking-news discipline
 (per-user pause, cooldown, daily cap, PushLog) because an unpaced promo feed is
-just spam, and it only ever announces a row once - the marker lives on the
-article, not in a timestamp we would have to guess at.
+just spam, and nothing is written off before the message is delivered: the
+article marker and the gateway-model ledger are both set after Telegram accepts
+the message, so a refused or undeliverable push stays re-triable.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from app.services.news import NewsService
 log = get_logger("app")
 
 KIND = "free_offer"
+HEADING = "🆓 刚发现的限免"
+HEADING_MODELS_ONLY = "🆓 <b>网关新出现的免费模型</b>"
 
 
 class FreeAlertService:
@@ -46,43 +49,95 @@ class FreeAlertService:
         min_confidence = as_float(self.cfg.get("min_confidence"), 0.6)
         within_days = as_int(self.cfg.get("within_days"), 7)
 
+        # Asked once per round, before any reader is served: the gateway ledger is one
+        # per install, so every chat alerted in this round sees the same ⚡ block and it
+        # is written off once, after a delivery, rather than once per chat.
+        models, live_block = await self._pending_free_models()
         delivered = 0
         for chat_id in chat_ids:
             # A chat we are about to push to is a subscriber by definition, and the
             # per-user ledger below only works if the row exists.
             user_id = self._ensure_user(chat_id)
-            ok, reason = self._may_send(chat_id)
-            if not ok:
-                log.info("free-offer alert skipped for %s: %s", chat_id, reason)
-                continue
             with session_scope() as session:
                 rows = repo.unannounced_free_offers(
                     session, limit=limit, min_confidence=min_confidence,
                     within_days=within_days, user_id=user_id,
                     require_title_subject=bool(self.cfg.get("require_title_subject", True)))
                 ids = [row.id for row in rows]
-            if not ids:
+            if not ids and not live_block:
+                # Nothing this reader has not already heard - not a withheld alert,
+                # just nothing to say. Logging a skip here used to bury the real ones.
                 continue
-            views = [view for view in (self.news.by_id(article_id) for article_id in ids)
-                     if view is not None]
-            # The live-model block is a global ledger (one state file, not one per
-            # subscriber), so it is offered to whoever happens to be alerted.
-            new_models = await self._new_free_models()
-            text = fmt.free_offer_list(
-                views, config=self.config, days=within_days,
-                live=new_models, heading="🆓 刚发现的限免",
-                note="自动监控到新出现的免费额度，详情用 /免费 随时回看。")
+            ok, reason = self._may_send(chat_id)
+            if not ok:
+                log.info("free-offer alert withheld for %s (%d offer(s) + %d new model(s)): %s",
+                         chat_id, len(ids), len(models), reason)
+                continue
+            if not ids:
+                # Only the gateway changed. Saying "没有采到限免公告" would be a lie
+                # about the news when this reader was already sent news offers today.
+                text = fmt.clip(f"{HEADING_MODELS_ONLY}\n\n{live_block}")
+            else:
+                views = [view for view in (self.news.by_id(article_id) for article_id in ids)
+                         if view is not None]
+                text = fmt.free_offer_list(
+                    views, config=self.config, days=within_days,
+                    live=live_block, heading=HEADING,
+                    note="自动监控到新出现的免费额度，详情用 /免费 随时回看。")
             if not await self._sender.send(chat_id, text):
                 continue
             delivered += 1
             with session_scope() as session:
-                for article_id in ids:
-                    repo.record_push(session, user_id=user_id, kind=KIND,
-                                     article_id=article_id)
+                if ids:
+                    for article_id in ids:
+                        repo.record_push(session, user_id=user_id, kind=KIND,
+                                         article_id=article_id)
+                else:
+                    # A models-only push still has to be counted, or the cooldown and
+                    # the daily cap pace only the news half of this feed.
+                    repo.record_push(session, user_id=user_id, kind=KIND)
                 repo.mark_free_offers_sent(session, ids)
                 session.commit()
-            log.info("free-offer alert -> %s: %d offer(s)", chat_id, len(ids))
+            log.info("free-offer alert -> %s: %d offer(s), %d new model(s)",
+                     chat_id, len(ids), len(models))
+        if delivered and models:
+            self._mark_models_announced(models)
         return delivered
+
+    async def _pending_free_models(self) -> tuple[list[Any], str]:
+        """(free models never announced here, formatted block) - writes nothing.
+
+        The marking used to happen while building the message, so a Telegram failure
+        (chat blocked the bot, network gave up, API error) burned the model id for
+        good: `unannounced()` reads the same ledger, and the article half of this
+        path had already learned to wait for a successful send.
+        """
+        if not bool(self.cfg.get("new_models", True)):
+            return [], ""
+        from app.services.free_models import get_free_model_watcher
+
+        watcher = get_free_model_watcher(self.config)
+        # `snapshot()` swallows its own failures and answers [] - an unreachable
+        # gateway costs the ⚡ block, not the round.
+        models = await watcher.snapshot()
+        fresh = watcher.unannounced(models)
+        if not fresh:
+            return [], ""
+        return fresh, fmt.free_models_section(fresh, config=self.config,
+                                              limit=as_int(self.cfg.get("max_models"), 5),
+                                              source=watcher.source_name)
+
+    def _mark_models_announced(self, models: Sequence[Any]) -> None:
+        """Write off the ⚡ block after delivery.
+
+        One ledger for the install, so a chat we failed to reach is not retried for
+        *models* the way the per-user offer ledger retries an article - today there is
+        one subscriber, and the honest statement of the limit beats a state file per
+        chat.
+        """
+        from app.services.free_models import get_free_model_watcher
+
+        get_free_model_watcher(self.config).mark_announced([model.id for model in models])
 
     def _ensure_user(self, chat_id: int) -> int | None:
         if not chat_id:
@@ -91,26 +146,6 @@ class FreeAlertService:
             user = repo.get_or_create_user(session, chat_id)
             session.commit()
             return user.id
-
-    async def _new_free_models(self) -> str:
-        """Live gateway models we have never announced, as a formatted block."""
-        if not bool(self.cfg.get("new_models", True)):
-            return ""
-        from app.services.free_models import get_free_model_watcher
-
-        watcher = get_free_model_watcher(self.config)
-        try:
-            models = await watcher.snapshot()
-        except Exception as exc:  # noqa: BLE001
-            log.info("free-model watch unavailable: %s", exc)
-            return ""
-        fresh = watcher.unannounced(models)
-        if not fresh:
-            return ""
-        watcher.mark_announced([model.id for model in fresh])
-        return fmt.free_models_section(fresh, config=self.config,
-                                       limit=as_int(self.cfg.get("max_models"), 5),
-                                       source=watcher.source_name)
 
     def _may_send(self, chat_id: int) -> tuple[bool, str]:
         cooldown = as_int(self.cfg.get("cooldown_minutes"), 90)

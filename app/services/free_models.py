@@ -169,8 +169,6 @@ class FreeModelWatcher:
         return out[:limit]
 
     # ------------------------------------------------------------- bookkeeping
-    def _record_seen(self, ids: Iterable[str]) -> dict[str, datetime]:
-        """Remember when we first saw each free model, so "已免费 N 天" is real."""
     def _read_state(self) -> dict[str, Any]:
         try:
             if self.state_path.is_file():

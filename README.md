@@ -226,7 +226,9 @@ Telegram 的官方命令名只允许 `a-z0-9_`，所以菜单里放的是 `/free
 日志里留一条 `live free-model check failed`。
 
 **不用问也会告诉你**：`free.alert` 打开时，每轮 AI 处理结束后会把「刚入库、置信度达标、以前没推过」的限免主动推一次（默认一条消息最多 3 条，90 分钟冷却、每人每天最多 4 条，`/pause` 的用户不发）。
-定价接口里**新出现**的 0 价模型也走同一条通知，首次快照只登记不播报，免得刚部署就刷 16 条。是否推过记在 `articles.free_offer_sent_at`，所以重启不会把老限免再推一遍。
+定价接口里**新出现**的 0 价模型也走同一条通知，首次快照只登记不播报，免得刚部署就刷 16 条。
+限免新闻记在 `articles.free_offer_sent_at`（每个读者各记各的），新出现的模型记在 `data/free_models.json` 的 `announced` 账本（整个部署一份）——**两本账都只在 Telegram 收下消息之后才写**，所以一次发送失败不会把这条通告永久吃掉；纯模型推送同样进冷却与每日上限。
+只有模型变免费、新闻里一条限免都没采到时，也会单独发一条「🆓 网关新出现的免费模型」，不会因为它而闭嘴。
 
 ---
 
@@ -2704,3 +2706,53 @@ Q5（拉丁分隔符）各自被抓到。另记：Q3（把渲染条件从"有别
 2 处反向验证 CAUGHT（`{members - 1}` 回去、`outlets` 不去重）。
 全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260929T154220Z`、`service=active`，
 `tree=48b7ff7a5e725747afce7da553a2d2ec` 三台一致。
+
+### v1.62 限免推送把"发出去"和"记过账"的顺序搞反了：一次失败的发送会永久吃掉这条通告
+
+读 `app/services/free_alerts.py` 是为了核对记忆里那条"实时免费模型账本是全安装一份"的老结论——
+账本确实是全局的，但**限免新闻那半早就是每个读者各记各的**（`unannounced_free_offers(user_id=…)` 走
+`push_logs`）。真正的问题在同一段代码里，而且有两处：
+
+1. **`if not ids: continue` 挡在问定价接口之前。** `free_models.py` 的模块说明写着"限免可以没有新闻"，
+   可推送路径只有先采到一条限免新闻才会去问网关——所以"只有模型变免费、新闻里一条都没采到"这一类
+   永远不发。⚡ 块只能搭在一条已经由新闻决定的消息里。
+2. **`watcher.mark_announced()` 在建消息的时候就把账记了。** 同个函数里，新闻那半是发送成功之后才写
+   `free_offer_sent_at` 与 `push_logs`（v1.28/v1.53 立的规矩），模型这半却先记账。Telegram 一旦失败
+   （对方关掉 bot、网络重试耗尽、API 错误），模型 id 已经在 `announced` 里，`unannounced()` 下次不再返回它——
+   **这条通告对所有人都永久消失，而且没有任何一条日志说它消失了。**
+
+顺手抓到第三处：`_may_send()` 跑在内容检查之前，线上 `app.log` 里 204 条
+`free-offer alert skipped …: cooldown 90m` 绝大多数那轮根本没有东西要说——日志把"没话可说"写成了"被拦下"，
+真被拦下的那几条反而淹在里面。
+
+改成：整轮开头问一次网关（只读、不记账）→ 每轮每个读者先看有没有东西要说 → 再看节奏 → 发送 →
+**成功后**才记 `push_logs` / `free_offer_sent_at`，并在整轮结束时把 ⚡ 账本写一次。
+只有模型变免费时也单独发一条「🆓 网关新出现的免费模型」，并且不复用新闻为空的那句"没有采到限免公告"
+（对已经收到过限免推送的读者那句话是假的）。纯模型推送现在也会落一条 `push_logs`，否则冷却与每日上限
+只管得住新闻那半。另外删掉 `free_models.py` 里一个**只有 docstring 的同名 `_record_seen`**——
+它被 60 行后那个真实现覆盖，改它等于什么都没改。
+
+线上量到的现状（决定要不要动手的依据）：`data/free_models.json` 里 `announced` 21 个、`seen` 21 个、
+`last_free` 19 个且 19 全在账本里 ⇒ 自部署以来 ⚡ 块**一次都没进过推送**；`app.log` 里 Telegram 发送失败 0 次，
+所以这个"burn"目前只由测试和探针证明，还没有真实事故——这正是要在出事之前修的那类顺序问题。
+
+新增 5 条用例（610 → **615**），5 处反向验证全部 CAUGHT：记账搬回建消息时 /
+恢复 `if not ids: continue` / 纯模型推送不记 `push_logs` / 节奏检查搬到内容检查之前 /
+账本改成每个读者各记一次。
+
+部署后验证（`stamp=20260929T161943Z`，两台 `service=active`，三台 `tree=565cd87f848e180c445c3e1c4356b52e` 一致，
+Windows 与 anr-jump Linux/UTC 全量均 `615 passed`）：
+
+- 00:20:04 那轮 `live free-model check: 19 free model(s) at source` 出现在**没有任何限免新闻**的处理轮里——
+  这正是以前走不到的分支；因为 19 个都记过账，它安静地什么都没发，日志里也没有 skipped。
+- 在 VPS 上用真实 watcher、真实日志栈、一次性 DATA_DIR/DB（不碰他的库和 `free_models.json`）跑四轮 A/B，
+  `app.log` 逐字如下：
+  `free-offer alert -> 999000222: 0 offer(s), 1 new model(s)`（模型无新闻也能发，账在发送之后）
+  `free-offer alert withheld for 999000222 (0 offer(s) + 1 new model(s)): cooldown 90m`（拦下时说明代价）
+  同轮第二个读者拿到同一个待播模型，`probe/three` 此时才进账本——第二轮失败时它确实还在 `announced` 之外；
+  第四轮"没话可说 + 仍在冷却"零条日志，整轮 `skipped` 计数 0。
+- Traceback 与部署前逐项相同（VPS scheduler 4 条为历史遗留，app/collector/telegram 均 0；采集机全 0），
+  VPS 磁盘余 1893 MB。
+
+诚实的限制：模型账本仍是整个部署一份，所以**没送达的那个 chat 不会像限免新闻那样被重试**——今天只有一个订阅者，
+我为它写了注释而不是新建一张每人一份的状态表。
