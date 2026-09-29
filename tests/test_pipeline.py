@@ -1759,3 +1759,38 @@ def test_the_card_lists_only_the_other_outlets(session):
     card = fmt.article_card(view, config=get_config())
     line = [ln for ln in card.splitlines() if "Verge" in ln]
     assert line and "TechCrunch" not in line[0], card
+
+
+def test_the_coverage_line_counts_outlets_not_reposts():
+    """线上 #659 的形状：一个事件 7 行、其实只有 2 家媒体，旧写法说"另有 6 家来源报道"。"""
+    from types import SimpleNamespace
+
+    from app.processing import summarizer
+
+    row = SimpleNamespace(title="OpenAI announces an agent platform for enterprises",
+                          source_name="Reddit LocalLLaMA RSS", source_quality=90, community_heat=0)
+    event = SimpleNamespace(member_count=7, source_names=[
+        "Linux.do 福利分类", "Reddit LocalLLaMA RSS", "Reddit LocalLLaMA RSS",
+        "Reddit LocalLLaMA RSS"])
+    line = summarizer.compose_why_it_matters(row, event, config=get_config())
+    assert "另有 1 家来源报道（Linux.do 福利分类）" in line, line
+    assert "6 家" not in line, line
+
+    # 别家自己也可能被转载多次：两家就是两家。
+    event2 = SimpleNamespace(member_count=8, source_names=[
+        "Linux.do 福利分类", "The Verge AI", "The Verge AI", "Reddit LocalLLaMA RSS"])
+    line2 = summarizer.compose_why_it_matters(row, event2, config=get_config())
+    assert "另有 2 家来源报道" in line2, line2
+
+
+def test_a_single_outlet_event_claims_no_other_coverage():
+    """全是同一家转载时，"为什么值得关注"里不该出现任何"另有来源"。"""
+    from types import SimpleNamespace
+
+    from app.processing import summarizer
+
+    row = SimpleNamespace(title="Anthropic announces a compute deal with Google",
+                          source_name="TechCrunch AI", source_quality=88, community_heat=0)
+    event = SimpleNamespace(member_count=3, source_names=["TechCrunch AI"] * 3)
+    line = summarizer.compose_why_it_matters(row, event, config=get_config())
+    assert "家来源报道" not in line, line

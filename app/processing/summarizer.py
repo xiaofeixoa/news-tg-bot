@@ -55,11 +55,14 @@ def compose_why_it_matters(article: Any, event: Any = None, *, config: AppConfig
 
     trigger = breaking.event_trigger(getattr(article, "title", None), config)
     clauses: list[str] = []
+    # 数的是**别家媒体**，不是转载行数：一个事件里 7 行都来自同一家时，"另有 6 家来源
+    # 报道"是假的（线上量到 #659 就是这样：7 行、2 个来源）。这与 v1.60 卡片那次同族。
+    names = [str(name) for name in (getattr(event, "source_names", None) or []) if name]
+    outlets = list(dict.fromkeys(names))
     members = int(getattr(event, "member_count", 0) or 0) if event is not None else 0
-    others = [str(name) for name in (getattr(event, "source_names", None) or [])
-              if name and name != getattr(article, "source_name", None)][:3] if members else []
+    others = [name for name in outlets if name != getattr(article, "source_name", None)][:3]
     if members > 1 and others:
-        clauses.append(f"同一事件另有 {members - 1} 家来源报道（{'、'.join(others)}）")
+        clauses.append(f"同一事件另有 {len(others)} 家来源报道（{'、'.join(others)}）")
     if not trigger and not clauses:
         return ""
     heat = float(getattr(article, "community_heat", 0) or 0)

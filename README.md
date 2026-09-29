@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 603 个用例
+.venv/bin/python -m pytest            # 610 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -410,7 +410,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 603 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 610 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2662,3 +2662,45 @@ Q5（拉丁分隔符）各自被抓到。另记：Q3（把渲染条件从"有别
 0 条 Traceback，队列全空，今天推送 breaking 3 / free_offer 2 / 早报 1 / 晚报 1。
 全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260929T151121Z`、`service=active`，
 `tree=bfe3111d349969a57d7f26f64c3e8324` 三台一致。
+
+### v1.61 把那六件积压的写库一次做完，顺手抓出卡片同族的第二处"行数当来源数"
+他批准了积压的批量写库。动手前先备份：`/root/anr-backup-20260929T152853Z.db`（sqlite backup API，
+8.3 MB / 1436 篇）。然后逐项核对——**第一项就把一个同族 bug 挖了出来**：
+
+`summarizer.compose_why_it_matters` 写的是"同一事件另有 `{member_count - 1}` 家来源报道"，
+`member_count` 是**行数**，不是家数。线上 #659 就是一个事件 7 行、实际只有 2 家媒体，
+它写着「另有 6 家来源报道」，而且 `others` 那份列表还允许同一家出现多次。这与 v1.60 卡片
+那次同族，只是藏在"为什么值得关注"那一行里。若直接回填，61 行错数字就永久写进库了。
+所以顺序是：先修口径（`outlets` 去重、按"别家媒体数"计），部署，再回填。修完 #659 →
+「同一事件另有 1 家来源报道（Linux.do 福利分类）」，全库再无 >3 家的夸大句。
+
+工具落在 `scripts/reconcile_db.py`（**默认干跑**，`--apply` 才写，`--only` 挑步骤），六步：
+
+| 步骤 | 干跑量到 | 写库结果（VPS / 采集机） |
+| --- | --- | --- |
+| `regate` 词表加词后被丢的行重过门槛 | 7 天内 190 被丢 → 34 可放行 | 34 / 22 行放回，由正常轮重处理 |
+| `spam` GitHub Trending `(0 stars)` 新仓库 | 25 行 | 25 / 0 行标 `filtered_out`（星数 0 说明"上榜"信号不成立） |
+| `matters` 回填"为什么值得关注" | 缺 1181 → 有内容 61 | 修正口径后 31 行有、30 行不再挂这句 |
+| `processed` 补 `processed_at` | 721 行为空 | 用入库时刻补，`meta.processed_at_backfilled` 标明是补的 |
+| `ghost` 测试留下的假订阅者 | chat 111111111，0 条账本 | 删除；有账本就跳过不删 |
+| `lost` 修复前丢掉、又补不回的突发 | #1101 | 写 `breaking_lost`：`published 26h ago, older than 24h` |
+
+`#1101` 的结论是**补不回来也不该补**：它发布已满 26 小时，时效门禁（24h）现在就不接受，
+硬塞一条迟到的突发等于用规则之外的口子。它带着原因留在库里，下一个 Agent 看得见为什么
+`is_sent=False`。采集机上同样有两行（#804/#822）做了这个记录。
+
+验证（写完再看，全部只读查询）：34 行放行后 **34 行已重处理、32 行拿到中文标题、0 行被再次过滤**，
+其中 #121「使用 LFM2.5-VL-DSpark 加速视觉语言模型」53.3 分、#395「水下 C3-JEPA…」47.1 分——
+这些是 v1.57 之前根本进不了库的新闻；假订阅者残留 0；夸大条数 0；
+`spam_dropped` 25 行。23:46 那轮 `scanned=37 processed=37 filtered=0 failed=0`、翻译 60 篇。
+
+过程里我自己犯的两个错，都留在文档里：① `spam` 步骤第一版用 `int(meta.get("stars") or -1)`，
+把"0 星"读成"没有这个键"，干跑报 0（本仓库 `as_int` 的注释早就写着这个坑）；② 验证脚本用了
+`Article.meta["regated"].isnot(None)`——就是 v1.53 记下的 `json_quote(NULL)='null'` 陷阱，
+它命中全库 1440 行，差点让我以为"所有文章都被放行过"。
+
+新增 5 条用例（605 → **610**）：`_stars_of` 对 `"0"/0/0.0` 与缺键/坏值的判断、
+`--apply` 四种账目一次验（放行/标掉/补时刻/删假订阅者）、以及"默认必须是干跑"。
+2 处反向验证 CAUGHT（`{members - 1}` 回去、`outlets` 不去重）。
+全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260929T154220Z`、`service=active`，
+`tree=48b7ff7a5e725747afce7da553a2d2ec` 三台一致。
