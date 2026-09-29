@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 599 个用例
+.venv/bin/python -m pytest            # 603 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -410,7 +410,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 599 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 603 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2615,3 +2615,50 @@ M3 门槛不读词表）全部 CAUGHT；全量 Windows 与 anr-jump Linux/UTC �
 3 个新用例函数（参数化那条 13 个短语）＝新增 16 条，583 → **599**；变异 P1/P2/P3 全部 CAUGHT。
 全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260929T123601Z`、`service=active`，
 `tree=429a1a89d628f033e017ce6f6bd0e408` 三台一致；`app.log` 0 条 Traceback。
+
+### v1.60 卡片上的「相关来源」有 21 条在说谎：那正是你正在读的那一家
+量了一下事件分组（这块账本一直没查过）：1157 个事件、33 个 `member_count>1`，
+其中 **`member_count` 与实际行数不符 0 处、`source_names` 含重复 0 处**——去重和计数都是好的。
+但按"来源"再看一次：**33 个多行事件里有 21 个其实只有一个来源**（Linux.do 的转载、同一 feed
+的第二条、Reddit 同一板的跟进帖）。而卡片的渲染条件是 `event_members > 1`，
+列表取自事件的全部来源名，于是：
+
+```
+读的是 TechCrunch AI 的稿子
+   相关来源：
+    • TechCrunch AI            ← 它说"另有来源"，列的却是你正在看的这一家
+```
+
+同一个 bug 的第二处表现：`member_count` 数的是**行**，而 `summarizer` 早就知道这一点——
+它算覆盖度时先剔掉了本条自己的来源（`others = [n for n in source_names if n != 本条来源]`），
+所以"另有 N 家报道"那句话一直是准的。只有卡片漏了这一步。这不是新发明，是把卡片对齐到
+仓库里已有的正确口径。
+
+改两处 + 一处同类兜底：
+- `news._view`：`event_sources` = 事件里**除本条来源之外**的去重来源；`event_members` =
+  去重后的**来源数**（不再用行数）。同源转载 → 空列表 → 那一行整条消失。
+- `format.article_card`：渲染条件改为"有别家才渲染"，分隔符从 `, ` 换成中文顿号「、」。
+- `breaking_card` 的代码默认标题原本是 `"🚨 AI BREAKING NEWS"`。线上配置写的是
+  「🚨 AI 突发新闻」，所以他**今晚收到的那条 #1191 是中文的**——这条不是已发生的错误，
+  而是和 v1.58 同一类：配置少一行时，默认值就会替他说英文。改成中文默认。
+
+4 个新用例（599 → **603**）：同源转载不出该行、两家媒体时只列另一家、默认标题不出英文、
+顿号分隔。变异 Q1（不剔本条来源）、Q2（覆盖度按行数算）、Q4（英文默认标题）、
+Q5（拉丁分隔符）各自被抓到。另记：Q3（把渲染条件从"有别家"改回"来源数 > 1"）**测不出差异**，
+因为在新口径下两者恒等，所以我没有为它写断言，也没有留那道重复保险。
+
+线上（部署构建，生产库真实事件，只读）：
+
+```
+同源多行事件 21 | 多来源事件 12
+  #91  (Google DeepMind, 2 行) 相关来源=[] 卡片里有该行=False
+  #138 (Hugging Face,   2 行) 相关来源=[] 卡片里有该行=False
+  #64  本条=Google AI      -> 列出 ['Google DeepMind']  members=2
+  #73  本条=Google DeepMind -> 列出 ['Hacker News']      members=2
+```
+
+另外记一笔今天的成绩单，免得明天惊讶：额度落盘后 `translate_budget.json` 显示
+**今天已用 248/400 次请求**（以前这个数字根本不涨，因为主力路由不记账）；0 条 ERROR、
+0 条 Traceback，队列全空，今天推送 breaking 3 / free_offer 2 / 早报 1 / 晚报 1。
+全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260929T151121Z`、`service=active`，
+`tree=bfe3111d349969a57d7f26f64c3e8324` 三台一致。

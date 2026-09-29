@@ -203,9 +203,9 @@ def article_card(
         f"📊 {scores}",
         f"📰 来源：{esc(item.source_name)} · {short_date(item.published_at, tz_name)}",
     ]
-    if item.event_members > 1:
-        names = ", ".join(item.event_sources) or f"{item.event_members} 个来源"
-        out += ["", "<b>相关来源：</b>", f"{BULLET} {esc(names)}"]
+    if item.event_sources:
+        # 只列别家媒体（`news._view` 已排除本条自己的来源）；一家的转载不配这一行。
+        out += ["", "<b>相关来源：</b>", f"{BULLET} {esc('、'.join(item.event_sources))}"]
     if item.tags:
         out += ["", "🏷 " + " ".join(f"#{esc(t.replace(' ', ''))}" for t in item.tags[:6])]
     text = "\n".join(out)
@@ -214,7 +214,7 @@ def article_card(
 
 def breaking_card(item: ArticleView, *, config: AppConfig | None = None, tz_name: str = "UTC") -> str:
     config = config or get_config()
-    header = config.get("breaking.header", "🚨 AI BREAKING NEWS")
+    header = config.get("breaking.header", "🚨 AI 突发新闻")
     body = article_card(item, config=config, tz_name=tz_name)
     return clip(f"{esc(header)}\n\n{body}")
 

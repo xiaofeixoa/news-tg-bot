@@ -205,8 +205,14 @@ def _view(session: Session, article: Article) -> ArticleView:
     if article.event_id:
         event = repo.event_for(session, article.event_id)
         if event is not None:
-            sources = list(event.source_names or [])
-            members = event.member_count or 1
+            # 同一口径两处：`summarizer` 只数"别家媒体"，卡片也必须只数列。
+            # 线上 33 个多行事件里有 21 个其实只有一个来源（Linux.do 的转载、同一
+            # feed 的第二条），旧写法会给正在读 TechCrunch AI 的他显示
+            # 「相关来源：TechCrunch AI」——那不是补充信息，是说谎。
+            names = [str(name) for name in (event.source_names or []) if name]
+            outlets = list(dict.fromkeys(names))
+            sources = [name for name in outlets if name != article.source_name]
+            members = len(outlets) or 1
     return ArticleView(
         id=article.id,
         title=article.title,

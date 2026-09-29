@@ -1705,3 +1705,57 @@ def test_the_retry_queue_reads_only_marked_rows(session):
         assert s.get(Article, marked).meta is not None
         ids = [int(row.id) for row in repo.breaking_deferrals(s)]
         assert ids == [marked], f"重试队列只该读到被标记的行：{ids}"
+
+
+# ------------------- 卡片「相关来源」只该列别家媒体
+def _shared_event(session, pairs) -> int:
+    """把若干行挂到同一事件上，并按真实路径维护 source_names / member_count。"""
+    ids: list[int] = []
+    for index, (title, source) in enumerate(pairs):
+        row = repo.save_article(session, feed_item(title, f"https://example.org/rel-{index}",
+                                                   source=source))
+        row.is_processed = True
+        ids.append(int(row.id))
+    session.commit()
+    with session_scope() as s:
+        event = None
+        for article_id in ids:
+            article = s.get(Article, article_id)
+            event = repo.get_or_create_event(s, "related-sources-key", article.title, article)
+            article.event_id = event.id
+        s.commit()
+    return ids[0]
+
+
+def test_a_same_source_repost_claims_no_related_sources(session):
+    """线上 33 个多行事件里 21 个其实只有一个来源：那种卡片不该说"另有来源"。"""
+    from app.services import format as fmt
+    from app.services.news import get_news_service
+
+    first = _shared_event(session, [
+        ("OpenAI announces a reasoning router today", "TechCrunch AI"),
+        ("OpenAI announces a reasoning router, part two", "TechCrunch AI"),
+    ])
+    view = get_news_service().by_id(first)
+    assert view is not None
+    assert view.event_sources == [], f"同一家媒体的转载不该进相关来源：{view.event_sources}"
+    assert view.event_members == 1, "只有一个来源，覆盖数就是 1"
+    card = fmt.article_card(view, config=get_config())
+    assert "相关来源" not in card, card
+
+
+def test_the_card_lists_only_the_other_outlets(session):
+    """两家媒体报道时，列的是"另一家"，不是他现在读的这家。"""
+    from app.services import format as fmt
+    from app.services.news import get_news_service
+
+    first = _shared_event(session, [
+        ("Anthropic signs a compute deal today", "TechCrunch AI"),
+        ("Anthropic signs a compute deal today", "The Verge AI"),
+    ])
+    view = get_news_service().by_id(first)
+    assert view.event_sources == ["The Verge AI"], view.event_sources
+    assert view.event_members == 2
+    card = fmt.article_card(view, config=get_config())
+    line = [ln for ln in card.splitlines() if "Verge" in ln]
+    assert line and "TechCrunch" not in line[0], card

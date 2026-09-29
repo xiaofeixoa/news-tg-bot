@@ -107,3 +107,20 @@ def test_rendered_surfaces_stay_chinese_when_content_is_chinese():
         plain = re.sub(r"https?://\S+", " ", plain)
         rogue = sorted({w for w in latin.findall(plain) if w.lower() not in allowed})
         assert not rogue, f"{name} 出现非品牌的英文词 {rogue}：{plain[:160]!r}"
+
+
+def test_the_breaking_header_default_is_not_english():
+    """配置里少一行时，代码默认值也会是他看到的标题——默认值也得是中文。"""
+    from app.config import AppConfig
+
+    bare = AppConfig(settings=get_config().settings, raw={}, sources=[])
+    card = fmt.breaking_card(make_view(), config=bare)
+    assert "BREAKING" not in card, card[:120]
+    assert "突发新闻" in card, card[:120]
+
+
+def test_related_sources_are_joined_with_a_chinese_comma():
+    line = [l for l in fmt.article_card(make_view(event_sources=["The Verge AI", "Ars Technica"],
+                                                  event_members=3),
+                                         config=get_config()).splitlines() if "Verge" in l]
+    assert line and "、" in line[0] and ", " not in line[0], line
