@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 578 个用例
+.venv/bin/python -m pytest            # 583 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -410,7 +410,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 578 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 583 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2518,3 +2518,58 @@ M3 门槛不读词表）全部 CAUGHT；全量 Windows 与 anr-jump Linux/UTC �
 两台 `stamp=20260929T091234Z`、`service=active`。
 已经落库为 `filtered_out` 的历史行不会自动翻身（183 行里那 31 行仍不可见）——要不要
 把它们重新过一遍门槛，是一次批量写库，等他点头。
+
+### v1.58 中文不变量：内部键名一次都不该出现在他屏幕上（并把它做成断言）
+这次是先审计、后修改。把 `format.py` 的每个渲染面都喂一遍"内容已是中文"的数据，扫输出
+里的拉丁词，结果有两类：
+
+- **误报（不改）**：`example.com`、`href`、`/help` 里的命令名、`UTC+8`、品牌与模型 ID
+  （`claude-sonnet-5-5`、`v1.9.0`、`anthropic-sdk-python`）。用部署构建把今晚的晚报真渲染
+  一遍也确认了这一点：1843 字符里所有"可疑行"都是来源名（GitHub Trending、Reddit
+  LocalLLaMA RSS）和发布版本号——那是专有名词，不是我们的 chrome。
+- **真问题（改）**：`category_label()` 的最后一行是 `return name`，也就是**词表里没有的
+  分类键会把它内部的英文标识直接印进中文简报**；`source_type_label()` 同样会原样回显
+  `newsletter` 这类取值。查过线上：当前 8 个分类、6 种来源类型全都有中文标签，所以这条
+  **今天是潜在的、还没发生**——但"都是中文"是硬要求，而潜在路径正是配置一改就会踩到的
+  那条（这套 taxonomy 历史上就长过好几次）。
+
+改法：两者都不再回显键名，而是落到中文兜底（分类→`其他`，来源类型→`其它来源`），同时
+**给运维提醒一次**（`_warn_missing_label`，按 `类型=值` 去重）：这是配置缺口，该在
+`config/categories.yaml` / `labels.source_types` 补一条。安静地告诉他"其他"、又让他一辈子
+不知道标签丢了，是另一种坏。
+
+顺手量化了两个行为，都写进用例：
+- 两个未登记的分类键**合并成同一个「其他」小节**，不会渲染出两个同名小节；
+- 重复调用只提醒一次（实测两个缺失键共 2 条日志）。
+
+`tests/test_chinese_surfaces.py`（5 条）把这次人工审计固化：未登记键不出现、8 个在线分类
+的中文名逐个钉住、未登记来源类型不原样显示、提醒恰好一次、以及"内容全中文时输出里不该
+有成句英文（品牌/URL/HTML 属性除外）"。
+
+4 处反向验证全部 CAUGHT：N1 回显键名、N2 不提醒、N3 来源类型原样回显、N4 每轮重复提醒
+（N1 同时被两条用例抓到）。全量 583 通过（578+5）。
+
+写上线上探针之后又发现自己一处小谎并修掉：提醒文案对来源类型说的是"按「其他」显示"，
+而代码真正返回的是「其它来源」——日志把兜底文案写错，就是把人往错的文件上引。改成把
+兜底值作为参数传进 `_warn_missing_label`（`SOURCE_TYPE_FALLBACK` 单点定义，返回值与提醒
+共用），并给用例加了这句断言；第五处反向验证 N5（把提醒里的文案改回「其他」）被它抓到。
+最终 5 处全部 CAUGHT。
+
+线上（部署构建 `stamp=20260929T121459Z`，只读探针）：
+
+```
+已登记分类 -> 模型发布            未登记分类 -> '其他'
+已登记来源 -> GitHub              未登记来源 -> '其它来源'
+界面没有 来源类型 'mastodon' 的中文名，按「其它来源」显示；请在 settings.yaml 的 labels.source_types 补一条
+渲染里是否还出现内部键: False
+```
+
+同时把今晚的简报也量了：20:04:55 发出 1843 字符 / 1 条消息，8 个条目的标记分布
+`🔥×3 ⭐×2 🔹×4`（v1.52 的页内排名在真实一页上确实是分层的，并列 65/64 共享最高档），
+整行无中文的只剩来源名与版本号那类专有名词。v1.57 新收的 3 行 arXiv 论文进了 `/最新`
+前 200、被分到 `论文与方法`（分数 47.9，够不上简报前 8——它们的收益是"可被查到"，
+不是"上头版"，这点不说大）。
+
+全量 583 通过（578+5），Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台
+`service=active`，`tree=2c53cf8148385d186449a23dc66e70d4` 三台一致；按时间戳归因，
+部署后 0 条新 Traceback。

@@ -228,19 +228,39 @@ class AppConfig:
         The taxonomy keys stay English because they are also the prompt vocabulary
         and the DB column, but a briefing section titled "🤖 AI Models" is English
         chrome we control - and he reads Chinese.
+
+        The last line used to be `return name`, so any key missing from
+        categories.yaml printed its internal identifier straight into a Chinese
+        briefing (measured reachable: the echo is still latent on live data - all 8
+        stored categories have labels - but the invariant "his screen never shows an
+        internal key" is what he asked for). An unlabelled key now renders as the
+        fallback label and warns the operator once, because the fix belongs in
+        config/categories.yaml and a silent English word is how nobody notices it.
         """
         if not name:
-            return str(self.categories.get("fallback_label") or "其他")
+            return self.fallback_label
         label = self.category_meta(name).get("label")
         if label:
             return str(label)
         if name == self.fallback_category:
-            return str(self.categories.get("fallback_label") or "其他")
-        return name
+            return self.fallback_label
+        _warn_missing_label("分类", name, "config/categories.yaml 的 categories",
+                            self.fallback_label)
+        return self.fallback_label
+
+    @property
+    def fallback_label(self) -> str:
+        return str(self.categories.get("fallback_label") or "其他")
 
     def source_type_label(self, type_name: str | None) -> str:
         """/sources 与 --self-check 里的采集器类型：内部取值不该直接印给他看。"""
-        return str(self.get(f"labels.source_types.{(type_name or '').lower()}") or type_name or "?")
+        label = self.get(f"labels.source_types.{(type_name or '').lower()}")
+        if label:
+            return str(label)
+        if type_name:
+            _warn_missing_label("来源类型", type_name, "settings.yaml 的 labels.source_types",
+                                SOURCE_TYPE_FALLBACK)
+        return SOURCE_TYPE_FALLBACK
 
     def quality_label(self, tier: str | None) -> str:
         return str(self.get(f"labels.quality.{(tier or 'C').upper()}") or f"{(tier or 'C').upper()} 级")
@@ -314,6 +334,25 @@ def _config_log(message: str, *args: Any) -> None:
         get_logger("app").warning(message, *args)
     except Exception:  # pragma: no cover - config must load even before logging
         pass
+
+
+_MISSING_LABEL_WARNED: set[str] = set()
+# One constant so the label the reader gets and the warning about it cannot disagree.
+SOURCE_TYPE_FALLBACK = "其它来源"
+
+
+def _warn_missing_label(kind: str, value: str, where: str, shown: str) -> None:
+    """Say it once per value: the reader only ever sees Chinese, the operator fixes YAML.
+
+    The message names the label the reader actually got, because a warning that
+    says 「其他」 while the code returned 「其它来源」 is the kind of small lie that
+    sends somebody to the wrong file.
+    """
+    key = f"{kind}={value}"
+    if key in _MISSING_LABEL_WARNED:
+        return
+    _MISSING_LABEL_WARNED.add(key)
+    _config_log("界面没有 %s %r 的中文名，按「%s」显示；请在 %s 补一条", kind, value, shown, where)
 
 
 def as_int(value: Any, default: int) -> int:
