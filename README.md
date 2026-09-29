@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 576 个用例
+.venv/bin/python -m pytest            # 578 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -410,7 +410,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 576 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 578 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2466,3 +2466,55 @@ data/translate_budget.json = {"day": "2026-09-29", "used_day": 4}   ← 应用�
 M3 读回却不应用、M4 本轮不保存、M5 坏文件抛异常）。全量 Windows 与 anr-jump Linux/UTC 均
 `exit=0`；两台 `stamp=20260929T054906Z`、`service=active`，
 `tree=849aaeb9d786b6f65899b5f5010d4be4` 三台一致。
+
+### v1.57 词表里没有 "model"：17% 的被丢新闻只靠这一个词
+先说结论之前的一次数数。24 小时窗口里读者可见的行**中文覆盖率是 100%**（英文标题 0、
+英文摘要 0），所以问题不在翻译，而在更前面一层：**有些新闻根本没入库**。
+
+把 7 天内 `filtered_out=True` 的行拉出来看标题，一眼就不对劲：
+
+```
+#1099 TechCrunch AI   Modulate raises $25M for its voice models and analysis suite
+#121  Hugging Face    Accelerating vision-language models with LFM2.5-VL-DSpark
+#722  Reddit LocalLL  Best open-source coding model for a laptop with 4GB VRAM?
+#1066 Reddit LocalLL  AGI definition
+7 天内没有任何关键词命中而被丢的行：183
+其中只需要 "model/models" 或 "agi" 一个信号就能救回：31（17%）
+```
+
+`filters.keywords` 有 48 个词，**里面从来没有 `model`**（也没有 `agi`）——而
+`AI Models` 是这套 taxonomy 的一个栏目。也就是说"模型"类新闻能不能入库，全靠标题里
+有没有别的词（openai/llm/gpt…）顺手撞上来。
+
+顺手清掉一个我自己的误判：我一开始读 `classifier._matcher` 的正则
+`(?<![a-z0-9])kw(?![a-z0-9])`，据此认定"复数永远不命中"（agents / GPUs / prompts）。
+真去量才发现门槛用的是另一个函数 `normalize.keyword_hits`（词边界更松，`" model"`
+这种前缀匹配能命中 `models`），`_matcher` 只在分类打分里用。**量出来"只差复数"的行是 0**，
+所以我没有动匹配器——只是按证据补词。
+
+改动只有数据：`filters.keywords` 加 `model`、`agi`（实测 50 词）。为什么不加
+`token`(9)/`generative`(2)/`weights`(2)：命中数太少、歧义更大，还没到"值得加"的证据。
+代价也写清楚：泛用的 "model" 动词会放行个别无关标题（评测集里就收了一条
+"How to model retirement savings in a simple spreadsheet" 当**已知误放行**样本），
+门槛只决定入库，能不能上简报仍由分数（晚报 45 线）、每源上限与排序决定。
+
+新增评测集 `tests/data/gate_eval.yaml`（19 条线上真实标题：12 条该入库、6 条该挡住、
+1 条已知误放行）+ `tests/test_gate_eval.py`：
+- 逐条断言门槛判定，判错就指名是哪条；
+- 第二条用例把 `model/agi` 从词表里临时抽掉，断言 **12/12 全部落回被丢**——
+  以后谁删这两个词，测试会直接说出代价。
+
+线上（部署构建、生产库、只读重放 7 天的被丢行）：
+
+```
+线上词表 50 个，含 model / 含 agi：True / True
+7 天被丢 183 行 → 加词之后会入库 31 行（与离线测量完全一致）
+其中标题本身就带 model/agi 的 13 行：voice models 融资、vision-language models、
+本地模型选型帖、AGI definition……
+```
+
+2 条新用例（576 → **578**），3 处反向验证（M1 词表去掉 model、M2 去掉 agi、
+M3 门槛不读词表）全部 CAUGHT；全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；
+两台 `stamp=20260929T091234Z`、`service=active`。
+已经落库为 `filtered_out` 的历史行不会自动翻身（183 行里那 31 行仍不可见）——要不要
+把它们重新过一遍门槛，是一次批量写库，等他点头。

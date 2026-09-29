@@ -210,6 +210,14 @@ filters:
     - ai
     - a.i.
     - artificial intelligence
+    # "model" 是这个列表里最不该缺的词：7 天内 183 条没有任何关键词命中的行里，31 条
+    # （17%）只有 "model/models" 这一个 AI 信号——Hugging Face 的 vision-language models、
+    # TechCrunch 的 voice models 融资、一整批 Reddit LocalLLaMA 的模型发布与选型帖。
+    # 门槛用的是词形前后边界，"model" 已经能命中 "models"（实测），所以不用另加复数。
+    # 同批只测到 1 条 "AGI"，也一起加；token(9)/generative(2)/weights(2) 命中太少、
+    # 歧义更大，没到"值得加"的证据。
+    - model
+    - agi
     - llm
     - gpt
     - claude

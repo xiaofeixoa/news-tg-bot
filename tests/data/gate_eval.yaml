@@ -1,0 +1,92 @@
+# 规则门（第一层：这条新闻值不值得入库）的评测集
+#
+# 每一条都是 2026-09-29 从线上库里取的真实标题。`expect: keep` 是"该入库"，
+# `expect: drop` 是"该被门槛挡掉"。
+#
+# 这个文件存在的理由：2026-09-29 数了 7 天的量——183 条没有任何关键词命中而被丢掉，
+# 其中 31 条（17%）唯一的 AI 信号就是 "model/models"：Hugging Face 的
+# vision-language models、TechCrunch 的 voice models 融资、一整批 Reddit 的模型发布
+# 与选型帖。`filters.keywords` 里从来没有 model（也没有 agi），于是这些新闻连入库
+# 都不会发生，读者永远看不见。加词之前，没人能量化这件事。
+
+# ---- 该入库：标题里只有 model/models/agi 这一个 AI 信号
+- title: "Accelerating vision-language models with LFM2.5-VL-DSpark"
+  source: Hugging Face
+  expect: keep
+
+- title: "Modulate raises $25M for its voice models and analysis suite"
+  source: TechCrunch AI
+  expect: keep
+
+- title: "Local vision model for 3D print monitoring"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "Best open-source coding model for a laptop with 4GB VRAM?"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "Jail breaking open models"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "[Release] - SupraTTS-0.1-Beta - a tiny 29.6M parameters TTS model"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "Betst models to run on 16gb card with ko spillover?"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "FT: Corporate America rejects overpriced frontier, embraces open models"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "Can we get some quality control on all these model perf posts?"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "Is that fair ? It's relevant to devs using Local models as well."
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+- title: "Underwater C3-JEPA: An Object-Centric Cross-View World Model for ROV Salvage"
+  source: arXiv AI
+  expect: keep
+
+- title: "AGI definition"
+  source: Reddit LocalLLaMA RSS
+  expect: keep
+
+# ---- 该挡掉：标题里一个 AI 信号都没有（加词之后也不该被误放进来）
+- title: "Guys I promise It wasn't me 😭😭"
+  source: Reddit LocalLLaMA RSS
+  expect: drop
+
+- title: "Why are there no modded 24gb 3080tis?"
+  source: Reddit LocalLLaMA RSS
+  expect: drop
+
+- title: "Latest R9700"
+  source: Reddit LocalLLaMA RSS
+  expect: drop
+
+- title: "Your final chance to grab your exhibit table at TechCrunch Disrupt"
+  source: TechCrunch AI
+  expect: drop
+
+- title: "How long do I need to work at my salary before I can coast, or retire"
+  source: Hacker News Free
+  expect: drop
+
+- title: "提前预祝国庆快乐,抽个 com 域名 1 年使用权"
+  source: Linux.do 福利分类
+  expect: drop
+
+# ---- 明写的取舍：泛用的 "model" 动词也会放行，这是加词换来的代价。
+# 门槛只决定"入库不入库"，能不能上简报由分数（晚报 45 线）、每源上限和排序决定，
+# 所以这里断言的是"我们知道它进来了"，而不是假装它被挡住了。
+- title: "How to model retirement savings in a simple spreadsheet"
+  source: Hacker News Free
+  expect: keep
+  note: 泛用词误放行的样本，靠后面的分数层拦
