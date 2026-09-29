@@ -856,3 +856,61 @@ async def test_logging_middleware_re_raises_and_only_keeps_the_first_line():
     debug_lines = [m for lvl, m in records if lvl == "debug"]
     assert any("第一行" in m for m in debug_lines), debug_lines
     assert not any("第二行" in m for m in debug_lines), "文档说只留一行，测试就得盯着它"
+
+
+# ------------------- 序数解析：命令那半边以前只认裸的「一..十」
+def test_summary_resolves_the_ordinal_phrasings_its_own_hint_teaches(seeded):
+    """/summary 的提示语写着「第二条详细说说」，可 `/summary 第二条` 以前只回用法说明。
+
+    自然语言那一半有完整解析（第…条、二十以上），命令这半抄了一份只认裸 一..十 的表。
+    序号断言刻意用 90001.. 这种合成 id：早期版本用 seeded 比对，而 seeded[1] 正好等于 2，
+    「第2条 被当成新闻编号 2」这条断言就成了永远为真的空断言（变异实验抓出来的）。
+    """
+    from app.bot.context import store
+    from app.bot.handlers.summary import _resolve_id
+
+    ids = list(range(90001, 90011))
+    store.remember(ALLOWED, ids, kind="news")
+    assert _resolve_id(ALLOWED, "第二条") == ids[1]
+    assert _resolve_id(ALLOWED, "第二") == ids[1]
+    assert _resolve_id(ALLOWED, "第一条") == ids[0]
+    assert _resolve_id(ALLOWED, "第 2 条") == ids[1]
+    assert _resolve_id(ALLOWED, "第2条") == ids[1], "带数字的序数不该被当成新闻编号"
+    assert _resolve_id(ALLOWED, "第9条") == ids[8]
+
+    store.remember(ALLOWED, list(seeded), kind="news")
+    assert _resolve_id(ALLOWED, str(seeded[0])) == seeded[0]
+    assert _resolve_id(ALLOWED, f"#{seeded[0]}") == seeded[0]
+    assert _resolve_id(ALLOWED, "随便说说") is None
+    assert _resolve_id(ALLOWED, None) is None
+
+
+@pytest.mark.parametrize("phrase,number", [
+    ("三", 3), ("第三条", 3), ("第三", 3), ("第3条", 3), ("第十", 10), ("第十条", 10),
+    ("第十一条", 11), ("第十二条", 12), ("第二十条", 20), ("第三十五条", 35),
+    ("第九十", 90), ("第二十一条", 21), ("十", 10), ("一百", None),
+])
+def test_the_command_and_the_natural_language_path_read_the_same_number(phrase, number):
+    """同一个中文序数在两个入口必须是同一个数字——这是那次分叉的根源。"""
+    from app.bot.context import store
+    from app.bot.handlers.summary import _resolve_id
+    from app.services.search import ordinal_to_int
+
+    ids = list(range(90001, 90141))
+    store.remember(ALLOWED, ids, kind="news")
+    assert ordinal_to_int(phrase) == number, phrase
+    if number:
+        assert _resolve_id(ALLOWED, phrase) == ids[number - 1], phrase
+    else:
+        assert _resolve_id(ALLOWED, phrase) is None, phrase
+
+
+def test_ordinal_parsing_refuses_nonsense():
+    from app.services.search import ordinal_to_int
+
+    assert ordinal_to_int(None) is None
+    assert ordinal_to_int("") is None
+    assert ordinal_to_int("第十一条啊") == 11
+    assert ordinal_to_int("你好") is None
+    assert ordinal_to_int(True) is None, "bool 不该被当成 1"
+    assert ordinal_to_int(0) is None

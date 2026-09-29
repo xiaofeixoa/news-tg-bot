@@ -371,7 +371,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 583 个用例
+.venv/bin/python -m pytest            # 599 个用例
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -410,7 +410,7 @@ Bot 层（`/start` `/help` `/news` `/search` `/summary` `/digest` `/topics` `/so
 | **`/免费` 端到端投递** | VPS 上 `scripts/telegram_smoke.py --free` 已送达管理员 chat（816 字，含切换按钮）；`--free --query glm` 走关键词回落——条目改用 📰 而不是礼物标记，并写明「下面只是相关新闻，别当成限免」；`--free --query qoder` 会说明「新闻里没采到 + 定价接口里也没有同名模型」 |
 | 中文限免信源 | linux.do 的 `.rss` 被 Cloudflare 按 TLS 指纹拦（同一台机器同一时刻 curl 200、httpx 403）。解法是 `browser_tls: true` + 可选依赖 `curl_cffi`（复刻 Chrome 握手）：实测一轮入库 24 条福利帖，`/免费` 立刻出现真实限免（如“Qoder 向上海交通大学全校师生开放”）。Reddit `search.rss` 仍按 IP 限流，默认关闭 |
 | 内存占用 | `aiogram` 单独占 **+106MB** 匿名内存（它要为整套 Bot API 建 pydantic 模型）。现在只有真正跑 Bot 的进程才加载它：`--no-bot` 采集机 `VmRSS 201MB → 85MB`（`RssAnon 177MB → 63MB`）；`import app.main` 的常驻匿名内存从 146MB 降到 47MB（进程内 `/proc/self/status` 实测）；带 Bot 的机器仍约 175MB，因为它确实要用 aiogram。回归用例：`test_collection_mode_does_not_import_aiogram` |
-| 单元测试 | 583 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
+| 单元测试 | 599 个用例：开发机 Windows 全绿，GitHub Actions 在 Python 3.12 与 3.13 双矩阵 `success`（每次推送都跑）；两台服务器跑的是同一份代码树（md5 一致） |
 | **`/免费` 识别质量** | 50 条标注集：中/英各自 precision 1.00、recall 1.00（英文召回本轮从 0.73 补起）；线上最近 600 条全源扫描稳定命中 9 条，放宽英文信号后**没有新增误报**，逐条人工复核 |
 | **`/免费` 主动推送** | VPS 实测：一次 `delivered: 1` 推了 3 条限免（Qwen / 智谱 / RelayFor-DeepSeek），紧接着再跑是 `delivered: 0`；账本 `push_logs(kind=free_offer)` 现在是 **(user, article) 逐条**记录，所以第二个订阅者 / 以后新订阅的人不会被第一个人的已读记录吞掉 |
 | **定时推送的 HTML 渲染** | `TelegramSender.send` 之前没带 `parse_mode`，早报/突发里的 `<b>`、`<a>` 会被当纯文本发出去（字面标签）。现在统一按 HTML 发送，Telegram 拒绝解析时自动降级为纯文本重发，不会整条丢掉 |
@@ -2573,3 +2573,45 @@ M3 门槛不读词表）全部 CAUGHT；全量 Windows 与 anr-jump Linux/UTC �
 全量 583 通过（578+5），Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台
 `service=active`，`tree=2c53cf8148385d186449a23dc66e70d4` 三台一致；按时间戳归因，
 部署后 0 条新 Traceback。
+
+### v1.59 `/summary 第二条` 只回一句用法——而那句话正是机器人自己教他说的
+先记两条**否定结论**，因为它们让我没有去改不该改的东西：
+- 我原以为序数表停在「八」，实际两处都到「十」——看错了，没动；
+- 我也怀疑过 `keyword_hits`（门槛）和 `_matcher`（分类）两套匹配器的分叉会让 v1.57
+  新收的行分错栏目。把 3 行拿部署构建重算：`Research`、置信度 0.72-0.83，没错。
+
+真问题在 `/summary`：它自己抄了一份序数解析，只认**裸的**「一..十」，而自然语言那半边
+（`search._index_from`）认「第…条」。于是：
+
+```
+第二条 / 第三条 / 第十一条  ->  命令：None（回用法提示）    自然语言：2 / 3 / 11
+第2条                       ->  命令：新闻编号 2              自然语言：第 2 条
+```
+
+`/summary` 的提示语原文是「也可以先 /news，再直接说『第二条详细说说』」——它教的那种说法，
+自己在命令里不通。`store.nth` 也说明这不是理论问题：列表会记住 20 条（日报）甚至 30 条，
+「第二十条」是一句真话，而旧表连 二十 都不认。
+
+改法：序数解析只留一份。`app/services/search.py` 导出 `ordinal_to_int`（先整串匹配
+「第?N条?」，再句内搜「第N条」，数字走 `int`，中文走新的 `_cn_to_int` 覆盖 一..九十九），
+`_index_from` 与 `/summary` 的 `_resolve_id` 都改成调它，`_resolve_id` 里那份 digits 表删掉。
+顺带修了顺序 bug：带「第/条」壳的输入先按序数读，否则 `第2条` 会被抓成新闻编号 2。
+
+两处我自己制造的测试问题（不写出来就等于没发生）：
+1. 变异 P1（把「第/条」分支去掉）起初 **NOT CAUGHT**——因为 `seeded[1]` 恰好等于 2，
+   「第2条 被当成编号 2」这条断言永远为真。换成 90001.. 的合成 id 之后 P1 立刻被抓到
+   （`assert 2 == 90002`）。这是本仓库第二次踩"小 id 撞上小序号"，已经当成惯例记住。
+2. 我一开始给测试写了「第二十条 → 20」的期望，两个解析器其实都不认 二十。我先怀疑是测试
+   越界，查了 `store.nth` 与 `/news`、`/日报` 的列表长度（20/30）才确认这是**真缺口**，
+   于是把 `_cn_to_int` 写成完整的 一..九十九，而不是把断言削矮。
+
+线上验证（部署构建，读生产库的真实 20 条列表，不发任何消息）：
+
+```
+第三条 -> 1394 OK      第3条 -> 1394 OK      第十一条 -> 1377 OK
+第十九条 -> 1371 OK    第二十条 -> 1368 OK   第三条详细说说 -> 1394 OK
+```
+
+3 个新用例函数（参数化那条 13 个短语）＝新增 16 条，583 → **599**；变异 P1/P2/P3 全部 CAUGHT。
+全量 Windows 与 anr-jump Linux/UTC 均 `exit=0`；两台 `stamp=20260929T123601Z`、`service=active`，
+`tree=429a1a89d628f033e017ce6f6bd0e408` 三台一致；`app.log` 0 条 Traceback。

@@ -396,7 +396,7 @@ def rule_intent(text: str, recent: list[dict[str, Any]]) -> dict[str, Any]:
     index = None
     match = re.search(r"第\s*([0-9一二三四五六七八九十]+)\s*[条个]?", text or "")
     if match:
-        index = _to_int(match.group(1))
+        index = ordinal_to_int(match.group(1))
     if any(k in lowered for k in ("summary", "详细", "深度", "分析")) and index:
         return {"intent": "summarize", "query": "", "days": 14, "index": index}
     asks = any(k in text for k in _QUESTION_MARKERS)
@@ -421,24 +421,56 @@ def rule_intent(text: str, recent: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _index_from(value: Any, text: str, recent: list[ArticleView] | None) -> int | None:
-    if isinstance(value, int) and value > 0:
-        return value
-    match = re.search(r"第\s*([0-9一二三四五六七八九十]+)\s*[条个]?", text or "")
-    if match:
-        return _to_int(match.group(1))
-    return None
+    index = ordinal_to_int(value)
+    if index:
+        return index
+    return ordinal_to_int(text)
 
 
-def _to_int(value: str) -> int | None:
-    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_BARE_ORDINAL = re.compile(r"^\s*第?\s*([0-9]+|[一二三四五六七八九十]+)\s*[条个篇则]?\s*$")
+_INLINE_ORDINAL = re.compile(r"第\s*([0-9一二三四五六七八九十]+)\s*[条个篇则]?")
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_to_int(text: str) -> int | None:
+    """一..九十九（含 十 / 十一 / 二十 / 三十五）；别的写法返回 None。
+
+    旧表只到 十，外加一条 十一..十九 的特例。可列表本身会记住 20 条、30 条
+    （`/日报` 20 条、`/news` 放宽时 30 条），所以「第二十条」是一句真会说的话，
+    以前被读成"没听懂"。
+    """
+    if text in _CN_DIGITS:
+        return _CN_DIGITS[text]
+    if "十" not in text:
+        return None
+    left, _, right = text.partition("十")
+    if (left and left not in _CN_DIGITS) or (right and right not in _CN_DIGITS):
+        return None
+    tens = _CN_DIGITS[left] if left in _CN_DIGITS else 1
+    return tens * 10 + (_CN_DIGITS[right] if right in _CN_DIGITS else 0)
+
+
+def ordinal_to_int(value: Any) -> int | None:
+    """`三` / `第三条` / `12` / `第十一条详细说说` -> 3 / 3 / 12 / 11.
+
+    One implementation for two callers. Before this, the natural-language path had
+    this parser and `/summary` had its own copy that knew only a bare 一..十 - so
+    `/summary 第三条`, the very phrasing the bot's own hint text teaches, fell back
+    to a usage message, and anything above 十 was unreachable from the command.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
     text = str(value or "").strip()
+    if not text:
+        return None
+    match = _BARE_ORDINAL.match(text) or _INLINE_ORDINAL.search(text)
+    if match:
+        text = match.group(1).strip()
     if text.isdigit():
         return int(text)
-    if text in digits:
-        return digits[text]
-    if text.startswith("十") and len(text) == 2 and text[1] in digits:
-        return 10 + digits[text[1]]
-    return None
+    return _cn_to_int(text)
 
 
 def _views(session, articles) -> list[ArticleView]:

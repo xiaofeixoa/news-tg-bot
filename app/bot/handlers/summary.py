@@ -14,7 +14,7 @@ from app.config import AppConfig
 from app.logging_setup import get_logger
 from app.services import format as fmt
 from app.services.news import NewsService
-from app.services.search import SearchService
+from app.services.search import SearchService, ordinal_to_int
 
 log = get_logger("telegram")
 router = Router(name="summary")
@@ -47,13 +47,23 @@ async def cmd_summary(message: Message, command: CommandObject, news: NewsServic
 
 
 def _resolve_id(chat_id: int, argument: str | None) -> int | None:
-    if not argument:
+    """`/summary 123`、`#123`、`第三条`、`第三条详细说说` -> 那条新闻的 id.
+
+    This used to carry its own copy of the ordinal table, holding only a bare
+    一..十, so the phrasing the bot's own hint teaches (`/summary 第二条`) was
+    answered with a usage message. `ordinal_to_int` is the natural-language path's
+    parser and now the single source here too.
+    """
+    text = str(argument or "").strip()
+    if not text:
         return None
-    text = argument.strip()
-    match = re.search(r"#?(\d{1,9})", text)
-    if match:
-        return int(match.group(1))
-    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-    if text in digits:
-        return store.nth(chat_id, digits[text])
-    return None
+    # 有序数词壳子（第/条/个）就按"列表里的第几条"读，`第2条` 是第二条而不是 2 号新闻；
+    # 裸数字和 `#123` 才是新闻编号。旧写法先抓数字，`第2条` 会被当成 id=2。
+    if text.startswith("第") or re.search(r"[条个篇则]", text):
+        index = ordinal_to_int(text)
+        return store.nth(chat_id, index) if index else None
+    direct = re.search(r"#?(\d{1,9})", text)
+    if direct:
+        return int(direct.group(1))
+    index = ordinal_to_int(text)
+    return store.nth(chat_id, index) if index else None
