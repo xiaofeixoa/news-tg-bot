@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 685 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 690 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3211,3 +3211,73 @@ jump 全 0），`is-active` 两台 true，vps 1771 条 / 近 24 小时 18 条已
 `/etc/ai-news-radar/env` 里 `DATABASE_URL` 定义了两次（第 22 行 `sqlite:///data/news.db` 相对路径、
 第 60 行绝对路径）。systemd 取后者所以现在没问题，但任何**人**用 `grep | cut` 取这个键都会拿到两行——
 包括脚本和我。删掉第 22 行那一行即可，需要他说"改"我再动。
+
+### v1.71 我们自己的 GitHub 配额用完，被数成了"源故障"
+`scripts/log_incidents.py --since 12` 在 VPS 上一跑，最大的两类噪音都不是源坏了：
+
+```
+▸ WARNING collector GitHub Releases failed: GitHub API 匿名配额只有 60 次/小时，已用完…
+  次数 59 · 首次 09-26 07:58 · 最近 09-30 23:44
+▸ WARNING collector Coding Agent Releases failed: …同一句…
+  次数 61
+▸ WARNING source GitHub Releases failed (1): …同一句…       ← 同一件事的第二行
+▸ WARNING collector errors: …同一句…                        ← 第三行
+合计 132 次配额事件（Trending 12 + Releases 59 + Coding Agent 61）
+```
+
+这就是 v1.68 那个 bug 的孪生兄弟，只是主角从"对方要求降速"换成"我们自己没预算了"：
+`GitHubCollector` 在预检、403、403 之后复查、逐仓库 release 四处 `raise CollectorError(配额已用完)`，
+管道看见任何 `CollectorError` 就一律记一次失败 → `error_count += 1` + 三行 WARNING。
+**一个没有 `GITHUB_TOKEN` 的普通小时，三个本来健康的源就会被 `/stats` 报成"刚抖了一下"。**
+量级上也确实还没炸过：全日志里 GitHub 源出现在 `has failed N times in a row` 的次数是 **0**——
+纯粹因为配额窗口总在 6 轮之内恢复，只要有一次超过一小时，它们就会被点亮成"持续失败"。
+
+- `app/collectors/base.py` 新增 `SourceBudget(SourceCooling)`：注释里写清它和
+  `SourceCooling` 是同一族（"这一轮按安排什么都不问"，且会在某个时刻自己打开），
+  区别只是等的是**我们**的配额而不是对方的 `Retry-After`。因为是子类，管道的
+  `except SourceCooling` 一行不改就接住了它——记进 `stats.skipped`、轮末 `waiting=N`、
+  `note_source_cooldown()` 只写 `last_error`，**不碰 `error_count`**。
+- GitHub 的四处抛错改 `raise SourceBudget(...)`；`test_github.py` 里那三处原本只断言
+  `CollectorError` 的用例收紧成 `SourceBudget`（子类，所以旧断言仍成立，新断言才钉住接线）。
+- `/来源` 补上"看得见"这一半：配额状态存在 `data/github_rate.json` 而不是退避表里，
+  所以 `wait_left=0`，光靠 v1.69 那套旗子这三个源会是"🟢 但这一轮什么都没带回来"。
+  现在规则是 **0 次连击 + 不等待 + `last_error` 非空 → 必然是一次推迟**（真实失败会被下一次
+  成功清空），于是这一行显示「这一轮没有去问它：GitHub API 匿名配额…（约 N 分钟后恢复）」，
+  旗子仍是 🟢。`⚪️ 已关闭` 提前返回，不编造这句话。
+
+测试：685 → **690 passed**（+5：管道端到端 6 轮仍 0 连击、面板"静默推迟"两种情形、
+两处 `get()` 直连用例）。7 处反向验证**全部 CAUGHT**——但过程比结果值得记：
+第一轮 `M1 预检(212)`、`M2 403(231)`、`M7 复查后(226)` 三处退回普通 `CollectorError` 都
+**SURVIVED**，原因是 `mode: releases` 的外层循环（471）本来就会把任何异常重抛成
+`SourceBudget`，管道根本看不见里面那三处。补了两条**直接调 `collector.get()`** 的用例
+（预检与 403 一条、`/rate_limit` 复查确认一条）之后，四处抛错点各自被抓：
+M1/M2 → 新直连用例，M6 → 管道用例 + `test_no_http_calls_are_made_while_blocked`，
+M7 → 复查直连用例；`M3` 拆父子类 → 管道用例；`M4` 删面板说明分支 → 面板用例；
+`M5` 让 ⚪️ 落到说明分支 → 关闭源用例。教训一句话：**被外层兜住的分类，只有从被兜的
+那一层外面测才算测到**——和 v1.68 那次"端到端才抓住接线"是同一课的第二次。
+
+改动测试文件的地方：`tests/test_github.py` 三处原本只断言 `CollectorError` 的配额用例
+收紧成 `SourceBudget`（子类，旧断言仍成立），并新增两条直连 `get()` 的用例；
+`tests/test_sources.py` 新增 1 条管道端到端 + 2 条面板用例（共 3 条，其中关闭源那条是
+把原来的单行断言扩成"旗子 ⚪️ 且不带任何说明行"两条断言）。
+
+线上验证见本节末。
+
+线上验证（VPS，00:55 部署后）：这一小时的配额恰好还在，所以真实一轮里三处都是
+`collect[github] done: fetched=36 stored=2 … errors=0`、`0 failing / 0 blip / 1 parked`——
+**没有配额事件可以展示，就不能说"部署后已验证"**。于是用真实代码在 /tmp 里跑了端到端
+（自己的 sqlite 与 DATA_DIR，`_rate` 钉成已用尽，预检先抛错所以零网络请求）：
+
+```
+第 6 轮末： fetched=0 stored=0 dup=0 blocked=0 errors=0 waiting=1
+账本：error_count=0 last_error=GitHub API 匿名配额只有 60 次/小时，已用完；…
+/来源 会显示：🟡 <i>这一轮没有去问它：GitHub API 匿名配额…（约 40 分钟后恢复）</i>
+```
+
+同样在这条探针里，上一轮的 v1.70 自己响了：`数据库是这次启动才新建的：/tmp/anr-budget-probe/t.db（4 KB）…`
+——一个新库被新建时不再安静通过，这正是它该有的行为。
+另外顺带采到一条真实的 v1.68/69 样本：`collector OpenAI waiting: https://openai.com/news/rss.xml ->
+源服务器要求降速，还剩 352 分钟再试`（OpenAI 的 RSS 也被挂了 6 小时的退避）。
+
+等下一次真的进入配额窗口时，可 grep 的是：`collect[github] done … waiting=3` 而不是
+`errors=3`，且 `collector errors:` 那行不再出现配额句子。

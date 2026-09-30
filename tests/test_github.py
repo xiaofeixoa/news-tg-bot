@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 import yaml
 
-from app.collectors.base import CollectorError
+from app.collectors.base import CollectorError, SourceBudget, SourceCooling
 from app.collectors.github import GitHubCollector
 
 
@@ -202,10 +202,11 @@ async def test_no_http_calls_are_made_while_blocked(monkeypatch):
     monkeypatch.setattr("app.collectors.base.BaseCollector.get", spy)
     collector = GitHubCollector({"name": "Coding Agent Releases", "type": "github",
                                  "mode": "releases", "repositories": ["a/b", "c/d"]})
-    with pytest.raises(CollectorError) as exc:
+    with pytest.raises(SourceBudget) as exc:
         await collector._releases()
     assert calls == []
     assert "GITHUB_TOKEN" in str(exc.value)
+    assert isinstance(exc.value, SourceCooling), "预检要作为本轮跳过进入管道的分支"
 
 
 async def test_a_403_with_zero_remaining_surfaces_instead_of_looking_empty(monkeypatch):
@@ -222,7 +223,7 @@ async def test_a_403_with_zero_remaining_surfaces_instead_of_looking_empty(monke
     monkeypatch.setattr("app.collectors.base.BaseCollector.get", rate_limited)
     collector = GitHubCollector({"name": "Coding Agent Releases", "type": "github",
                                  "mode": "releases", "repositories": ["zai-org/ZCode"]})
-    with pytest.raises(CollectorError) as exc:
+    with pytest.raises(SourceBudget) as exc:
         await collector._releases()
     assert "配额" in str(exc.value)
     assert github._rate["remaining"] == 0
@@ -249,14 +250,14 @@ async def test_a_raised_403_still_teaches_the_guard(monkeypatch):
     github.GitHubCollector._spent_checked_at = 0.0
     collector = GitHubCollector({"name": "Coding Agent Releases", "type": "github",
                                  "mode": "releases", "repositories": ["zai-org/ZCode"]})
-    with pytest.raises(CollectorError) as exc:
+    with pytest.raises(SourceBudget) as exc:
         await collector._releases()
     assert "GITHUB_TOKEN" in str(exc.value)
     assert any(url.endswith("/rate_limit") for url in calls)
     assert github.rate_block_reason()          # remembered for the rest of the window
 
     before = len(calls)
-    with pytest.raises(CollectorError):
+    with pytest.raises(SourceBudget):
         await collector._releases()
     assert len(calls) == before, "the second round must not probe GitHub again"
 
@@ -474,3 +475,72 @@ async def test_the_released_nothing_answer_expires(monkeypatch):
         timespec="seconds")
     await collector.fetch()
     assert len(asked) == 2, "an expired 404 has to be asked again"
+
+
+async def test_the_confirmed_spent_quota_is_a_scheduled_skip_too(monkeypatch):
+    """`_releases()` 循环会重抛一次，所以管道看到的是那处的类型。
+
+    少了这条直连 `get()` 的用例，226 那处（`base.get()` 把 403 的响应头丢了、
+    我们改问 `/rate_limit` 确认）退回普通 `CollectorError` 也能全绿——反向验证
+    真的抓到了这个洞。
+    """
+    import time as _time
+
+    from app.collectors import github
+    from app.collectors.base import SourceCooling
+
+    calls = []
+
+    async def explode(self, url, **kwargs):
+        calls.append(url)
+        if url.endswith("/rate_limit"):
+            return Resp({"resources": {"core": {"remaining": 0,
+                                                 "reset": _time.time() + 600}}},
+                        status=200, headers={"x-ratelimit-remaining": "0"})
+        raise CollectorError(f"{url} -> HTTP 403")
+
+    monkeypatch.setattr("app.collectors.base.BaseCollector.get", explode)
+    github._rate.update({"remaining": None, "reset": 0.0})
+    github.GitHubCollector._spent_checked_at = 0.0
+    collector = GitHubCollector({"name": "GitHub Releases", "type": "github",
+                                 "mode": "releases", "repositories": ["a/b"]})
+    with pytest.raises(SourceBudget) as exc:
+        await collector.get("https://api.github.com/search/repositories?q=llm&per_page=5")
+    assert isinstance(exc.value, SourceCooling), "管道的接线靠的就是这个父子关系"
+    assert any(url.endswith("/rate_limit") for url in calls), calls
+
+
+async def test_the_precheck_and_the_403_answer_are_both_scheduled_skips(monkeypatch):
+    """`_releases()` 会重抛一次，所以 212 与 231 这两处也得直接问 `get()`。
+
+    反向验证里它们第一次是"逃过去"的（改动退回 CollectorError 依旧全绿），
+    补上这两条才各自被抓到。
+    """
+    import time as _time
+
+    from app.collectors import github
+
+    calls = []
+
+    async def spy(self, url, **kwargs):
+        calls.append(url)
+        raise AssertionError("预检已判定配额用尽，不该再碰网络")
+
+    monkeypatch.setattr("app.collectors.base.BaseCollector.get", spy)
+    github._rate.update({"remaining": 0, "reset": _time.time() + 900})
+    collector = GitHubCollector({"name": "GitHub Releases", "type": "github",
+                                 "mode": "releases", "repositories": ["a/b"]})
+    with pytest.raises(SourceBudget) as exc:
+        await collector.get("https://api.github.com/repos/a/b/releases")
+    assert calls == []
+    assert "分钟后恢复" in str(exc.value), exc.value
+
+    async def forbidden(self, url, **kwargs):
+        return Resp({"message": "API rate limit exceeded"}, status=403,
+                    headers={"x-ratelimit-remaining": "0",
+                             "x-ratelimit-reset": str(_time.time() + 900)})
+
+    monkeypatch.setattr("app.collectors.base.BaseCollector.get", forbidden)
+    github._rate.update({"remaining": None, "reset": 0.0})
+    with pytest.raises(SourceBudget):
+        await collector.get("https://api.github.com/repos/a/b/releases")

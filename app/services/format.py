@@ -527,6 +527,13 @@ def source_state_flag(state: dict[str, Any], *, enabled: bool = True,
         flag = "🟢" if succeeded else "🟡"
     if wait_left > 0:
         parts.append(f"正在按对方要求降速，约 {max(1, int(wait_left / 60))} 分钟后再问")
+    elif not errors:
+        # 只剩这一种情况会写 `last_error` 而不涨连击：我们自己这轮没去问（守对方的
+        # Retry-After，或 GitHub 匿名配额已用完）。真实失败会被下一次成功清掉，
+        # 所以"0 次失败 + 有一句错误"必然是一次推迟，说成说明而不是红灯。
+        note = plain(str(state.get("last_error") or ""), 160)
+        if note:
+            parts.append(f"这一轮没有去问它：{note}")
     return flag, ("   <i>" + "；".join(parts) + "</i>" if parts else "")
 
 

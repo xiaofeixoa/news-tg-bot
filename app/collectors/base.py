@@ -47,6 +47,20 @@ class SourceCooling(CollectorError):
     """
 
 
+class SourceBudget(SourceCooling):
+    """Our own request budget for this host is spent, so this round asks nothing.
+
+    Same shape as `SourceCooling` - a scheduled skip that opens again on a clock - but
+    caused by a quota we hold, not an instruction from the host. Measured 2026-10-01 on
+    the live box: 132 lines of "GitHub API 匿名配额…已用完" in the retained logs (61 for
+    Coding Agent Releases, 59 for GitHub Releases, 12 for Trending), each one logged at
+    WARNING three times over *and* added to `sources.error_count`, so a normal hour
+    without a `GITHUB_TOKEN` reports three healthy feeds as blipping. No GitHub source
+    has reached the 持续失败 bar yet (0 of them appear in any "has failed N times in a
+    row" line) - only because the window always clears before six rounds.
+    """
+
+
 def describe_error(exc: BaseException, url: str = "") -> str:
     """Transport exceptions often stringify to '' - keep class name and URL.
 

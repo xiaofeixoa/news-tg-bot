@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from app.collectors.base import BaseCollector, CollectorError, register
+from app.collectors.base import BaseCollector, CollectorError, SourceBudget, register
 from app.config import as_float, as_int
 from app.logging_setup import get_logger
 from app.processing.normalize import clean_text, to_utc_naive
@@ -209,7 +209,7 @@ class GitHubCollector(BaseCollector):
         """
         blocked = rate_block_reason(self.config)
         if blocked:
-            raise CollectorError(blocked)
+            raise SourceBudget(blocked)
         key = self._cache_key(url, kwargs.get("params"))
         entry = load_etags(self.config).get(key) if key else None
         if isinstance(entry, dict) and entry.get("etag"):
@@ -223,12 +223,12 @@ class GitHubCollector(BaseCollector):
             # exactly what tells us the quota is gone. /rate_limit is unmetered,
             # so ask it instead of guessing.
             if await self._confirm_spent(str(exc)):
-                raise CollectorError(rate_block_reason(self.config) or RATE_HINT) from exc
+                raise SourceBudget(rate_block_reason(self.config) or RATE_HINT) from exc
             raise
         note_rate(getattr(response, "headers", None))
         status = getattr(response, "status_code", 200)
         if status == 403 and _rate["remaining"] == 0:
-            raise CollectorError(rate_block_reason(self.config) or RATE_HINT)
+            raise SourceBudget(rate_block_reason(self.config) or RATE_HINT)
         if status == 304 and isinstance(entry, dict) and entry.get("body"):
             _stats["not_modified"] += 1
             return CachedResponse(entry["body"], getattr(response, "headers", None))
@@ -468,7 +468,7 @@ class GitHubCollector(BaseCollector):
                 response = await self.get(url, headers=self._headers(), attempts=2)
             except Exception as exc:  # 404 = the repo has no releases: skip it
                 if rate_block_reason(self.config):
-                    raise CollectorError(rate_block_reason(self.config)) from exc
+                    raise SourceBudget(rate_block_reason(self.config)) from exc
                 if _looks_like_missing(str(exc)):
                     self._mark_empty(url)
                 log.debug("no latest release for %s: %s", name, exc)

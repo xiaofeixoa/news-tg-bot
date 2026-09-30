@@ -502,13 +502,69 @@ def test_a_blip_we_are_now_parked_on_says_both_once():
 
 
 def test_a_disabled_source_is_never_shown_as_broken():
-    assert _flag(9, last_error="HTTP 403", enabled=False)[0] == "⚪️"
+    """⚪️ 提前返回：即便关着时 `last_error` 还留着，也不编造一句"这一轮没去问"。"""
+    flag, note = _flag(0, last_error="HTTP 403", enabled=False)
+    assert flag == "⚪️" and note == "", (flag, note)
 
 
 def test_never_contacted_source_stays_yellow_while_waiting():
     flag, note = _flag(wait_left=300, succeeded=False, last_error="…降速…")
     assert flag == "🟡", flag
     assert "降速" in note, note
+
+
+
+
+# --------------------------- 我们自己的配额用完，也不是源坏了（GitHub 匿名 60/小时）
+@pytest.mark.asyncio
+async def test_an_exhausted_github_budget_is_not_a_source_failure(session, monkeypatch):
+    """线上实测（`scripts/log_incidents.py --since 12`）：一句"匿名配额已用完"
+
+    在保留窗口里打了 132 次（Coding Agent 61 / GitHub Releases 59 / Trending 12），
+    每次还三行 WARNING，并且 `error_count += 1`——没有 GITHUB_TOKEN 的普通一小时，
+    三个本来健康的源就会被 `/stats` 报成"刚抖了一下"。
+    """
+    import time as _time
+
+    from app.collectors import github
+    from app.collectors.github import GitHubCollector
+    from app.logging_setup import reset_warned_once
+    from app.processing.pipeline import collect
+
+    reset_warned_once()
+    repo.get_or_create_source(session, "Coding Agent Releases", type_="github",
+                              url="https://api.github.com/repos/a/b/releases",
+                              quality="B", enabled=True)
+    session.commit()
+    monkeypatch.setattr(github, "_rate", {"remaining": 0, "reset": _time.time() + 1800})
+    collector = GitHubCollector({"name": "Coding Agent Releases", "type": "github",
+                                 "mode": "releases", "repositories": ["a/b"]})
+    pipeline_log = __import__("app.processing.pipeline", fromlist=["log"]).log
+    with _Capture(pipeline_log) as cap, _Capture(repo.log):
+        for _ in range(6):                      # 旧逻辑：6 轮就能点亮"持续失败"
+            stats = await collect(session, [collector], config=get_config(), llm=None)
+            session.commit()
+
+    assert stats.errors == [], stats
+    assert len(stats.skipped) == 1 and "waiting=1" in str(stats), stats
+    row = _source_row(session, "Coding Agent Releases")
+    assert (row.error_count or 0) == 0, f"我们自己的配额被数成了源故障：{row.error_count}"
+    assert "配额" in (row.last_error or ""), row.last_error
+    assert [m for lvl, m in cap.records if lvl in ("WARNING", "ERROR")] == [], cap.records
+    said = [m for _l, m in cap.records if m.startswith("collector Coding Agent")]
+    assert len(said) == 1, f"同一件事每轮重播：{said}"
+
+
+def test_a_quiet_skip_is_explained_rather_than_flagged():
+    """等待表里没有它（配额在另一个文件里），但 `last_error` 说明了为什么这一轮没货。"""
+    flag, note = _flag(last_error="GitHub API 匿名配额只有 60 次/小时，已用完（约 5 分钟后恢复）")
+    assert flag == "🟢", (flag, note)
+    assert "这一轮没有去问它" in note and "配额" in note, note
+    assert "失败" not in note, note
+
+
+def test_a_source_that_answered_carries_no_note():
+    assert _flag() == ("🟢", "")
 
 
 @pytest.mark.asyncio
