@@ -120,12 +120,44 @@ def test_status_line_shows_the_disk_with_a_direction():
 def test_the_countdown_appears_only_while_the_disk_is_shrinking():
     from app.services import format as fmt
 
-    falling = fmt.disk_line({"disk_free_mb": 1818, "disk_24h_delta_mb": -180,
-                             "disk_days_left": 10.1})
+    falling = fmt.disk_line({"disk_free_mb": 1818, "disk_delta_mb": -180,
+                             "disk_span_hours": 24.0, "disk_days_left": 10.1})
     assert "-180MB" in falling and "约 10.1 天写满" in falling, falling
-    rising = fmt.disk_line({"disk_free_mb": 1818, "disk_24h_delta_mb": 611})
+    assert "最近 24 小时" in falling, falling
+    rising = fmt.disk_line({"disk_free_mb": 1818, "disk_delta_mb": 611,
+                            "disk_span_hours": 24.0})
     assert "+611MB" in rising and "没有在变少" in rising, rising
     assert "写满" not in rising, rising        # 轮转把 1GB 放回来那天，别报倒计时
+
+
+def test_a_short_window_is_called_by_its_real_length_and_gets_no_countdown():
+    """真机 2026-10-01：9 个点只跨 4.27 小时，行里却写着"最近 24h -58MB，约 5.4 天写满"。
+
+    那两个数字互相反悔：1758 ÷ 58 = 30 天，而 5.4 天是把 4 小时斜率放大成一天速率算的。
+    所以窗口要写真实跨度，跨度不满半天就不该给"还剩几天"。
+    """
+    from app.services import format as fmt
+
+    short = fmt.disk_line({"disk_free_mb": 1758, "disk_delta_mb": -58,
+                           "disk_span_hours": 4.3, "disk_days_left": None})
+    assert "最近 4.3 小时" in short and "24" not in short, short
+    assert "还不够算" in short and "写满" not in short, short
+    assert "-58MB" in short, short
+    # 反过来：跨度满 24 小时才配得上那句"最近 24 小时"
+    full = fmt.disk_rate({"disk_delta_mb": -58, "disk_span_hours": 24.0, "disk_days_left": 25.5})
+    assert full.startswith("最近 24 小时") and "约 25.5 天写满" in full, full
+
+
+def test_the_maintenance_log_and_stats_say_the_disk_in_one_implementation():
+    """两处各写一遍"最近 24h"，修一处就会漏一处——措辞本来已经漂成两个版本了。"""
+    from app.services import format as fmt
+
+    stats = {"disk_free_mb": 1758, "disk_delta_mb": -58, "disk_span_hours": 4.3,
+             "disk_days_left": None}
+    line = fmt.disk_line(stats)
+    note = fmt.disk_rate(stats)
+    assert note in line, (line, note)
+    assert "24h 方向未知" not in line, "旧的那份措辞只能存在于被删掉的那一半里"
 
 
 def _disk_service(tmp_path, monkeypatch):
@@ -137,19 +169,25 @@ def _disk_service(tmp_path, monkeypatch):
     return NewsService(get_config())
 
 
-def test_a_trend_needs_two_points_at_least_an_hour_apart(tmp_path, monkeypatch):
+def test_a_trend_needs_two_points_and_half_a_day_for_a_countdown(tmp_path, monkeypatch):
     from app.services.news import NewsService
 
     svc = _disk_service(tmp_path, monkeypatch)
     now = 1_800_000_000.0
-    assert svc.disk_trend(at=now) == (None, None)
+    assert svc.disk_trend(at=now) == (None, None, None)
     svc.record_disk_sample(free_mb=1000, at=now)
-    assert svc.disk_trend(at=now) == (None, None), "只有一个点时不能编出方向"
+    assert svc.disk_trend(at=now) == (None, None, None), "只有一个点时不能编出方向"
     svc.record_disk_sample(free_mb=997, at=now + 60)
-    assert svc.disk_trend(at=now + 60) == (None, None), "一分钟的抖动不是趋势"
+    assert svc.disk_trend(at=now + 60) == (None, None, None), "一分钟的抖动不是趋势"
     svc.record_disk_sample(free_mb=980, at=now + 7200)
-    delta, days = svc.disk_trend(at=now + 7200)
-    assert delta == -20 and days and days > 0, (delta, days)
+    delta, days, span = svc.disk_trend(at=now + 7200)
+    assert delta == -20 and span == 2.0, (delta, days, span)
+    assert days is None, "2 小时的斜率不是「每天」的速率，不该换来一个倒计时"
+    svc.record_disk_sample(free_mb=940, at=now + 20 * 3600)
+    delta, days, span = svc.disk_trend(at=now + 20 * 3600)
+    assert delta == -60 and span == 20.0 and days and days > 0, (delta, days, span)
+    # 天数必须真的等于"余量 ÷ 放大到一天的速率"，不能是一个印上去就像对的数
+    assert abs(days - 940 / (60 * 86400 / (20 * 3600))) < 0.2, days
 
 
 def test_a_disk_that_rolled_back_upwards_gets_no_countdown(tmp_path, monkeypatch):
@@ -157,8 +195,8 @@ def test_a_disk_that_rolled_back_upwards_gets_no_countdown(tmp_path, monkeypatch
     now = 1_800_000_000.0
     svc.record_disk_sample(free_mb=769, at=now)
     svc.record_disk_sample(free_mb=1818, at=now + 20 * 3600)
-    delta, days = svc.disk_trend(at=now + 20 * 3600)
-    assert delta == 1049 and days is None, (delta, days)
+    delta, days, span = svc.disk_trend(at=now + 20 * 3600)
+    assert delta == 1049 and days is None and span == 20.0, (delta, days, span)
 
 
 def test_the_history_keeps_only_the_window_it_is_asking_about(tmp_path, monkeypatch):
@@ -168,7 +206,7 @@ def test_the_history_keeps_only_the_window_it_is_asking_about(tmp_path, monkeypa
     svc.record_disk_sample(free_mb=480, at=now + 30 * 3600)
     left = svc._disk_samples(now + 30 * 3600)
     assert left == [[now + 30 * 3600, 480]], left
-    assert svc.disk_trend(at=now + 30 * 3600) == (None, None), "孤点不该算趋势"
+    assert svc.disk_trend(at=now + 30 * 3600) == (None, None, None), "孤点不该算趋势"
 
 
 @pytest.mark.parametrize("body", ["", "not json", "{}", '[["x"]]', "[[1,2,3]]", "[null]"])
@@ -177,7 +215,7 @@ def test_a_broken_history_costs_a_rate_not_a_page(tmp_path, monkeypatch, body):
 
     svc = _disk_service(tmp_path, monkeypatch)
     (tmp_path / "disk_history.json").write_text(body, encoding="utf-8")
-    assert svc.disk_trend(at=1_800_000_000.0) == (None, None)
+    assert svc.disk_trend(at=1_800_000_000.0) == (None, None, None)
     assert svc.record_disk_sample(free_mb=900, at=1_800_000_000.0) is True
     assert NewsService(get_config()).stats()["disk_free_mb"] > 0, "读历史不能拖垮 stats()"
 
@@ -191,8 +229,8 @@ async def test_the_health_line_carries_the_disk_direction(session, monkeypatch):
     config = AppConfig(settings=get_config().settings, raw={}, sources=[])
     jobs = jobs_mod.NewsJobs(config)
     monkeypatch.setattr(NewsService, "stats", lambda self: {
-        "total_articles": 900, "disk_free_mb": 1818, "disk_24h_delta_mb": -180,
-        "disk_days_left": 10.1})
+        "total_articles": 900, "disk_free_mb": 1818, "disk_delta_mb": -180,
+        "disk_span_hours": 24.0, "disk_days_left": 10.1})
     recorded: list = []
     monkeypatch.setattr(NewsService, "record_disk_sample",
                         lambda self, *, free_mb=None, at=None: recorded.append(free_mb) or True)
@@ -202,7 +240,7 @@ async def test_the_health_line_carries_the_disk_direction(session, monkeypatch):
     await jobs.run_maintenance()
     assert recorded == [1818], recorded          # 每一轮都要把点记下来
     line = [i for i in info if i.startswith("health check:")][0]
-    assert "1818MB free" in line and "最近 24h -180MB" in line, line
+    assert "1818MB free" in line and "最近 24 小时 -180MB" in line, line
     assert "约 10.1 天写满" in line, line
     # 这一行是整套系统最常被 grep 的一行，括号样式不能长歪（第一版就写出了
     # `（24h 方向未知）(告警线 …` 这种双重括号 + 双空格）。
@@ -226,7 +264,7 @@ async def test_an_unknown_direction_is_admitted_not_guessed(session, monkeypatch
                         lambda *a, **k: info.append(str(a[0]) % a[1:] if a else str(a[0])))
     await jobs.run_maintenance()
     line = [i for i in info if i.startswith("health check:")][0]
-    assert "24h 方向未知" in line and "写满" not in line, line
+    assert "方向还不知道（样本不够）" in line and "写满" not in line, line
 
 
 def test_stats_reports_the_free_space_it_is_running_on(session, tmp_path):

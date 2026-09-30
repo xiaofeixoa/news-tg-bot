@@ -597,6 +597,30 @@ def status_line(stats: dict[str, Any]) -> str:
     )
 
 
+def disk_rate(stats: dict[str, Any]) -> str:
+    """磁盘"方向"的那句话——`/stats` 与维护日志共用一份。
+
+    以前两处各写一份，连措辞都不一样（"24h 方向未知" vs "24h 方向还不知道（样本不够）"），
+    而两边都把窗口写成"最近 24h"。可 2026-10-01 真机只有 9 个点、跨 4.27 小时：
+    同一行里"-58MB"是 4 小时的净变化，"约 5.4 天写满"又是把它放大成一天速率算的——
+    两个印在一起的数字互相反悔（读者拿 1758÷58 会算出 30 天，然后以为坏了）。
+    所以窗口按实际跨度写，天数只在样本够长（≥12 小时）时才给。
+    """
+    delta = stats.get("disk_delta_mb")
+    span = stats.get("disk_span_hours")
+    days = stats.get("disk_days_left")
+    if delta is None:
+        return "方向还不知道（样本不够）"
+    window = ("最近 24 小时" if (span or 0) >= 23
+              else "最近 %s 小时" % ("%.1f" % span if span else "?"))
+    if delta >= 0:
+        return "%s %s%dMB，没有在变少" % (window, "+" if delta else "±", abs(int(delta)))
+    if days:
+        return "%s %dMB，照这个速度约 %s 天写满" % (window, int(delta), days)
+    return "%s %dMB，在变少；样本只跨 %s 小时，还不够算「还剩几天」" % (
+        window, int(delta), "%.1f" % span if span else "?")
+
+
 def disk_line(stats: dict[str, Any], config: AppConfig | None = None) -> str:
     """磁盘：数字 **和方向**。只给"剩多少"会被读成倒计时，也会被读成没事。
 
@@ -608,16 +632,7 @@ def disk_line(stats: dict[str, Any], config: AppConfig | None = None) -> str:
         return ""
     free = int(free)
     threshold = int((config or get_config()).get("alerts.min_free_mb", 1024))
-    delta = stats.get("disk_24h_delta_mb")
-    days = stats.get("disk_days_left")
-    if delta is None:
-        rate = " · 24h 方向还不知道（样本不够）"
-    elif delta >= 0:
-        rate = f" · 最近 24h {'+' if delta else '±'}{delta}MB（没有在变少）"
-    else:
-        rate = f" · 最近 24h {delta}MB"
-        if days:
-            rate += f" → 照这个速度约 {days} 天写满"
+    rate = " · " + disk_rate(stats)
     if free > threshold:
         return f"\n💾 磁盘：剩 {free}MB{rate}"
     return (f"\n⚠️ 磁盘只剩 {free / 1024:.1f}GB（低于 {threshold / 1024:.0f}GB 告警线）{rate}，"

@@ -30,6 +30,7 @@ from app.database.database import database_is_fresh, session_scope
 from app.database.models import Article, User
 from app.logging_setup import get_logger, warn_once
 from app.processing.pipeline import collect, process_pending, translate_pending
+from app.services import format as fmt
 from app.services.digest import DigestService, deferral_worthwhile
 from app.services.llm import LLMService
 from app.services.news import NewsService
@@ -493,16 +494,9 @@ class NewsJobs:
         floor = as_int(self.config.get("alerts.min_free_mb", 1024), 1024)
         # 历史要在这里长出来：`stats` 已经算过方向，所以记点是给下一轮用的。
         self.news.record_disk_sample(free_mb=free_mb)
-        trend = stats.get("disk_24h_delta_mb")
-        if trend is None:
-            disk_note = "24h 方向未知"
-        elif trend >= 0:
-            disk_note = "最近 24h +%dMB，没有在变少" % int(trend)
-        else:
-            days = stats.get("disk_days_left")
-            disk_note = "最近 24h %dMB" % int(trend)
-            if days:
-                disk_note += "，约 %s 天写满" % days
+        # 同一句话只用一个实现：以前这里和 `/stats` 各写一遍"最近 24h"，
+        # 于是修一处会漏一处（措辞都已经漂成两个版本了）。
+        disk_note = fmt.disk_rate(stats)
         if free_mb is not None and free_mb <= floor:
             log.warning("only %sMB free on the database volume (alert below %sMB): "
                         "collection will fail silently once it fills", free_mb, floor)

@@ -461,6 +461,8 @@ class NewsService:
     # ------------------------------------------------------------ disk history
     DISK_HISTORY_FILE = "disk_history.json"
     DISK_WINDOW_HOURS = 24
+    # 跨度不到半天就不给"还剩几天"：4 小时的斜率不是"每天"的速率（见 disk_trend）
+    MIN_COUNTDOWN_SPAN_HOURS = 12
 
     def _disk_history_path(self) -> Path:
         return self.config.settings.data_path / self.DISK_HISTORY_FILE
@@ -506,29 +508,31 @@ class NewsService:
             return False
         return True
 
-    def disk_trend(self, *, at: float | None = None) -> tuple[int | None, float | None]:
-        """(最近 24h 的净变化 MB, 按这个速度还能撑几天)。
+    def disk_trend(self, *, at: float | None = None) -> tuple[int | None, float | None, float | None]:
+        """(净变化 MB, 按这个速度还能撑几天, 这些样本实际跨了几小时)。
 
-        天数只在真的在变少时才给：一个刚被 logrotate 放回 1GB 的盘不该被读成倒计时，
-        而一小时以内的抖动也不算趋势（两台机器各 13 分钟一轮，两点连线最容易骗人）。
+        天数只在真的在变少、**而且样本够长**时才给：一个刚被 logrotate 放回 1GB 的盘不该
+        被读成倒计时，一小时以内的抖动也不算趋势（两台机器各 13 分钟一轮，两点连线最容易骗人）。
+        跨度必须一起返回：2026-10-01 真机只有 9 个点、跨 4.27 小时，渲染层却写着"最近 24h"，
+        于是同一行里 -58MB（4 小时）与"约 5.4 天"（把它放大成一天速率）互相反悔。
         """
         now = time.time() if at is None else float(at)
         samples = self._disk_samples(now)
         if len(samples) < 2:
-            return None, None
+            return None, None, None
         (first_t, first_mb), (last_t, last_mb) = samples[0], samples[-1]
         span = last_t - first_t
         if span < 3600:
-            return None, None
+            return None, None, None
         delta = int(last_mb - first_mb)
+        span_hours = round(span / 3600.0, 1)
         days = None
-        if delta < 0:
-            # 只有真的在变少才给倒计时；`delta < 0` 是这里唯一的闸门，
-            # 所以 per_day 必为正，不需要第二道 `if per_day > 0`（反向验证拆掉
-            # 它没有任何用例变红，说明它是死条件）。
+        if delta < 0 and span >= self.MIN_COUNTDOWN_SPAN_HOURS * 3600:
+            # `delta < 0` 与跨度是这里仅有的两道闸门，所以 per_day 必为正，
+            # 不需要第三道 `if per_day > 0`（反向验证拆掉它没有任何用例变红，说明它是死条件）。
             per_day = -delta * (86400.0 / span)
             days = round(last_mb / per_day, 1)
-        return delta, days
+        return delta, days, span_hours
 
     def disk_free_mb(self) -> int:
         return int(shutil.disk_usage(str(self.config.settings.data_path)).free / 1024 / 1024)
@@ -546,7 +550,7 @@ class NewsService:
         configured = self.configured_sources()
         enabled = {str(s["name"]) for s in configured if s["enabled"]}
         free_mb = self.disk_free_mb()
-        delta, days = self.disk_trend()
+        delta, days, span_hours = self.disk_trend()
         return {
             "total_articles": total,
             "last_24h": self.count_since(hours=24),
@@ -564,9 +568,11 @@ class NewsService:
             "sources_failing_detail": [{"name": s.name, "errors": s.error_count or 0,
                                          "error": (s.last_error or "").strip()} for s in failing],
             # 磁盘写满是静默死亡：SQLite 报错、Bot 停止入库，看起来像"今天没新闻"。
-            # 但光有"剩多少"会被读错，所以方向与天数一起给（样本不够就留 None）。
+            # 但光有"剩多少"会被读错，所以方向、**实际跨度**与天数一起给
+            # （跨度是真的跨度，不是标签上写死的 24h；样本不够或不够长就留 None）。
             "disk_free_mb": free_mb,
-            "disk_24h_delta_mb": delta,
+            "disk_delta_mb": delta,
+            "disk_span_hours": span_hours,
             "disk_days_left": days,
             # `/stats` 会说"积压最久的一条等了多久"，所以这里不能只带个数：
             # 只加一个没人读的数字，等于制造下一条"显示了但没接线"的缺陷。
