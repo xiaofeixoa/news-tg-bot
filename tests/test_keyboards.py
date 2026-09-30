@@ -76,3 +76,18 @@ def test_a_long_category_does_not_take_the_topics_message_down():
     assert "t:AI Models" in values, values
     assert any(v == "b:news" for v in values), f"回主页那一行必须还在：{values}"
     assert all(len(v.encode("utf-8")) <= K.CALLBACK_MAX_BYTES for v in values)
+
+
+def test_the_deep_button_is_not_offered_when_no_llm_is_configured():
+    """没配 key 时点它只会重发同一张卡片——那就别摆一个会说谎的按钮。"""
+    from app.bot.keyboards import inline as K
+
+    off = K.article_keyboard(7, "https://example.com/a", deep_available=False)
+    on = K.article_keyboard(7, "https://example.com/a")
+    off_data = [b.callback_data for row in off.inline_keyboard for b in row
+                if getattr(b, "callback_data", None)]
+    on_data = [b.callback_data for row in on.inline_keyboard for b in row
+               if getattr(b, "callback_data", None)]
+    assert "d:7" not in off_data, off_data
+    assert "d:7" in on_data, on_data
+    assert any(v == "b:news" for v in off_data), f"返回按钮不能被连坐：{off_data}"

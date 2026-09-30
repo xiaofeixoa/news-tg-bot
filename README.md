@@ -157,7 +157,7 @@ RSSHub 同理：把 `url` 指向你自己的 RSSHub 实例即可（`config/sourc
 | `/today` / `/yesterday` | 今日 / 昨日（按你的时区） |
 | `/digest` / `/digest evening` | 立即生成早报 / 晚报 |
 | `/search 关键词` | 搜索历史新闻，如 `/search MCP`；标题报的是**真实命中条数**，并说明这一页列了几条（v1.74 之前那个数字就是页大小 20） |
-| `/summary 123` | 对第 123 号新闻做深度分析（调用强模型） |
+| `/summary 123` | 对第 123 号新闻做深度分析（调用强模型）。这台机器没配 LLM 时它会直接说"不可用"并把规则摘要给你——不再先承诺"正在深入分析"再补一句做不到（v1.77）；同理由是这个条件，卡片上的 🧠 按钮也不会出现在没配 key 的机器上 |
 | `/topics` | 分类入口，点按钮看该方向新闻；每栏的数字是**整个 7 天窗口**的真实条数（v1.73 之前只数得到最新 1000 条那一页） |
 | `/free` / `/免费` | 现在哪些 agent / 模型 / API 免费，标题说「共 N 条，这里列出最新 M 条」（v1.74 之前只说 M），见 §3.1 |
 | `/sources` | 数据源健康状态：🟢 正常 🟠 偶发失败（未到警戒线）🔴 连续失败（≥ `alerts.source_fail_threshold`，默认 5）⚪️ 已禁用 🟡 还没跑过；正在守对方给的 `Retry-After` 会写「约 N 分钟后再问」，这份等待现在活得过重启（§11 v1.69） |
@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 724 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 729 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3521,3 +3521,56 @@ HTML 行  原文 8700 码元 → 送出 4070，结尾 '\n…（内容过长已�
 超长工具名被丢掉而三档时间按钮不受连坐、"20 个汉字放得下 / 21 个放不下"的字节-字符分界、
 丢弃要写日志、全是超长时仍然是个合法键盘、超长分类不拖垮 `/topics`。
 5 处反向验证全部 CAUGHT：不检查上限、按字符数检查、不丢按钮、留下空行、丢了不吭声。
+
+### v1.77 卡片上那个"永远点不出东西"的按钮：没配 LLM 时 🧠 只会把同一张卡片再发一遍
+
+这一条属于"**控制项的上限永远达不到**"那一类：一个按钮承诺了一种能力，而在这台机器上
+它一次也兑现不了。用户点了不会得到报错，只会得到"和刚才一模一样的一张卡片"——
+那种落空会被理解成"网络慢"或"我没点到"，而不是"这个功能在这里根本不存在"。
+
+量过的现状（两台真机、只读）：
+
+```
+anr-vps / anr-jump：llm_base_url 未设、llm_model 为空串 → llm_configured = False
+点 🧠 的旧路径     ：deep_summary() 走 `not service.enabled` 分支
+                    返回【同一张卡片】+ 末尾一句 <i>未配置 LLM_API_KEY，以上为规则摘要。</i>
+探针条目 #1424     ：旧路径 298 字符（其中卡片正文与上一条消息逐字相同）
+                    新路径 147 字符，纯说明，`tapped 里是否重复了卡片 = False`
+```
+
+一条必须写下来的**负面结论**：现存 `logs/telegram.log` 里 `deep analysis` 命中 **0** 次，
+也就没有证据表明他真的被这个按钮骗过。这次修的是缺陷类别，不是止血——
+记下这句是为了以后别把它追述成"救过一次火"的改动。
+
+- `K.article_keyboard(..., deep_available=…)`：没配 key 就不生成 🧠 按钮，
+  `cb_article` 传的是 `bool(app_config.settings.llm_configured)`——判定和渲染在同一处，不引入第二个定义。
+- `deep_summary(..., already_shown=…)`：**说实话的方式取决于上下文**。从卡片点进来时卡片就在上面一条消息里，
+  于是只回说明（并指出配上 key 之后这里会多出什么）；`/summary` 冷启动时屏幕上什么都没有，
+  所以仍然是"说明 + 规则摘要卡片"。砍掉按钮不等于砍掉解释——手打 `/summary` 的人依然要知道为什么只有规则摘要。
+- `/summary` 的占位那句同样改口径：没配 key 时不再印"🧠 正在对 #N 做深度分析…"。
+- `scripts/preview.py`：`news` 模式的按钮行原本印的是列表序号（`1 -> 卡片 1`），
+  和真实 `callback_data`（`a:<新闻编号>`）不是一回事，现在印 `1 -> 卡片 #1529`；
+  `card` 模式不再重打一遍卡片，直接印 `[/summary 深度分析] 不可用：未配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL`
+  ——一次落空少烧一次翻译额度。
+
+测试：724 → **729 passed**（开发机 Windows 全绿；`anr-jump` Linux/UTC 跑的是部署后同一棵树，`exit=0`）。
+新增/改写 6 条，两个方向都钉：没配 key 不给按钮（`test_the_deep_button_is_not_offered_when_no_llm_is_configured`）、
+配了 key 必须给（改写后的 `test_callback_opens_article_card_with_source_and_link`、
+`test_the_deep_analysis_path_is_still_used_when_a_key_exists`）、点了不重发卡片
+（`test_a_tapped_deep_button_explains_rather_than_repeating_the_card`）、占位句不空头承诺
+（`test_the_placeholder_promises_only_what_it_can_deliver`）、preview 说"不可用"
+（`test_preview_card_mode_says_the_deep_analysis_is_unavailable`）。
+**8 处反向验证全部 CAUGHT**：卡片永远给按钮、有 key 反而不给、调用方不看配置、点按钮仍重发卡片、
+冷启动也只剩一句话、preview 回到重打卡片、占位句两个方向各一次。
+
+部署与真机复验：两台 `service=active schema=ok stamp=20260930T201338Z`；三端代码树 md5 一致
+（`683bac5463b74e956f71b1db8160413d`）；`Traceback` 计数与部署前相同（anr-vps `db.log` 4 /
+`scheduler.log` 4，其余 0）。真机键盘实测：
+`[('🔗 阅读原文', None), ('⬅️ 返回新闻', 'b:news')]`，`has d: button = False`。
+
+本轮自己制造的一次事故值得记进操作规矩：我先在 `anr-vps`（475MB 内存）后台跑整套测试，
+又同时在上面起一个读他真库的探针——探针卡进 `D`（不可中断磁盘睡眠，等 `news.db-wal`），
+十秒级的事情变成十分钟没有输出。处理是**杀掉探针**（它是我起的，不是他的进程），把重活挪到
+`anr-jump`（4GB）跑，`anr-vps` 只留一个不碰数据库的配置级证明。两个教训：
+内存紧张的机器上不要并发跑"测试 + 真库探针"；一个进程没有输出时先看 `/proc/<pid>/state` 和它打开的
+fd，再决定是等还是杀——`grep -c Traceback` 前后一致才算"杀掉它没有留下后遗症"的证据。

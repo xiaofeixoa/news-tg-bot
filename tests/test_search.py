@@ -245,3 +245,40 @@ def test_the_search_title_separates_the_hit_count_from_the_page():
     capped = fmt.search_title("AI", matched=400, shown=20, days=30,
                               pool_capped=True, pool=400)
     assert "命中 400 条" in capped and "关键词越宽这个数越保守" in capped, capped
+
+
+async def test_a_tapped_deep_button_explains_rather_than_repeating_the_card(session):
+    """线上现状：这台机器没配 LLM，每一次点 🧠 都得到一张重复卡片 + 末尾一句小字。"""
+    article = add(session, title="OpenAI ships a new agent model",
+                  title_zh="OpenAI 发布新的智能体模型",
+                  summary="OpenAI says the model is cheaper.", summary_zh="官方称成本更低。")
+    svc = SearchService(get_config())
+
+    from_card = await svc.deep_summary(article.id, already_shown=True)
+    assert from_card and "没有配置 LLM" in from_card, from_card
+    assert "上一条卡片" in from_card, from_card
+    assert "📊" not in from_card, "卡片已经在上面一条消息里，不该再发一遍"
+
+    cold = await svc.deep_summary(article.id)
+    assert cold and "没有配置 LLM" in cold, cold
+    assert "📊" in cold, "冷启动敲 /summary 的人要拿到内容，不只是拿到一句解释"
+    assert cold.index("没有配置") < cold.index("📊"), "先说要什么，再给能给的"
+
+
+async def test_the_deep_analysis_path_is_still_used_when_a_key_exists(session, monkeypatch):
+    """反向守门：不能因为规则模式改好了，就把有 key 的那条路也短路掉。"""
+    from app.services.llm import LLMService
+
+    article = add(session, title="Anthropic releases Claude", title_zh="Anthropic 发布 Claude")
+    svc = SearchService(get_config())
+
+    async def fake_analyze(self, payload, related):
+        return {"what_happened": "跨来源与背景分析已生成",
+                "industry_impact": "影响：订阅价格分层"}
+
+    monkeypatch.setattr(LLMService, "deep_analyze", fake_analyze)
+    monkeypatch.setattr(LLMService, "enabled", True, raising=False)
+    text = await svc.deep_summary(article.id, llm=LLMService(get_config()), already_shown=True)
+    assert text and "跨来源与背景分析已生成" in text, text
+    assert "行业影响" in text, text
+    assert "没有配置 LLM" not in text, text

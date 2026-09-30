@@ -220,8 +220,14 @@ class SearchService:
                                fallback=True, intent=intent, query=query)
         return AgentAnswer(F.clip(text, 3600), [a.id for a in results], intent=intent, query=query)
 
-    async def deep_summary(self, article_id: int, *, llm: LLMService | None = None) -> str | None:
-        """Layer-3 strong-model analysis (design doc section 23)."""
+    async def deep_summary(self, article_id: int, *, llm: LLMService | None = None,
+                           already_shown: bool = False) -> str | None:
+        """Layer-3 strong-model analysis (design doc section 23).
+
+        没配 LLM 时这里要说实话，而且说实话的方式取决于上下文：从卡片按钮点进来时，
+        卡片就在上面一条消息里，再发一遍同样的内容不是"更多分析"，是噪音（今天这台
+        机器上每一次点 🧠 得到的都是一张重复卡片加一句末尾小字）。
+        """
         service = self._llm(llm)
         item = self.news.by_id(article_id)
         if item is None:
@@ -229,8 +235,13 @@ class SearchService:
         tz_name = self.config.settings.timezone
         await self.news.ensure_chinese([item])
         if not service.enabled:
-            return F.clip(F.article_card(item, config=self.config, tz_name=tz_name)
-                          + "\n\n<i>未配置 LLM_API_KEY，以上为规则摘要。</i>")
+            note = ("<i>这台机器没有配置 LLM（<code>LLM_BASE_URL / LLM_API_KEY / LLM_MODEL</code>），"
+                    "AI 深度分析不可用。</i>")
+            if already_shown:
+                return F.clip(note + "\n\n<i>上一条卡片就是这台机器能给的全部内容；"
+                                     "配上 key 之后这里才会多出跨来源与背景分析（README §5）。</i>")
+            return F.clip(note + "\n\n"
+                          + F.article_card(item, config=self.config, tz_name=tz_name))
         related: list[dict[str, Any]] = []
         if item.event_id:
             with session_scope() as session:

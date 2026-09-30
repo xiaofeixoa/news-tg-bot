@@ -170,7 +170,9 @@ async def cb_article(callback: CallbackQuery, news: NewsService, app_config: App
     user = news.user_for(chat_id)
     await news.ensure_chinese([item])
     text = fmt.article_card(item, config=app_config, tz_name=_tz(user))
-    keyboard = K.article_keyboard(item.id, item.url)
+    # 没配 LLM 时不提供 🧠：它点下去只会把同一张卡片再发一遍（v1.77）
+    keyboard = K.article_keyboard(item.id, item.url,
+                                  deep_available=bool(app_config.settings.llm_configured))
     if callback.message is not None:
         try:
             await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
@@ -191,7 +193,7 @@ async def cb_deep(callback: CallbackQuery, news: NewsService, search: SearchServ
         await callback.answer("这条新闻已经不在库里了", show_alert=True)
         return
     await callback.answer("正在用 AI 深入分析…")
-    text = await search.deep_summary(article_id)
+    text = await search.deep_summary(article_id, already_shown=True)
     if callback.message is not None and text:
         await callback.message.answer(
             text, parse_mode="HTML", reply_markup=K.deep_keyboard(item.id, item.url)

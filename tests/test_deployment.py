@@ -129,6 +129,33 @@ def test_preview_script_free_mode_runs_the_real_path(tmp_path, monkeypatch, caps
     assert "近期免费" in out
 
 
+def test_preview_card_mode_says_the_deep_analysis_is_unavailable(monkeypatch, capsys):
+    """没配 LLM 时预览不该再打一遍同样的卡片，还把它标成"AI 深度分析"。"""
+    import runpy
+    import sys
+    from datetime import datetime, timezone
+
+    from app.database import repository as repo
+    from app.database.database import session_scope
+    from app.processing.normalize import build_article
+
+    with session_scope() as s:
+        art = repo.save_article(s, build_article(
+            title="OpenAI releases a preview-only model", url="https://openai.com/card-preview",
+            source_name="OpenAI", content="OpenAI releases a preview-only model for agents.",
+            published_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        article_id = art.id if art else 0
+    assert article_id, "没建出行，这条用例就没有意义"
+
+    monkeypatch.setattr(sys, "argv", ["preview.py", "card", str(article_id)])
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path("scripts/preview.py", run_name="__main__")
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "不可用：未配置" in out, out
+    assert out.count("一句话总结") <= 1, "深度分析不可用时不该把卡片再打印一遍"
+
+
 def test_collection_mode_does_not_import_aiogram(tmp_path):
     """aiogram costs ~100MB of heap; only the bot process should pay for it.
 

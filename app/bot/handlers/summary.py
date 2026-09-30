@@ -35,7 +35,11 @@ async def cmd_summary(message: Message, command: CommandObject, news: NewsServic
     if item is None:
         await message.answer(f"没有找到编号 {article_id} 的新闻。用 /news 查看当前编号。")
         return
-    placeholder = await message.answer(f"🧠 正在对 #{item.id} 做深度分析…")
+    # 没配 key 时别先承诺"正在深入分析"再补一句做不到：那句占位本身就是一次落空
+    placeholder = await message.answer(
+        f"🧠 正在对 #{item.id} 做深度分析…"
+        if app_config.settings.llm_configured
+        else f"📄 #{item.id}：这台机器没配 LLM，直接给你规则摘要…")
     text = await search.deep_summary(article_id)
     if not text:
         await placeholder.edit_text("分析失败，请稍后重试。")

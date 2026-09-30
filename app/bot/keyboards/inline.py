@@ -91,8 +91,16 @@ def news_list_keyboard(article_ids: Sequence[int], *, page: int = 1,
     return _keyboard(rows)
 
 
-def article_keyboard(article_id: int, url: str, *, back_tag: str = "news") -> InlineKeyboardMarkup:
-    rows = [[_url("🔗 阅读原文", url), _cb("🧠 AI 深度分析", cb(DEEP, article_id))]]
+def article_keyboard(article_id: int, url: str, *, back_tag: str = "news",
+                     deep_available: bool = True) -> InlineKeyboardMarkup:
+    """`deep_available=False` 时不提供 🧠：那个按钮在这台机器上点了只会重发同一张卡片。
+
+    承诺了能力却永远交付不了的按钮，比没有按钮更糟——用户会以为是自己没等到。
+    """
+    row: list[Slot] = [_url("🔗 阅读原文", url)]
+    if deep_available:
+        row.append(_cb("🧠 AI 深度分析", cb(DEEP, article_id)))
+    rows: list[list[Slot]] = [row]
     rows.append([_cb("⬅️ 返回新闻", cb(BACK, back_tag))])
     return _keyboard(rows)
 

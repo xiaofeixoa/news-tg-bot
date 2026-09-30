@@ -77,7 +77,10 @@ async def main(argv: list[str] | None = None) -> int:
 
         print(render(fmt.news_list(items, config=config, tz_name=config.settings.timezone,
                                    title="🤖 最新 AI 新闻", show_scores=True)))
-        print(f"\n可点击按钮：{' '.join(f'{i + 1} -> /summary {a.id}' for i, a in enumerate(items))}")
+        # 数字按钮在 Bot 里打开的是卡片（a:<id>），不是 /summary：预览说错动作，
+        # 照着它敲命令的人会以为按钮坏了。
+        print("\n可点击按钮：" + " ".join(f"{i + 1} -> 卡片 #{a.id}" for i, a in enumerate(items)))
+        print("（想看 AI 深度分析：/summary <编号>；没配 LLM 时它只会给规则摘要）")
         return 0
 
     if args.mode == "card":
@@ -89,8 +92,13 @@ async def main(argv: list[str] | None = None) -> int:
         from app.services import format as fmt
 
         print(render(fmt.article_card(item, config=config, tz_name=config.settings.timezone)))
-        print("\n[🧠 AI 深度分析] ->")
-        print(render(await search.deep_summary(article_id) or "（分析失败）"))
+        if config.settings.llm_configured:
+            print("\n[/summary 深度分析] ->")
+            print(render(await search.deep_summary(article_id) or "（分析失败）"))
+        else:
+            # 没配 LLM 时这条路径只会把同一张卡片再打一遍，还白烧一次翻译额度
+            print("\n[/summary 深度分析] 不可用：未配置 "
+                  "LLM_BASE_URL / LLM_API_KEY / LLM_MODEL")
         return 0
 
     if args.mode == "ask":

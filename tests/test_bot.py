@@ -196,7 +196,7 @@ async def test_news_command_returns_numbered_list_and_keyboard(seeded):
 
 
 @pytest.mark.asyncio
-async def test_callback_opens_article_card_with_source_and_link(seeded):
+async def test_callback_opens_article_card_with_source_and_link(seeded, monkeypatch):
     from app.bot.handlers.news import cb_article
 
     callback = FakeCallback(f"a:{seeded[0]}")
@@ -207,7 +207,21 @@ async def test_callback_opens_article_card_with_source_and_link(seeded):
     keyboard = callback.message.last_kwargs["reply_markup"]
     buttons = [(b.text, b.url, b.callback_data) for row in keyboard.inline_keyboard for b in row]
     assert any(url and url.startswith("http") for _t, url, _d in buttons), "阅读原文 link"
-    assert any(d and d.startswith("d:") for _t, _u, d in buttons), "AI 深度分析"
+    # 这台机器（以及测试环境）没配 LLM：🧠 点下去只会把同一张卡片重发一遍，
+    # 所以按钮不该出现。配上 key 之后它必须回来——两个方向都要钉住。
+    assert not any(d and d.startswith("d:") for _t, _u, d in buttons), \
+        f"没有 LLM 时不该提供深度分析按钮：{[b[2] for b in buttons]}"
+
+    config = get_config()
+    monkeypatch.setattr(config.settings, "llm_base_url", "https://example.org/v1")
+    monkeypatch.setattr(config.settings, "llm_api_key", "sk-test")
+    monkeypatch.setattr(config.settings, "llm_model", "some-model")
+    second = FakeCallback(f"a:{seeded[0]}")
+    await cb_article(second, get_news_service(), config)
+    after = [(b.text, b.url, b.callback_data)
+             for row in second.message.last_kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any(d and d.startswith("d:") for _t, _u, d in after), \
+        f"配了 key 就该给出深度分析：{[b[2] for b in after]}"
 
 
 @pytest.mark.asyncio
@@ -219,6 +233,28 @@ async def test_deep_summary_uses_the_strong_model(seeded, fake_llm):
     await cmd_summary(message, Command(str(seeded[0])), get_news_service(), search, get_config())
     assert "行业影响" in message.all_text() or "核心内容" in message.all_text()
     assert "deep_analyze" in fake_llm.calls
+
+
+@pytest.mark.asyncio
+async def test_the_placeholder_promises_only_what_it_can_deliver(seeded, fake_llm, monkeypatch):
+    """占位那一句也是一次承诺：没配 key 时说「正在深入分析」，下一句必然是做不到。"""
+    from app.bot.handlers.summary import cmd_summary
+
+    config = get_config()
+    message = FakeMessage(ALLOWED, f"/summary {seeded[0]}")
+    await cmd_summary(message, Command(str(seeded[0])), get_news_service(),
+                      SearchService(config, get_news_service()), config)
+    placeholder = message.sent[0][0]
+    assert "正在" not in placeholder, placeholder
+    assert "没配 LLM" in placeholder, placeholder
+
+    monkeypatch.setattr(config.settings, "llm_base_url", "https://example.org/v1")
+    monkeypatch.setattr(config.settings, "llm_api_key", "sk-test")
+    monkeypatch.setattr(config.settings, "llm_model", "some-model")
+    second = FakeMessage(ALLOWED, f"/summary {seeded[0]}")
+    await cmd_summary(second, Command(str(seeded[0])), get_news_service(),
+                      SearchService(config, get_news_service(), fake_llm), config)
+    assert "正在" in second.sent[0][0], second.sent[0][0]
 
 
 @pytest.mark.asyncio
