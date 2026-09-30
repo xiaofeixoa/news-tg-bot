@@ -2,6 +2,15 @@
 
 Callback data is capped at 64 bytes by Telegram, so actions stay short:
 a:<id> article card, d:<id> deep analysis, b:<tag> back, t:<category>, p:<page>.
+
+That sentence was the only thing enforcing the cap. Two buttons carry text that
+comes out of the database - the tool name `/免费` filters by and the category
+`/topics` filters by - and both columns are free-form (the detector invents tool
+names from promo sentences; `free_offer_tool` is VARCHAR(64), i.e. up to 192 UTF-8
+bytes). One oversized value does not drop one button: Telegram rejects the whole
+reply markup, so the command stops answering until that row is archived. Now the
+guard lives here: a button that cannot be encoded is left out, and the message
+still goes out.
 """
 
 from __future__ import annotations
@@ -9,6 +18,13 @@ from __future__ import annotations
 from typing import Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.logging_setup import get_logger
+
+log = get_logger("telegram")
+
+CALLBACK_MAX_BYTES = 64          # Telegram's own limit on callback_data
+Slot = InlineKeyboardButton | None        # `_cb` 放不下时返回 None，由 `_keyboard` 滤掉
 
 # Callback action prefixes.
 ARTICLE = "a"
@@ -30,15 +46,34 @@ def _url(text: str, url: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, url=url)
 
 
-def _cb(text: str, data: str) -> InlineKeyboardButton:
+def _cb(text: str, data: str) -> InlineKeyboardButton | None:
+    """放不下就返回 None：少一个按钮，总比整条消息发不出去好。
+
+    截断不是选项——`f:t:<半个工具名>` 会成为一个看起来能点、点了却说"没有这个工具的
+    限免"的假按钮，那比少一个筛选按钮坏得多。
+    """
+    size = len(data.encode("utf-8"))
+    if size > CALLBACK_MAX_BYTES:
+        log.warning("keyboard button %r dropped: callback_data is %d bytes (limit %d)",
+                    text[:24], size, CALLBACK_MAX_BYTES)
+        return None
     return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def _keyboard(rows: Sequence[Sequence[Slot]]) -> InlineKeyboardMarkup:
+    """去掉被丢弃的按钮和随之变空的行；全空时留下一个回主页的按钮。"""
+    kept = [[button for button in row if button is not None] for row in rows]
+    kept = [row for row in kept if row]
+    if not kept:
+        kept = [[_cb("🏠 最新新闻", cb(BACK, "news")) or _cb("🏠", "x")]]
+    return InlineKeyboardMarkup(inline_keyboard=kept)
 
 
 def news_list_keyboard(article_ids: Sequence[int], *, page: int = 1,
                        total_pages: int = 1) -> InlineKeyboardMarkup:
     """One digit button per headline, five per row (§15)."""
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
+    rows: list[list[Slot]] = []
+    row: list[Slot] = []
     for index, article_id in enumerate(article_ids[: len(CIRCLE)]):
         row.append(_cb(CIRCLE[index], cb(ARTICLE, article_id)))
         if len(row) == 5:
@@ -46,31 +81,31 @@ def news_list_keyboard(article_ids: Sequence[int], *, page: int = 1,
             row = []
     if row:
         rows.append(row)
-    nav: list[InlineKeyboardButton] = []
+    nav: list[Slot] = []
     if page > 1:
         nav.append(_cb("⬅️ 上一页", cb(PAGE, page - 1)))
     if total_pages > page:
         nav.append(_cb("下一页 ➡️", cb(PAGE, page)))
     if nav:
         rows.append(nav)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return _keyboard(rows)
 
 
 def article_keyboard(article_id: int, url: str, *, back_tag: str = "news") -> InlineKeyboardMarkup:
     rows = [[_url("🔗 阅读原文", url), _cb("🧠 AI 深度分析", cb(DEEP, article_id))]]
     rows.append([_cb("⬅️ 返回新闻", cb(BACK, back_tag))])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return _keyboard(rows)
 
 
 def deep_keyboard(article_id: int, url: str, *, back_tag: str = "news") -> InlineKeyboardMarkup:
     rows = [[_url("🔗 阅读原文", url), _cb("📄 常规摘要", cb(ARTICLE, article_id))]]
     rows.append([_cb("⬅️ 返回新闻", cb(BACK, back_tag))])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return _keyboard(rows)
 
 
 def topics_keyboard(topics: Sequence[dict], *, page: int = 1) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
+    rows: list[list[Slot]] = []
+    row: list[Slot] = []
     for topic in topics[:20]:
         label = f"{topic['emoji']} {topic['label']} ({topic['count']})"
         row.append(_cb(label[:48], cb(TOPIC, topic["category"])))
@@ -80,7 +115,7 @@ def topics_keyboard(topics: Sequence[dict], *, page: int = 1) -> InlineKeyboardM
     if row:
         rows.append(row)
     rows.append([_cb("🏠 最新新闻", cb(BACK, "news"))])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return _keyboard(rows)
 
 
 def settings_keyboard(*, paused: bool, breaking: bool, daily: str, evening: str,
@@ -105,21 +140,21 @@ def settings_keyboard(*, paused: bool, breaking: bool, daily: str, evening: str,
             _cb("🧠 兴趣设置", cb(ACT, "interest")),
         ],
     ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return _keyboard(rows)
 
 
 def refresh_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_cb("🔄 刷新", cb(BACK, "news"))]])
+    return _keyboard([[_cb("🔄 刷新", cb(BACK, "news"))]])
 
 
 def free_keyboard(tools: Sequence[dict], *, days: int = 30) -> InlineKeyboardMarkup:
     """/免费 的筛选按钮：时间范围 + 出现最多的工具。"""
-    rows: list[list[InlineKeyboardButton]] = [[
+    rows: list[list[Slot]] = [[
         _cb(("✅ " if days == choice else "") + f"近 {days if days == choice else choice} 天",
             cb(FREE, f"d:{choice}"))
         for choice in (7, 30, 90)
     ]]
-    row: list[InlineKeyboardButton] = []
+    row: list[Slot] = []
     for tool in list(tools)[:8]:
         name = str(tool.get("tool") or "")
         if not name:
@@ -131,4 +166,4 @@ def free_keyboard(tools: Sequence[dict], *, days: int = 30) -> InlineKeyboardMar
             row = []
     if row:
         rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return _keyboard(rows)
