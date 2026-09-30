@@ -92,7 +92,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt   # Windows: .
 | `PROCESS_INTERVAL` | `600` | AI 处理批次间隔 |
 | `DAILY_DIGEST_TIME` / `EVENING_DIGEST_TIME` | `08:00` / `20:00` | 用户可用 `/settings` 覆盖 |
 | `MIN_ARTICLE_SCORE` | `45` | 低于该分不进入列表和简报 |
-| `BREAKING_NEWS_ENABLED` / `_THRESHOLD` / `MAX_BREAKING_NEWS_PER_DAY` / `BREAKING_COOLDOWN_MINUTES` | `true` / `90` / `5` / `60` | 突发新闻开关、**AI 模式**阈值、每日上限、冷却；没配 `LLM_*` 时走 `breaking.rule.*` 的"事件词 + 一手来源 + 时效"三重门槛，见 §11 v1.9 |
+| `BREAKING_NEWS_ENABLED` / `_THRESHOLD` / `MAX_BREAKING_NEWS_PER_DAY` / `BREAKING_COOLDOWN_MINUTES` | `true` / `90` / `5` / `60` | 突发新闻开关、**AI 模式**阈值、每日上限、冷却；没配 `LLM_*` 时走 `breaking.rule.*` 的"事件词 + 一手来源 + 时效"三重门槛，见 §11 v1.9。"每日"从**读者自己的午夜**开始数（`users.timezone`），夜里另有 `breaking.quiet_hours` 静默窗口，见 §11 v1.64/v1.65 |
 | `GITHUB_TOKEN` | 空 | **强烈建议填**：releases 模式每个仓库每轮一次请求，27 个仓库 ≈ 54 次/小时，而匿名上限就是 60 次/小时。没有它 GitHub 源会长期空转（日志现在会直接说明是配额问题，而不是伪装成"今天没新闻"）。用一个无 scope 的 classic token 即可 |
 | `LOG_LEVEL` | `INFO` | |
 
@@ -2886,3 +2886,49 @@ Linux/UTC 在**已部署的目录**里全量 **638 passed**；traceback 与部�
 向前看的证据（今晚 23:00 起第一次生效）：`select kind, datetime(created_at,'+8 hours') from push_logs
 where (strftime('%H', datetime(created_at,'+8 hours')) >= '23' or strftime('%H', datetime(created_at,'+8 hours')) < '07')`
 应当不再出现新的行，而 `grep "仍在等待补发" logs/scheduler.log` 会显示早上补发前的等待。
+
+### v1.65 "每天最多 5 条"到底从几点开始数？改成从读者的午夜开始数
+
+静默时段落地时顺出来的第二件事：同一张 `push_logs` 账本上，**简报按读者的当地午夜数"今天"，
+突发与限免的每天上限却按 UTC 午夜数**（`datetime.utcnow().replace(hour=0)`），对北京时间来说
+就是每天早上 08:00 才重置。日志里 26 条 `daily cap reached` 拒绝，**全部**落在 05:00–08:00 北京
+这个"两种日界说法不一"的带里；最清楚的一例就是 #1497：
+
+| 瞬间（北京 = UTC） | 他自己的北京日已发 | 那个 UTC 日已发 | 上限 | 当时代码的答案 |
+| --- | --- | --- | --- | --- |
+| 09-30 05:22 = 09-29 21:22 | 2 | 5 | 5 | 拒（连拒 16 次） |
+| 09-30 07:05 = 09-29 23:05 | 2 | 5 | 5 | 仍会拒（旧码） |
+| 09-30 08:02 = 09-30 00:02 | 2 | 0 | 5 | 放行（补发成功 08:02:40） |
+
+也就是说：按他自己的日子，那天早上只发过 2 条，配额明明还剩 3 条，却被"昨天"的 5 条按住了一小时。
+（09-29 那天他北京日确实发过 7 条，所以上限本身不是错的——错的只是从哪里开始数。）
+
+改法：`app/config.py` 里一份 `local_now(zone)` + `local_day_start(zone)`（返回账本用的 naive UTC
+瞬间），三个调用点全部换成它——突发上限、限免上限、以及简报 `_digest_due` 原来自己内联算的那两行。
+顺手把 `_now_utc()` 作为唯一的钟：`_digest_due`、静默窗口、日界都从它取时刻，测试注入一次就全一致
+（原来的 `digest_jobs` 助手要同时钉两个钟，现在钉同一个）。半小时/45 分钟偏移的区（Kolkata +05:30、
+Kathmandu +05:45）与跨日界的岛（Kiritimati +14、Midway −11）都有用例钉住"日界必须包含此刻、且不超过 24 小时"。
+
+新增 `tests/test_local_day.py` 6 条；`tests/test_pipeline.py` 里钉钟的助手改成注入 `app.config._now_utc`
+（7 条窗口/账本用例一度因此变红，是我的改动挪了读钟的位置，不是它们该改期望值——它们验的还是同一件事）。
+638 → **644 passed**；4 处反向验证全部 CAUGHT（日界忽略读者时区 / 突发上限退回 UTC 日 /
+限免上限退回 UTC 日 / `local_now` 忽略所请求的时区）。
+诚实说明：`_digest_due` 那两行换成 helper 是**等价重构**，没有用例能区分二者——它的价值是"只剩一处定义"，
+行为由既有的窗口/账本用例兜住。
+
+部署与线上验证（`stamp=20260930T141217Z`，22:12 北京重启，赶在 23:00 静默窗口生效之前；
+两台 active，Linux/UTC 在已部署目录里 **644 passed**）：用他真实账本**只读**跑 Part A（裸 SQL 拿回来的是
+字符串这个老坑又踩了一次，改成 `datetime.fromisoformat` 后才是对的），再用一次性 DB + 合成读者 199000090x
++ 注入时刻跑 Part B，逐字：
+
+```
+瞬间 09-29 21:22 UTC = 北京 05:22 | 读者当地日已发 2 | UTC 日已发 5 | 上限 5
+瞬间 09-29 23:05 UTC = 北京 07:05 | 读者当地日已发 2 | UTC 日已发 5 | 上限 5
+瞬间 09-30 00:02 UTC = 北京 08:02 | 读者当地日已发 2 | UTC 日已发 0 | 上限 5
+-- 北京 05:22（静默窗口内）  Asia/Shanghai -> 不发 | 静默时段 23:00-07:00（…07:00 之后自动补发）
+                            UTC          -> 不发 | daily cap reached (5/5)
+-- 北京 07:05（窗口已过）     Asia/Shanghai -> 可发 | ok
+                            UTC          -> 不发 | 静默时段 23:00-07:00（UTC 当地 07:00 之后自动补发）
+```
+
+同一份账本，两位读者各按自己的日子与自己的钟点得到不同答案——这正是"每天"二字本来该说的话。

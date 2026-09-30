@@ -433,6 +433,41 @@ def _now_utc() -> "datetime":
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def local_now(zone_name: str | None = None, *, config: "AppConfig | None" = None,
+              at: "datetime | None" = None):
+    """What time it is for this reader, as an aware datetime on their wall clock.
+
+    Single source for "now" across the delivery rules (the briefing's own clock,
+    the daily caps, the quiet window), all of which read `_now_utc()` so a test can
+    pin one instant instead of hoping the suite runs at a friendly hour.
+    """
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
+
+    config = config or get_config()
+    when = at or _now_utc()
+    stamp = when if when.tzinfo is not None else when.replace(tzinfo=_tz.utc)
+    return stamp.astimezone(ZoneInfo(zone_name or config.settings.timezone))
+
+
+def local_day_start(zone_name: str | None = None, *, config: "AppConfig | None" = None,
+                    at: "datetime | None" = None) -> "datetime":
+    """Midnight of the reader's calendar day, as the naive-UTC stamp the ledger uses.
+
+    Every `push_logs.created_at` is naive UTC, so a "how many today" question has to
+    pick a midnight. The briefings already pick the *reader's* (`jobs._digest_due`),
+    and the 突发/限免 daily caps picked UTC - i.e. 08:00 Beijing. Measured 2026-09-30:
+    #1497 was refused 16 times between 05:22 and 07:52 Beijing with only 4 pushes in
+    his own day, then went out at 08:02:40 the second the UTC bucket flipped; all 26
+    cap refusals in the logs fall in the 05:00-08:00 Beijing band where the two
+    definitions disagree. One definition, shared by all three callers.
+    """
+    from datetime import timezone as _tz
+
+    return local_now(zone_name, config=config, at=at).replace(
+        hour=0, minute=0, second=0, microsecond=0).astimezone(_tz.utc).replace(tzinfo=None)
+
+
 def quiet_window(config: "AppConfig | None" = None, timezone_name: str | None = None, *,
                  at: "datetime | None" = None) -> str:
     """Why this reader must not be pinged right now, or "" when they may.
@@ -453,18 +488,12 @@ def quiet_window(config: "AppConfig | None" = None, timezone_name: str | None = 
     if bounds is None:
         return ""
     start, end, label = bounds
-    from datetime import timezone as _tz
-    from zoneinfo import ZoneInfo
-
-    zone = timezone_name or config.settings.timezone
-    when = at or _now_utc()
-    stamp = when if when.tzinfo is not None else when.replace(tzinfo=_tz.utc)
-    local = stamp.astimezone(ZoneInfo(zone))
+    local = local_now(timezone_name, config=config, at=at)
     minutes = local.hour * 60 + local.minute
     inside = (minutes >= start or minutes < end) if start > end else (start <= minutes < end)
     if not inside:
         return ""
-    return f"{QUIET_TOKEN} {label}（{zone} 当地 {label.partition('-')[2]} 之后自动补发）"
+    return f"{QUIET_TOKEN} {label}（{local.tzinfo} 当地 {label.partition('-')[2]} 之后自动补发）"
 
 @lru_cache
 def get_config() -> AppConfig:

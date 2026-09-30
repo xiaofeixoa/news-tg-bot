@@ -1003,8 +1003,15 @@ def naive_stamp(hour: int, minute: int = 0, *, days_ago: int = 0) -> datetime:
 
 
 def digest_jobs(monkeypatch, hour: int, minute: int = 0):
+    """钉住两套时钟：`_digest_due` 以前自己读 `datetime.now(zone)`，而每天上限与
+    静默窗口现在共用 `app.config` 的那一个钟（`_now_utc`）——一处注入，处处一致。"""
+    import app.config as config_mod
     from app.scheduler import jobs as jobs_mod
-    monkeypatch.setattr(jobs_mod, "datetime", _FrozenDatetime(shanghai(hour, minute)))
+
+    moment = shanghai(hour, minute)
+    monkeypatch.setattr(jobs_mod, "datetime", _FrozenDatetime(moment))
+    monkeypatch.setattr(config_mod, "_now_utc",
+                        lambda: moment.astimezone(timezone.utc).replace(tzinfo=None))
     return jobs_mod.NewsJobs(get_config())
 
 

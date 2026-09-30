@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.bot.sender import TelegramSender
 from app.collectors import build_collectors, close_client
-from app.config import AppConfig, as_int, get_config
+from app.config import AppConfig, as_int, get_config, local_day_start, local_now
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, User
@@ -389,22 +389,25 @@ class NewsJobs:
             hour, minute = (int(x) for x in str(hhmm).split(":")[:2])
         except ValueError:
             return False, f"bad time {hhmm!r}"
-        local_now = datetime.now(zone(tz_name))
-        scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if local_now < scheduled:
+        # One clock for "what time is it for this reader", shared with the daily caps
+        # and the quiet window, and injectable in tests via `app.config._now_utc`.
+        now_local = local_now(tz_name)
+        scheduled = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now_local < scheduled:
             return False, "not yet due"
         with session_scope() as session:
             user = repo.ledger_user(session, chat_id, timezone=tz_name)
-            midnight_local = scheduled.replace(hour=0, minute=0, second=0, microsecond=0)
-            start_utc = midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
-            count = repo.pushes_since(session, user=user, kind=kind, since=start_utc)
+            # 同一个 `local_day_start`：突发/限免的每天上限与简报的"今天发过吗"
+            # 必须落在同一个日界上，否则两份账各说各话。
+            count = repo.pushes_since(session, user=user, kind=kind,
+                                       since=local_day_start(tz_name))
         # 账本要在"窗口已过"之前问。顺序反了的时候，一份**当天已经送到**的简报会因为
         # 下一次 5 分钟检查落在宽限期之外而被写成 `missed its 08:00 window`（WARNING，
         # 还说"今天不会再发"）—— 2026-09-27 就是这么在 14:31 误报了一次早上 08:01:39
         # 成功送达的那份早报。谎报的告警比没有告警更糟：它会让人去查一个不存在的故障。
         if count:
             return False, "already sent today"
-        if (local_now - scheduled) > timedelta(minutes=DIGEST_GRACE_MINUTES):
+        if (now_local - scheduled) > timedelta(minutes=DIGEST_GRACE_MINUTES):
             return False, "window closed"
         return True, "due"
 

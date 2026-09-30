@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 from sqlalchemy import func, select
 
-from app.config import AppConfig, QUIET_TOKEN, as_int, get_config, quiet_window
+from app.config import AppConfig, QUIET_TOKEN, as_int, get_config, local_day_start, quiet_window
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, PushLog
@@ -292,7 +292,7 @@ class DigestService:
             quiet = quiet_window(cfg, getattr(user, "timezone", None))
             if quiet:
                 return False, quiet
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = local_day_start(getattr(user, "timezone", None), config=cfg)
             count = repo.pushes_since(session, user=user, kind="breaking", since=today_start)
             if count >= max_per_day:
                 return False, f"{_DAILY_CAP} reached ({count}/{max_per_day})"

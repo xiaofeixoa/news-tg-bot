@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Sequence
 
-from app.config import AppConfig, as_float, as_int, get_config, quiet_window
+from app.config import AppConfig, as_float, as_int, get_config, local_day_start, quiet_window
 from app.database import repository as repo
 from app.database import session_scope
 from app.logging_setup import get_logger
@@ -163,7 +163,9 @@ class FreeAlertService:
             quiet = quiet_window(self.config, getattr(user, "timezone", None))
             if quiet:
                 return False, quiet
-            day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            # 每天上限也按读者的当地日算，和突发那条路用的是同一个 `local_day_start`：
+            # #1497 就是因为 UTC 日界卡在早上 08:00，被连拒 16 次。
+            day_start = local_day_start(getattr(user, "timezone", None), config=self.config)
             if repo.pushes_since(session, user=user, kind=KIND, since=day_start) >= max_per_day:
                 return False, f"daily cap {max_per_day} reached"
             last = repo.last_push_of(session, user=user, kind=KIND)
