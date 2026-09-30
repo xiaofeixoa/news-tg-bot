@@ -315,7 +315,13 @@ class NewsJobs:
         # left" - which is how four qualifying rows in a week became one alert.
         sent_this_round: set[int] = set()
         fresh = [int(i) for i in article_ids]
-        ids = fresh + [i for i in self._retry_breakings() if i not in fresh]
+        reissues = [i for i in self._retry_breakings() if i not in fresh]
+        ids = fresh + reissues
+        # 但那条豁免只属于"这一轮才发现的多条新闻"。从等待队列里出来的每一条，恰恰是被
+        # 我们主动按下、准备错峰放行的，把它们在同一轮里一次放完就是把读者的闸门当摆设：
+        # 2026-10-01 07:03 静默窗口一开，5 条突发在 3.4 秒内全部送达（cooldown_minutes 配的是 60）。
+        # 所以重发的那几条必须按冷却排队，一条一轮；新发现的仍然同一轮发完。
+        reissue_ids = set(reissues)
         reasons: dict[int, str] = {}
         deferred: set[int] = set()
         settled: set[int] = set()
@@ -324,7 +330,8 @@ class NewsJobs:
             for chat_id in self.chat_ids():
                 ok, reason = self.digest.can_send_breaking(
                     chat_id, article_id=article_id,
-                    respect_cooldown=chat_id not in sent_this_round)
+                    respect_cooldown=chat_id not in sent_this_round
+                    or article_id in reissue_ids)
                 if not ok:
                     log.info("breaking #%s skipped for %s: %s", article_id, chat_id, reason)
                     if deferral_worthwhile(reason):

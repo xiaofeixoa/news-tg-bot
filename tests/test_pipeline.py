@@ -1411,6 +1411,48 @@ async def test_two_breaking_stories_in_one_round_are_both_sent(session, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_quiet_window_drain_is_spaced_by_the_readers_own_cooldown(session, monkeypatch):
+    """等待队列一次性放完 = 把 `breaking.cooldown_minutes: 60` 这根闸门当摆设。
+
+    2026-10-01 07:03 线上实测：静默窗口一开，5 条积压突发在 **3.4 秒**内全部送达
+    （07:03:34.8 → 07:03:38.2），当天 5/5 名额当场用光，15 分钟后 #1813 只能收到
+    `daily cap reached (5/5)`。同一轮的豁免是给"这一轮才发现的多条"用的，
+    被我们主动按下、等着错峰放行的那几条不在其列。
+    """
+    from app.database import repository as repo
+    from app.processing import breaking
+    from app.scheduler.jobs import NewsJobs
+
+    parked: list[int] = []
+    for n, title in enumerate(("Anthropic announces Claude for Government",
+                               "OpenAI unveils GPT-6 for agents")):
+        aid = _breaking_row(session, title, "https://example.org/drain%d" % n)
+        with session_scope() as s:
+            breaking.note_deferral(s.get(Article, aid), "静默时段 23:00-07:00（当地 07:00 之后自动补发）")
+            s.commit()
+        parked.append(aid)
+
+    delivered: list[int] = []
+
+    class Capturing:
+        async def send_digest(self, chat_id, digest):
+            delivered.extend(digest.article_ids)
+            return len(digest.messages)
+
+    jobs = NewsJobs(get_config(), sender=Capturing())
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111])
+    await jobs.send_breaking([])          # 两条都来自等待队列，不是本轮新发现的
+
+    assert len(delivered) == 1, f"按读者配的 60 分钟冷却，一轮只该放一条：{delivered}"
+    remaining = [i for i in parked if i not in delivered]
+    with session_scope() as s:
+        still = [int(r.id) for r in repo.breaking_deferrals(s)]
+        meta = s.get(Article, remaining[0]).meta or {}
+    assert remaining[0] in still, f"被冷却挡下的那条不能掉出等待队列：{still}"
+    assert "cooldown" in (meta.get("breaking_defer") or {}).get("reason", ""), meta
+
+
+@pytest.mark.asyncio
 async def test_an_abandoned_row_is_still_timestamped(session, monkeypatch):
     """放弃一行也要写下放弃的时刻：is_processed=True 之后它再也不会被看过。"""
     from sqlalchemy import insert
