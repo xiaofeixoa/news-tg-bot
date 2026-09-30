@@ -103,16 +103,130 @@ async def test_sync_and_a_collection_round_do_not_fight(session):
                          f"{ {s.name: (s.url, s.enabled, s.quality) for s in session.query(Source)} }"
 
 
-def test_status_line_warns_before_the_disk_kills_collection():
-    """写满之后不会有报错声——SQLite 只是拒绝写入，看起来像"今天没新闻"。"""
+def test_status_line_shows_the_disk_with_a_direction():
+    """只给"剩多少"会被读成倒计时，也会被读成没事——两种我都在这台机器上犯过。"""
     from app.services import format as fmt
 
     base = {"total_articles": 700, "last_24h": 100, "llm_enabled": False, "sources": 20,
             "sources_configured": 37, "sources_delivering": 15}
     quiet = fmt.status_line(dict(base, disk_free_mb=8192))
-    assert "磁盘" not in quiet
+    assert "💾 磁盘：剩 8192MB" in quiet, quiet
+    assert "只剩" not in quiet and "告警线" not in quiet, quiet   # 高于线时不该恐慌
+    assert "方向还不知道" in quiet, quiet                          # 没有历史就承认
     loud = fmt.status_line(dict(base, disk_free_mb=770))
     assert "磁盘只剩 0.8GB" in loud and "告警线" in loud, loud
+
+
+def test_the_countdown_appears_only_while_the_disk_is_shrinking():
+    from app.services import format as fmt
+
+    falling = fmt.disk_line({"disk_free_mb": 1818, "disk_24h_delta_mb": -180,
+                             "disk_days_left": 10.1})
+    assert "-180MB" in falling and "约 10.1 天写满" in falling, falling
+    rising = fmt.disk_line({"disk_free_mb": 1818, "disk_24h_delta_mb": 611})
+    assert "+611MB" in rising and "没有在变少" in rising, rising
+    assert "写满" not in rising, rising        # 轮转把 1GB 放回来那天，别报倒计时
+
+
+def _disk_service(tmp_path, monkeypatch):
+    """磁盘历史按用例换文件：共用 `DATA_DIR` 会让上一条用例的点压住下一条。"""
+    from app.services.news import NewsService
+
+    monkeypatch.setattr(NewsService, "_disk_history_path",
+                        lambda self: tmp_path / "disk_history.json")
+    return NewsService(get_config())
+
+
+def test_a_trend_needs_two_points_at_least_an_hour_apart(tmp_path, monkeypatch):
+    from app.services.news import NewsService
+
+    svc = _disk_service(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    assert svc.disk_trend(at=now) == (None, None)
+    svc.record_disk_sample(free_mb=1000, at=now)
+    assert svc.disk_trend(at=now) == (None, None), "只有一个点时不能编出方向"
+    svc.record_disk_sample(free_mb=997, at=now + 60)
+    assert svc.disk_trend(at=now + 60) == (None, None), "一分钟的抖动不是趋势"
+    svc.record_disk_sample(free_mb=980, at=now + 7200)
+    delta, days = svc.disk_trend(at=now + 7200)
+    assert delta == -20 and days and days > 0, (delta, days)
+
+
+def test_a_disk_that_rolled_back_upwards_gets_no_countdown(tmp_path, monkeypatch):
+    svc = _disk_service(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    svc.record_disk_sample(free_mb=769, at=now)
+    svc.record_disk_sample(free_mb=1818, at=now + 20 * 3600)
+    delta, days = svc.disk_trend(at=now + 20 * 3600)
+    assert delta == 1049 and days is None, (delta, days)
+
+
+def test_the_history_keeps_only_the_window_it_is_asking_about(tmp_path, monkeypatch):
+    svc = _disk_service(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    svc.record_disk_sample(free_mb=500, at=now)
+    svc.record_disk_sample(free_mb=480, at=now + 30 * 3600)
+    left = svc._disk_samples(now + 30 * 3600)
+    assert left == [[now + 30 * 3600, 480]], left
+    assert svc.disk_trend(at=now + 30 * 3600) == (None, None), "孤点不该算趋势"
+
+
+@pytest.mark.parametrize("body", ["", "not json", "{}", '[["x"]]', "[[1,2,3]]", "[null]"])
+def test_a_broken_history_costs_a_rate_not_a_page(tmp_path, monkeypatch, body):
+    from app.services.news import NewsService
+
+    svc = _disk_service(tmp_path, monkeypatch)
+    (tmp_path / "disk_history.json").write_text(body, encoding="utf-8")
+    assert svc.disk_trend(at=1_800_000_000.0) == (None, None)
+    assert svc.record_disk_sample(free_mb=900, at=1_800_000_000.0) is True
+    assert NewsService(get_config()).stats()["disk_free_mb"] > 0, "读历史不能拖垮 stats()"
+
+
+@pytest.mark.asyncio
+async def test_the_health_line_carries_the_disk_direction(session, monkeypatch):
+    from app.services.news import NewsService
+
+    from app.config import AppConfig
+
+    config = AppConfig(settings=get_config().settings, raw={}, sources=[])
+    jobs = jobs_mod.NewsJobs(config)
+    monkeypatch.setattr(NewsService, "stats", lambda self: {
+        "total_articles": 900, "disk_free_mb": 1818, "disk_24h_delta_mb": -180,
+        "disk_days_left": 10.1})
+    recorded: list = []
+    monkeypatch.setattr(NewsService, "record_disk_sample",
+                        lambda self, *, free_mb=None, at=None: recorded.append(free_mb) or True)
+    info: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "info",
+                        lambda *a, **k: info.append(str(a[0]) % a[1:] if a else str(a[0])))
+    await jobs.run_maintenance()
+    assert recorded == [1818], recorded          # 每一轮都要把点记下来
+    line = [i for i in info if i.startswith("health check:")][0]
+    assert "1818MB free" in line and "最近 24h -180MB" in line, line
+    assert "约 10.1 天写满" in line, line
+    # 这一行是整套系统最常被 grep 的一行，括号样式不能长歪（第一版就写出了
+    # `（24h 方向未知）(告警线 …` 这种双重括号 + 双空格）。
+    assert line.count("（") == line.count("）") == 1, line
+    assert "(告警线" not in line and " free （" not in line, line
+    assert not any("only 1818MB free" in w for w in info), info
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_direction_is_admitted_not_guessed(session, monkeypatch):
+    from app.services.news import NewsService
+
+    from app.config import AppConfig
+
+    config = AppConfig(settings=get_config().settings, raw={}, sources=[])
+    jobs = jobs_mod.NewsJobs(config)
+    monkeypatch.setattr(NewsService, "stats",
+                        lambda self: {"total_articles": 900, "disk_free_mb": 1818})
+    info: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "info",
+                        lambda *a, **k: info.append(str(a[0]) % a[1:] if a else str(a[0])))
+    await jobs.run_maintenance()
+    line = [i for i in info if i.startswith("health check:")][0]
+    assert "24h 方向未知" in line and "写满" not in line, line
 
 
 def test_stats_reports_the_free_space_it_is_running_on(session, tmp_path):

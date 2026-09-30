@@ -486,6 +486,18 @@ class NewsJobs:
                         source.name, source.error_count, (source.last_error or "")[:120])
         free_mb = stats.get("disk_free_mb")
         floor = as_int(self.config.get("alerts.min_free_mb", 1024), 1024)
+        # 历史要在这里长出来：`stats` 已经算过方向，所以记点是给下一轮用的。
+        self.news.record_disk_sample(free_mb=free_mb)
+        trend = stats.get("disk_24h_delta_mb")
+        if trend is None:
+            disk_note = "24h 方向未知"
+        elif trend >= 0:
+            disk_note = "最近 24h +%dMB，没有在变少" % int(trend)
+        else:
+            days = stats.get("disk_days_left")
+            disk_note = "最近 24h %dMB" % int(trend)
+            if days:
+                disk_note += "，约 %s 天写满" % days
         if free_mb is not None and free_mb <= floor:
             log.warning("only %sMB free on the database volume (alert below %sMB): "
                         "collection will fail silently once it fills", free_mb, floor)
@@ -504,10 +516,11 @@ class NewsJobs:
         # from it never having run: 135 boots in 46 hours left exactly one line to
         # grep for, and telling those two cases apart is the whole job of a log.
         log.info("health check: %s article(s) in db, %s unprocessed, %s failing "
-                 "source(s), %s short blip(s), %s parked host(s), %sMB free (告警线 %sMB)",
+                 "source(s), %s short blip(s), %s parked host(s), %sMB free"
+                 "（%s，告警线 %sMB）",
                  stats.get("total_articles", "?"), len(pending), len(failing), len(blipping),
                  len(parked),
-                 free_mb if free_mb is not None else "?", floor)
+                 free_mb if free_mb is not None else "?", disk_note, floor)
 
     async def startup_report(self) -> None:
         stats = self.news.stats()

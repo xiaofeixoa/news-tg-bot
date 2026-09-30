@@ -544,17 +544,32 @@ def status_line(stats: dict[str, Any]) -> str:
         f"🔌 数据源：{stats.get('sources', 0)} 启用 / {stats.get('sources_configured', 0)} 配置"
         f" · 近 24 小时出过新闻 {stats.get('sources_delivering', 0)} 个"
         + source_health_note(stats)
-        + disk_warning(stats)
+        + disk_line(stats)
     )
 
 
-def disk_warning(stats: dict[str, Any], config: AppConfig | None = None) -> str:
-    """磁盘快到顶时的一句话——写满之后 SQLite 会静默报错，别等到那时才发现。"""
+def disk_line(stats: dict[str, Any], config: AppConfig | None = None) -> str:
+    """磁盘：数字 **和方向**。只给"剩多少"会被读成倒计时，也会被读成没事。
+
+    量过的两个点：09-26 剩 769MB、10-01 剩 1818MB，中间那 1GB 是 logrotate 放回来的。
+    所以"变小了"要配天数、"变大了/没变"要明说没有在变少，样本不够就承认还不知道。
+    """
     free = stats.get("disk_free_mb")
     if free is None:
         return ""
+    free = int(free)
     threshold = int((config or get_config()).get("alerts.min_free_mb", 1024))
-    if int(free) > threshold:
-        return ""
-    return (f"\n⚠️ 磁盘只剩 {int(free) / 1024:.1f}GB（低于 {threshold / 1024:.0f}GB 告警线），"
+    delta = stats.get("disk_24h_delta_mb")
+    days = stats.get("disk_days_left")
+    if delta is None:
+        rate = " · 24h 方向还不知道（样本不够）"
+    elif delta >= 0:
+        rate = f" · 最近 24h {'+' if delta else '±'}{delta}MB（没有在变少）"
+    else:
+        rate = f" · 最近 24h {delta}MB"
+        if days:
+            rate += f" → 照这个速度约 {days} 天写满"
+    if free > threshold:
+        return f"\n💾 磁盘：剩 {free}MB{rate}"
+    return (f"\n⚠️ 磁盘只剩 {free / 1024:.1f}GB（低于 {threshold / 1024:.0f}GB 告警线）{rate}，"
             "采集随时可能因写不进数据库而停住")

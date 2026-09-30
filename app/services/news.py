@@ -6,10 +6,14 @@ back, so SQLAlchemy sessions never leak into async Telegram code paths.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
+import time
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
@@ -443,6 +447,81 @@ class NewsService:
             session.commit()
         return items
 
+    # ------------------------------------------------------------ disk history
+    DISK_HISTORY_FILE = "disk_history.json"
+    DISK_WINDOW_HOURS = 24
+
+    def _disk_history_path(self) -> Path:
+        return self.config.settings.data_path / self.DISK_HISTORY_FILE
+
+    def _disk_samples(self, now: float) -> list[list[float]]:
+        try:
+            raw = json.loads(self._disk_history_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(raw, list):
+            return []
+        cutoff = now - self.DISK_WINDOW_HOURS * 3600
+        out: list[list[float]] = []
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            try:
+                when, mb = float(item[0]), int(item[1])
+            except (TypeError, ValueError):
+                continue
+            if when >= cutoff:
+                out.append([when, mb])
+        return sorted(out)
+
+    def record_disk_sample(self, *, free_mb: int | None = None, at: float | None = None) -> bool:
+        """健康检查每轮记一个点：只有"剩多少"判断不了"还剩多久"。
+
+        这台机器 09-26 剩 769MB、10-01 剩 1818MB——轮转一来数字就会跳回去。我据此
+        写过"每天涨 176MB、约三天写满"，那是把两个点连成一条直线的结果。
+        """
+        path = self._disk_history_path()
+        now = time.time() if at is None else float(at)
+        if free_mb is None:
+            free_mb = self.disk_free_mb()
+        samples = self._disk_samples(now)
+        samples.append([round(now), int(free_mb)])
+        tmp = Path(str(path) + ".tmp")
+        try:
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(samples[-96:]), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            return False
+        return True
+
+    def disk_trend(self, *, at: float | None = None) -> tuple[int | None, float | None]:
+        """(最近 24h 的净变化 MB, 按这个速度还能撑几天)。
+
+        天数只在真的在变少时才给：一个刚被 logrotate 放回 1GB 的盘不该被读成倒计时，
+        而一小时以内的抖动也不算趋势（两台机器各 13 分钟一轮，两点连线最容易骗人）。
+        """
+        now = time.time() if at is None else float(at)
+        samples = self._disk_samples(now)
+        if len(samples) < 2:
+            return None, None
+        (first_t, first_mb), (last_t, last_mb) = samples[0], samples[-1]
+        span = last_t - first_t
+        if span < 3600:
+            return None, None
+        delta = int(last_mb - first_mb)
+        days = None
+        if delta < 0:
+            # 只有真的在变少才给倒计时；`delta < 0` 是这里唯一的闸门，
+            # 所以 per_day 必为正，不需要第二道 `if per_day > 0`（反向验证拆掉
+            # 它没有任何用例变红，说明它是死条件）。
+            per_day = -delta * (86400.0 / span)
+            days = round(last_mb / per_day, 1)
+        return delta, days
+
+    def disk_free_mb(self) -> int:
+        return int(shutil.disk_usage(str(self.config.settings.data_path)).free / 1024 / 1024)
+
     def stats(self) -> dict[str, Any]:
         day_ago = datetime.utcnow() - timedelta(hours=24)
         threshold = as_int(self.config.get("alerts.source_fail_threshold"), 5)
@@ -453,6 +532,8 @@ class NewsService:
             failing, blipping = repo.sources_needing_attention(session, threshold=threshold)
         configured = self.configured_sources()
         enabled = {str(s["name"]) for s in configured if s["enabled"]}
+        free_mb = self.disk_free_mb()
+        delta, days = self.disk_trend()
         return {
             "total_articles": total,
             "last_24h": self.count_since(hours=24),
@@ -470,8 +551,10 @@ class NewsService:
             "sources_failing_detail": [{"name": s.name, "errors": s.error_count or 0,
                                          "error": (s.last_error or "").strip()} for s in failing],
             # 磁盘写满是静默死亡：SQLite 报错、Bot 停止入库，看起来像"今天没新闻"。
-            # 美西那台 2026-09-26 实测只剩 770MB，而 syslog 每天涨 260MB。
-            "disk_free_mb": int(shutil.disk_usage(str(self.config.settings.data_path)).free / 1024 / 1024),
+            # 但光有"剩多少"会被读错，所以方向与天数一起给（样本不够就留 None）。
+            "disk_free_mb": free_mb,
+            "disk_24h_delta_mb": delta,
+            "disk_days_left": days,
         }
 
     # ------------------------------------------------------------- settings
