@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 678 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 685 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3146,3 +3146,68 @@ v1.68 让 `Retry-After` 等待不再进连击之后，第一件该查的事是**
 那数字是错的——它数的是日志保留窗口内的累计；`systemctl show -p NRestarts` = **0**，
 真正的重启是我今天手动部署的那几次。结论方向没变（部署即作废等待），但"多少倍"必须来自
 带时间戳的启动行，不是 `grep -c`。
+
+### v1.70 打开一个刚建好的空库，听起来和正常启动一模一样
+这条不在计划里，是上一轮我自己撞出来的：从 `env` 里 `grep '^DATABASE_URL=' | cut -d= -f2-` 取到的值
+其实有**两行**（他的 env 里这个键定义了两次：第 22 行相对路径、第 60 行绝对路径），我把那个带换行的
+字符串当成 DSN 传进去，程序没有报错——它在 `data/` 里建了一棵目录树和一个 4KB 的空库，然后安静地
+"准备好"了。（那个多余的东西是我这次跑出来的，按时间戳核对后只删自己那部分，真实库 38 源 / 1765 条没动。）
+
+然后我在部署中的机器上做了个 A/B，用当前线上代码（v1.69）跑两次 `init_db`，指向 `/tmp` 里同一个新路径：
+
+```
+第 1 次（文件本来不存在，真的建了一个 4096 字节的空库）
+  INFO  news.db  database ready at sqlite:////tmp/anr-boot-ab/fresh.db
+第 2 次（文件已经在，库里什么都有）
+  INFO  news.db  database ready at sqlite:////tmp/anr-boot-ab/fresh.db
+```
+
+**一字不差。** 这不是假想：`anr-jump` 的 `logs/db.log` 里 `database ready at …` 有 47 条，全是同一句 INFO，
+其中 `2026-09-27 14:48:38` 那条就是快照回滚把整个安装（含数据库）抹掉之后的第一次启动——那台机器当天的
+文章是从 0 开始重新攒的 610 条。也就是说，"数据全没了"和"今天很正常"在日志里长得一样。
+
+- `init_db()` 先问一句"这个文件在我打开之前存在吗"：存在 → `database ready at … (10853 KB)`；
+  不存在 → **WARNING**：这是本次启动新建的空库，如果不是第一次安装，那 DATABASE_URL 就指错了地方（或存储被
+  回滚过），简报会安静地什么都不发。大小一起打印，4KB 与 11MB 一眼能分——这是"我看不见的故障"变成
+  "一行能 grep 的事实"的那个动作。
+- `get_engine()` 不再替一个混着两个值的 DSN 建目录：`_check_url()` 在 `mkdir` 之前失败，消息直接说
+  "同一个键定义了两次"并给出该跑的 `grep -c`；`sqlite_file()` 改成取**第一个** `sqlite:///` 之后的内容
+  （旧写法 `[-1]` 会拿最后一段，正好把要抓的形状藏掉——这条不是我推理出来的，是写完用例立刻红了才知道的）。
+- 两个他真会看的出口也带上同一件事：`AI News Radar online` 结尾加 `[db=new 本次启动新建了空库，见 logs/db.log]`；
+  `--self-check` 的数据库行显示 `· N KB · 本次新建（空库）` 并计入"需要注意"。自检返回 1 一直表示"有事要说"
+  而不是"坏了"（没配 LLM key 也是 1），第一次安装时会多这一条，是诚实的。
+- `bootstrap()` 现在把这种 DSN 变成一句中文的"启动失败"，而不是一屏 SQLAlchemy traceback。
+
+测试：685 passed（678 → +7）。8 处反向验证全部 CAUGHT：不记录新建（语义版 `pass`）、把 WARNING 降级回 INFO、
+去掉两值 DSN 检查、解析取 `[-1]`（= 我犯过的原错）、online 行去掉标记、自检去掉条目、库大小恒报 0。
+改动测试文件的地方要说清楚：`test_self_check_with_a_token_and_sources_is_not_a_failure` 现在显式把
+`database_is_fresh` 钉成 False——测试会话一开始就会真的建库，所以"本次新建"在整套用例里都是真话，而那条用例
+问的是"配置齐了吗"。这是测试替身，不是给产品开洞。
+
+线上验证：同一台机器、部署之后跑的 A/B，记在本节末尾。
+
+线上验证（两台部署后，树 `4b10a290e9493f2949169f8936c8f75c` 与本地一字不差）：
+
+```
+A) 正常启动（这次部署，库已存在）
+   00:22:24 INFO database ready at sqlite:////opt/ai-news-radar/data/news.db (10924 KB)     ← jump: (8152 KB)
+B) 指向一个新路径
+   WARNING 数据库是这次启动才新建的：/tmp/anr-boot-ab/fresh.db（4 KB）。…库里 0 条新闻，
+           简报会安静地什么都不发，旧数据如果在别处并不在这里。
+C) 同一文件第二次打开（模拟重启）
+   INFO database ready at sqlite:////tmp/anr-boot-ab/fresh.db (156 KB)                       ← 不重复喊
+D) 两值的 DSN
+   ValueError: DATABASE_URL 看起来被拼在了一起（'…one.db\nsqlite:///…two.db'）。
+               如果它来自 env 文件，请确认同一个键没有被定义两次：grep -c '^DATABASE_URL=' …
+   目录里只有 fresh.db —— 没有再长出任何目录树
+E) --self-check：数据库 : sqlite:////tmp/anr-boot-ab/fresh.db · 156 KB（已存在的库不会标"本次新建"）
+```
+
+`AI News Radar online` 两台都**没有** `[db=new …` 后缀——正常启动不该喊，这一半也要成立。
+部署后 Traceback 与部署前逐文件一致（vps `db.log`/`scheduler.log` 各 4 条仍是 09-26 那一次事故，
+jump 全 0），`is-active` 两台 true，vps 1771 条 / 近 24 小时 18 条已投递。
+
+顺带留下的一条待办（这次没动，因为改他那份 0600 的 root 文件不在我的授权范围里）：
+`/etc/ai-news-radar/env` 里 `DATABASE_URL` 定义了两次（第 22 行 `sqlite:///data/news.db` 相对路径、
+第 60 行绝对路径）。systemd 取后者所以现在没问题，但任何**人**用 `grep | cut` 取这个键都会拿到两行——
+包括脚本和我。删掉第 22 行那一行即可，需要他说"改"我再动。

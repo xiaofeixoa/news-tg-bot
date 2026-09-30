@@ -135,6 +135,9 @@ async def test_self_check_with_a_token_and_sources_is_not_a_failure(capsys, monk
     monkeypatch.setattr(config.settings, "llm_base_url", "https://example.org/v1")
     monkeypatch.setattr(config.settings, "llm_api_key", "sk-test")
     monkeypatch.setattr(config.settings, "llm_model", "some-model")
+    # 测试会话一开始就自己建了库，所以"本次新建"标记在整套测试里都是真话；
+    # 这条用例问的是"一切配好了吗"，替它把那个状态钉成普通重启。
+    monkeypatch.setattr("app.database.database.database_is_fresh", lambda *a: False)
     code = await entry.self_check(config)
     assert code == 0
     assert "一切就绪" in capsys.readouterr().out
@@ -236,3 +239,122 @@ async def test_a_failed_polling_task_is_still_logged(monkeypatch):
     _stub_boot(monkeypatch, fake_wait)
     assert await entry.run_forever(get_config(), with_bot=False) == 0
     assert any("polling died" in m for m in records), records
+
+
+# ---------------------------------------- 数据库："我打开的是刚建的空库"必须说出来
+class _Rec:
+    """`news.db` 这个 logger 不向 root 传播，caplog 看不见它——直接换掉 log 对象。"""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str]] = []
+
+    def _add(self, level: str):
+        def emit(msg, *a, **k):
+            self.rows.append((level, str(msg) % a if a else str(msg)))
+        return emit
+
+    def __getattr__(self, name: str):
+        if name in ("info", "warning", "error", "debug"):
+            return self._add(name.upper())
+        raise AttributeError(name)
+
+
+@pytest.fixture
+def boot_url(tmp_path) -> str:
+    return f"sqlite:///{(tmp_path / 'boot.db').as_posix()}"
+
+
+def test_a_database_created_by_this_boot_is_announced(boot_url, monkeypatch):
+    """09-27 那台机器被快照回滚清空后，启动日志和 46 次正常启动一模一样。"""
+    from app.database import database as db
+
+    rec = _Rec()
+    monkeypatch.setattr(db, "log", rec)
+    db.init_db(boot_url)
+    warned = [m for lvl, m in rec.rows if lvl == "WARNING"]
+    assert warned, rec.rows
+    assert "新建" in warned[0] and "boot.db" in warned[0], warned
+    assert db.database_is_fresh(boot_url)
+
+
+def test_the_next_process_over_the_same_file_only_says_ready(boot_url, monkeypatch):
+    from app.database import database as db
+
+    db.init_db(boot_url)                    # 第一个进程：库真的是它建的
+    db._fresh_files.discard(boot_url)       # 重启后的新进程再打开同一个文件
+    rec = _Rec()
+    monkeypatch.setattr(db, "log", rec)
+    db.init_db(boot_url)
+    assert [m for lvl, m in rec.rows if lvl == "WARNING"] == [], rec.rows
+    assert any("database ready" in m for _, m in rec.rows), rec.rows
+    assert db.database_size_kb(boot_url) > 0, "文件就在盘上，自检要给得出大小"
+
+
+def test_a_dsn_carrying_two_values_fails_before_it_builds_anything(tmp_path, boot_url):
+    """`grep KEY= env | cut -d= -f2-` 撞上重复键会得到两行；SQLite 会照建不误。"""
+    from app.database import database as db
+
+    mangled = boot_url + f"\nsqlite:///{(tmp_path / 'other.db').as_posix()}"
+    with pytest.raises(ValueError) as exc:
+        db.get_engine(mangled)
+    assert "两次" in str(exc.value), exc.value
+    assert [p.name for p in tmp_path.iterdir()] == [], "报错之前不该留下任何文件/目录"
+
+
+def test_bootstrap_turns_a_mangled_url_into_a_readable_startup_failure(monkeypatch, capsys):
+    monkeypatch.setattr(entry, "setup_logging", lambda *a, **k: None)
+
+    def fail():
+        raise ValueError("DATABASE_URL 看起来被拼在了一起：同一个键没有被定义两次")
+
+    monkeypatch.setattr(entry, "init_db", fail)
+    with pytest.raises(ValueError):
+        entry.bootstrap(get_config())
+    err = capsys.readouterr().err
+    assert "拼在了一起" in err and "两次" in err, err
+
+
+@pytest.mark.asyncio
+async def test_self_check_names_a_brand_new_database(capsys, monkeypatch):
+    monkeypatch.setattr(entry, "init_db", lambda: None)
+    monkeypatch.setattr("app.database.database.database_is_fresh", lambda *a: True)
+    code = await entry.self_check(get_config())
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "本次新建（空库）" in out, out
+    assert "0 条新闻" in out and "DATABASE_URL" in out, out
+
+
+@pytest.mark.asyncio
+async def test_the_online_line_carries_the_new_database_marker(monkeypatch):
+    """`AI News Radar online` 是唯一每轮都要 grep 的那一行，空库要写在它上面。"""
+    from app.scheduler import jobs as jobs_mod
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import NewsService
+
+    monkeypatch.setattr(NewsService, "stats", lambda self: {
+        "total_articles": 0, "sources": 20, "sources_configured": 37,
+        "sources_delivering": 0, "llm_enabled": False})
+    monkeypatch.setattr(jobs_mod, "database_is_fresh", lambda *a: True)
+    lines: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "info",
+                        lambda *a, **k: lines.append(str(a[0]) % a[1:] if a else str(a[0])))
+    await NewsJobs(get_config()).startup_report()
+    assert any("[db=new" in m and "0 article(s)" in m for m in lines), lines
+
+
+@pytest.mark.asyncio
+async def test_a_normal_boot_does_not_shout_about_a_new_database(monkeypatch):
+    from app.scheduler import jobs as jobs_mod
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import NewsService
+
+    monkeypatch.setattr(NewsService, "stats", lambda self: {
+        "total_articles": 1765, "sources": 20, "sources_configured": 37,
+        "sources_delivering": 18, "llm_enabled": False})
+    monkeypatch.setattr(jobs_mod, "database_is_fresh", lambda *a: False)
+    lines: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "info",
+                        lambda *a, **k: lines.append(str(a[0]) % a[1:] if a else str(a[0])))
+    await NewsJobs(get_config()).startup_report()
+    assert lines and "[db=new" not in lines[0], lines

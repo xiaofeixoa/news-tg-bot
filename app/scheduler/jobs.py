@@ -26,7 +26,7 @@ from app.collectors import build_collectors, close_client
 from app.collectors.base import cooling_hosts
 from app.config import AppConfig, as_int, get_config, local_day_start, local_now
 from app.database import repository as repo
-from app.database.database import session_scope
+from app.database.database import database_is_fresh, session_scope
 from app.database.models import Article, User
 from app.logging_setup import get_logger, warn_once
 from app.processing.pipeline import collect, process_pending, translate_pending
@@ -511,13 +511,18 @@ class NewsJobs:
 
     async def startup_report(self) -> None:
         stats = self.news.stats()
+        # `db=new` is the one token that separates "0 articles because we just
+        # installed" from "0 articles because the file we opened is not the one
+        # with the news in it" - the 09-27 rollback boot looked like the former.
+        fresh = database_is_fresh()
         log.info(
             "AI News Radar online: %s/%s sources enabled, %s delivered in 24h, "
-            "%s article(s) in db, llm=%s, chats=%s",
+            "%s article(s) in db, llm=%s, chats=%s%s",
             stats["sources"], stats.get("sources_configured", stats["sources"]),
             stats.get("sources_delivering", "?"), stats["total_articles"],
             "on" if stats["llm_enabled"] else "off(rules only)",
             ",".join(str(c) for c in self.config.settings.chat_id_whitelist) or "-",
+            " [db=new 本次启动新建了空库，见 logs/db.log]" if fresh else "",
         )
         self._warn_github_budget()
 

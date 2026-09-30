@@ -41,6 +41,11 @@ def bootstrap(config: AppConfig | None = None) -> AppConfig:
     )
     try:
         init_db()
+    except ValueError as exc:
+        # A DSN holding two values would otherwise mkdir its way into a fresh
+        # empty database and start a healthy-looking bot over zero news.
+        print(f"启动失败：{exc}", file=sys.stderr)
+        raise
     except OSError as exc:
         print(f"启动失败：无法写入数据库 ({exc})。"
               f"检查目录权限：sudo chown -R <service-user> {config.settings.data_path}",
@@ -63,10 +68,19 @@ async def self_check(config: AppConfig) -> int:
     collectors = build_collectors(config)
     if not collectors:
         problems.append("没有启用任何数据源")
+    from app.database.database import database_is_fresh, database_size_kb
+
+    fresh = database_is_fresh()
+    size_kb = database_size_kb()
+    if fresh:
+        problems.append(f"数据库是这次启动才新建的（{size_kb} KB，0 条新闻）—— 若这不是第一次安装，"
+                        "DATABASE_URL 就指错了地方，旧数据在另一个文件里")
     print("AI News Radar 自检")
     print("-" * 46)
     print(f"环境           : {config.settings.app_env}")
-    print(f"数据库         : {config.settings.sqlalchemy_url}")
+    print(f"数据库         : {config.settings.sqlalchemy_url}"
+          f" · {size_kb if size_kb >= 0 else '?'} KB"
+          + (" · 本次新建（空库）" if fresh else ""))
     print(f"时区           : {config.settings.timezone}")
     print(f"日志           : {config.settings.log_path}")
     print(f"Collector 类型 : {', '.join(known_types())}")
