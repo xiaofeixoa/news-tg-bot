@@ -451,6 +451,77 @@ def event_members(session: Session, event_id: int) -> list[Article]:
 
 
 # ----------------------------------------------------------------- queries
+def eligibility_conditions(
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    min_score: float | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
+    source_name: str | None = None,
+    require_processed: bool = True,
+    skip_sent: bool = False,
+) -> list[Any]:
+    """The one definition of "a row the user could be shown".
+
+    This used to be copied: `query_articles` built it inline, `count_eligible`
+    admitted in its docstring that the gates "are copied from query_articles on
+    purpose", and `topics()` added a third reading of it. Every copy is a chance
+    for a number on screen to describe a different pool than the list it labels -
+    which is exactly how `/topics` came to report 1000 of 1801 rows.
+    """
+    conds: list[Any] = [Article.is_archived.is_(False), Article.filtered_out.is_(False)]
+    if require_processed:
+        conds.append(Article.is_processed.is_(True))
+    if skip_sent:
+        # A briefing that overlaps the day's other briefing must not repeat items
+        # it already delivered. `IS NOT 1` rather than `= 0`: rows written before
+        # the column had a default carry NULL and must stay eligible.
+        conds.append(Article.is_sent.is_not(True))
+    if since:
+        conds.append(Article.published_at >= since)
+    if until:
+        conds.append(Article.published_at <= until)
+    if min_score is not None:
+        conds.append(Article.final_score >= min_score)
+    if category:
+        conds.append(Article.category == category)
+    if subcategory:
+        conds.append(Article.subcategory == subcategory)
+    if source_name:
+        conds.append(Article.source_name == source_name)
+    return conds
+
+
+def category_counts(session: Session, *, since: datetime) -> dict[str, int]:
+    """Rows per category in `since`..now, counted by SQL instead of counted in Python.
+
+    `topics()` used to pull `query_articles(limit=1000)` and tally the page it got:
+    correct while the corpus was small, and then a silent 45% understatement
+    (measured 2026-10-01: 报表合计 1000 / 真实 1801，`Other` 显示 68 而真值是 335).
+    """
+    stmt = (select(Article.category, func.count())
+            .where(*eligibility_conditions(since=since))
+            .group_by(Article.category))
+    return {str(row[0] or ""): int(row[1]) for row in session.execute(stmt)}
+
+
+def backlog_stats(session: Session) -> tuple[int, float | None]:
+    """(排队等处理的行数, 最久的一条等了多久/小时)。
+
+    以前这两句都从 `unprocessed_articles(limit=200)` 那 200 行里算，而那个查询是
+    **最新优先**的：行数会被永久钉在 200，"最久等了多久"数的也是最新的一批——
+    积压越严重，这两个数越是显得没事，而 6 小时告警正是要在严重的时候响。
+    """
+    conds = [Article.is_processed.is_(False), Article.is_archived.is_(False)]
+    count = int(session.scalar(select(func.count(Article.id)).where(*conds)) or 0)
+    oldest = session.scalar(select(func.min(Article.created_at)).where(*conds))
+    hours = None
+    if oldest is not None:
+        hours = round((datetime.utcnow() - oldest).total_seconds() / 3600.0, 1)
+    return count, hours
+
+
 def query_articles(
     session: Session,
     *,
@@ -468,26 +539,10 @@ def query_articles(
     include_duplicates: bool = False,
     skip_sent: bool = False,
 ) -> list[Article]:
-    stmt = select(Article).where(Article.is_archived.is_(False), Article.filtered_out.is_(False))
-    if require_processed:
-        stmt = stmt.where(Article.is_processed.is_(True))
-    if skip_sent:
-        # A briefing that overlaps the day's other briefing must not repeat items
-        # it already delivered. `IS NOT 1` rather than `= 0`: rows written before
-        # the column had a default carry NULL and must stay eligible.
-        stmt = stmt.where(Article.is_sent.is_not(True))
-    if since:
-        stmt = stmt.where(Article.published_at >= since)
-    if until:
-        stmt = stmt.where(Article.published_at <= until)
-    if min_score is not None:
-        stmt = stmt.where(Article.final_score >= min_score)
-    if category:
-        stmt = stmt.where(Article.category == category)
-    if subcategory:
-        stmt = stmt.where(Article.subcategory == subcategory)
-    if source_name:
-        stmt = stmt.where(Article.source_name == source_name)
+    stmt = select(Article).where(*eligibility_conditions(
+        since=since, until=until, min_score=min_score, category=category,
+        subcategory=subcategory, source_name=source_name,
+        require_processed=require_processed, skip_sent=skip_sent))
     if search:
         like = f"%{search.strip()}%"
         # The Chinese columns belong in here: upstream text is English, and every
@@ -526,19 +581,16 @@ def count_since(session: Session, since: datetime) -> int:
     return session.scalar(select(func.count(Article.id)).where(Article.published_at >= since)) or 0
 
 
-def count_eligible(session: Session, *, since: datetime, min_score: float | None = None) -> int:
+def count_eligible(session: Session, *, since: datetime, min_score: float | None = None,
+                   skip_sent: bool = False) -> int:
     """How many rows a briefing could actually pick in this window.
 
-    The gates are copied from query_articles on purpose: this number is shown to
-    the user as "这一档还剩几条", so it has to describe the same pool the digest
-    draws from.
+    Shown to the user as "这一档还剩几条", so it reads the same predicate the digest
+    draws from - it used to be a hand-copied list of gates with that sentence as an
+    excuse, which is how a definition drifts.
     """
-    stmt = select(func.count(Article.id)).where(
-        Article.is_archived.is_(False), Article.filtered_out.is_(False),
-        Article.is_processed.is_(True), Article.published_at >= since,
-    )
-    if min_score is not None:
-        stmt = stmt.where(Article.final_score >= min_score)
+    stmt = select(func.count(Article.id)).where(*eligibility_conditions(
+        since=since, min_score=min_score, skip_sent=skip_sent))
     return int(session.scalar(stmt) or 0)
 
 

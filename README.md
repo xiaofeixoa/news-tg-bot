@@ -158,7 +158,7 @@ RSSHub 同理：把 `url` 指向你自己的 RSSHub 实例即可（`config/sourc
 | `/digest` / `/digest evening` | 立即生成早报 / 晚报 |
 | `/search 关键词` | 搜索历史新闻，如 `/search MCP` |
 | `/summary 123` | 对第 123 号新闻做深度分析（调用强模型） |
-| `/topics` | 分类入口，点按钮看该方向新闻 |
+| `/topics` | 分类入口，点按钮看该方向新闻；每栏的数字是**整个 7 天窗口**的真实条数（v1.73 之前只数得到最新 1000 条那一页） |
 | `/free` / `/免费` | 现在哪些 agent / 模型 / API 免费，见 §3.1 |
 | `/sources` | 数据源健康状态：🟢 正常 🟠 偶发失败（未到警戒线）🔴 连续失败（≥ `alerts.source_fail_threshold`，默认 5）⚪️ 已禁用 🟡 还没跑过；正在守对方给的 `Retry-After` 会写「约 N 分钟后再问」，这份等待现在活得过重启（§11 v1.69） |
 | `/settings` | 早报/晚报各自的开关与时间、突发新闻开关、评分门槛（点一下告诉他这一档还剩几条）、暂停开关 |
@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 702 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 709 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3349,3 +3349,53 @@ data/disk_history.json = [[1790789238.0, 1816], [1790789637, 1815]]
 
 部署后 Traceback 与部署前逐文件一致（vps `db.log`/`scheduler.log` 各 4 条 = 09-26 旧账，jump 0），
 两台 `active`、`NRestarts=0`，三台树哈希一致。
+
+### v1.73 `/topics` 报的是"我看了一页"，不是"一共有几条"：真实数字少了 45%
+先说量到的事实（`anr-vps`，线上真实库，只读对比，2026-10-01 02:15）：
+
+```
+7 天窗口内真正可显示的行数：1300
+栏目             旧(数一页)   新(SQL)    差
+Open Source        359        394      +35
+AI Models          219        266      +47
+Research           150        243      +93     ← 被吞得最狠的一栏
+AI Agent            65        101      +36
+Other               67         94      +27
+…
+合计              1000       1300     -300（旧口径永远停在 1000）
+```
+
+`topics()` 的实现是 `query_articles(limit=1000)` 把行捞回 Python 里逐条数。库里一周不到 1000 条时它是对的；
+超过之后它**永远只报 1000**，而且不是随机少：那一页按 `published_at/score` 排序，所以被吞掉的是"排在后面的整段"。
+这就是我这一轮要找的那类东西——**屏幕上一个看起来像总量的数字，其实是页大小**（和 v1.5x 那个"上限永远触发不了的旋钮"是同一族的镜像）。
+
+同一族还有第二处，而且更坏：健康检查里那句 `processing backlog: N row(s), oldest waiting X h` 和
+`/stats` 的"待处理 N 条"，都是从 `unprocessed_articles(limit=200)` 那一页里算的——
+**那个查询是"最新优先"的**（冷启动时先处理今天的新闻，这个排序本身是对的），
+于是：行数被永久钉在 200；"最久等了多久"数的是最新那一页里最旧的一条，**积压越严重它报的等待时间越短**，
+而 6 小时的 WARNING 恰恰是为严重积压准备的。今天没爆（历史最大只有 9 条），但这是一个会在最需要它的时候静音的告警。
+
+改法是把"什么算一行可见的内容"收成**一处定义**：
+
+- `repo.eligibility_conditions(...)`：归档 / `filtered_out` / 未处理 / 时间窗 / 分数 / 栏目 / 来源 / `skip_sent`
+  这些闸门以前抄了三份——`query_articles` 内联一份，`count_eligible` 的 docstring 甚至写着
+  "the gates are copied from query_articles on purpose"，`topics()` 是第三份。现在三者都走这一个函数。
+- 新增 `repo.category_counts(session, since=…)`：SQL `GROUP BY` 数完整窗口，不再有页；
+  没有分类的行并到兜底栏目（保持原来的语义）。
+- 新增 `repo.backlog_stats(session)` → `(COUNT(*), MIN(created_at) 换算的小时数)`：整表计数，
+  最久等待取真正的 `MIN`。健康行、`/stats` 都用它。
+- `/stats` 的 📈 那行现在跟着说出积压的"年龄"：`· 待处理 205 条（最久 3.0 小时）`，
+  最久 ≥6 小时时变成 `· ⚠️ 待处理 205 条（最久 9.5 小时）`；拿不到年龄就只报条数，不编。
+  这一条是刻意跟着加的——只往 `stats()` 里塞一个没人读的数字，就是我自己反复在修的"显示了但没接线"。
+
+测试：706 → **709 passed**（Linux/UTC 同一棵树同样 `exit=0`）。6 处反向验证全部 CAUGHT：
+最久等待 `min`→`max`、资格定义漏掉"已归档"、漏掉"未处理"、分类统计重新加回 `.limit(2)`、
+积压告警线从 6h 漂到 600h、`/stats` 的待处理数退回页大小。
+其中两处第一版**逃过**：`.limit(2)` 因为我那三条用例只有 2 个栏目分组，页大小还没被触发；
+`/stats` 那条则是因为我把唯一的断言写在一条 `stats` 被 patch 掉的用例里——
+补了"六个栏目分组"和"真调 `NewsService().stats()`"两条用例后各自被抓。
+另外 `topics()` 与积压告警此前**一条用例都没有**，这轮补上了。
+
+线上（部署后）：`/topics` 的合计从 1000 变成 **1300**（=SQL 真值，见上表）；
+健康行 `processing backlog: 1 row(s), oldest waiting 0.0h`、`1812 article(s) in db, 1 unprocessed … 1811MB free（24h 方向未知，告警线 1024MB）`；
+Traceback 计数与部署前逐文件一致（`db.log`/`scheduler.log` 各 4 条仍是 09-26 旧账），两台 `active`、`NRestarts=0`。

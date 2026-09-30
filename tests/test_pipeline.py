@@ -1948,3 +1948,158 @@ def test_a_single_outlet_event_claims_no_other_coverage():
     event = SimpleNamespace(member_count=3, source_names=["TechCrunch AI"] * 3)
     line = summarizer.compose_why_it_matters(row, event, config=get_config())
     assert "家来源报道" not in line, line
+
+
+# --------------------------- 屏幕上每个数字都要数完整的一份（v1.73）
+def _fill_backlog(session, *, rows: int, step_hours: int = 1) -> list[int]:
+    """`rows` 条未处理的行，最早的一条已经等了 rows*step 小时。
+
+    `unprocessed_articles` 是**最新优先**的，所以只要 rows 超过它的 limit，
+    从那一页里算出的"最久等了多久"就永远短一截——积压最重的时候告警最轻。
+    """
+    base = datetime.now(timezone.utc).replace(tzinfo=None)
+    ids: list[int] = []
+    for i in range(rows):
+        when = base - timedelta(hours=(rows - i) * step_hours)
+        article = repo.save_article(session, feed_item(
+            f"Backlog item {i} about an AI model release",
+            f"https://example.org/backlog/{i}", body=None))
+        if article:
+            article.created_at = when
+            article.published_at = when
+            ids.append(article.id)
+    session.commit()
+    return ids
+
+
+def test_the_backlog_line_counts_every_waiting_row(session):
+    ids = _fill_backlog(session, rows=205)
+    assert len(ids) == 205
+    count, oldest = repo.backlog_stats(session)
+    assert count == 205, f"行数被页大小钉住了：{count}"
+    assert oldest and oldest >= 204, oldest
+
+    page = repo.unprocessed_articles(session, limit=200)
+    assert len(page) == 200, "旧口径只拿得到 200 条——这就是它为什么会骗人"
+    stale = min(row.created_at for row in page if row.created_at)
+    stale_hours = (datetime.now(timezone.utc).replace(tzinfo=None) - stale).total_seconds() / 3600.0
+    assert stale_hours < oldest, "旧算法数的是最新那一页里最旧的，永远偏短"
+
+
+@pytest.mark.asyncio
+async def test_a_big_backlog_still_escalates_at_six_hours(session, monkeypatch):
+    from app.scheduler import jobs as jobs_mod
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import NewsService
+
+    _fill_backlog(session, rows=205)
+    jobs = NewsJobs(get_config())
+    warned: list[str] = []
+    info: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "warning",
+                        lambda *a, **k: warned.append(str(a[0]) % a[1:] if a else ""))
+    monkeypatch.setattr(jobs_mod.log, "info",
+                        lambda *a, **k: info.append(str(a[0]) % a[1:] if a else ""))
+    monkeypatch.setattr(NewsService, "stats", lambda self: {
+        "total_articles": 205, "disk_free_mb": 999_999, "pending_processing": 205,
+        "sources": 20, "sources_configured": 37, "sources_delivering": 0,
+        "llm_enabled": False})
+    await jobs.run_maintenance()
+    assert any("processing backlog: 205 row(s)" in w for w in warned), (warned, info)
+    health = [i for i in info if i.startswith("health check:")][0]
+    assert "205 unprocessed" in health, health
+
+
+def test_topics_reports_the_whole_window_not_one_page(session):
+    from app.services.news import NewsService
+
+    _fill_backlog(session, rows=3)                    # 未处理 → 不该出现在分类里
+    for i in range(4):
+        article = repo.save_article(session, feed_item(
+            f"Released an AI model number {i}", f"https://example.org/t/{i}"))
+        if article:
+            article.is_processed = True
+            article.category = "AI Models" if i < 3 else "Research"
+            article.final_score = 70
+    first = session.scalar(select(Article).where(Article.category == "AI Models"))
+    first.is_archived = True
+    session.commit()
+
+    topics = {t["category"]: t["count"] for t in NewsService(get_config()).topics()}
+    assert topics.get("AI Models") == 2, topics        # 3 条里 1 条已归档
+    assert topics.get("Research") == 1, topics
+    assert sum(topics.values()) == 3, topics
+    assert all(not str(key).startswith("Backlog") for key in topics), topics
+
+
+def test_the_count_and_the_list_agree_on_what_is_eligible(session):
+    """/topics、`count_eligible`、`query_articles` 说的是同一池行——一处定义。"""
+    from app.database.repository import eligibility_conditions
+
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    for i in range(5):
+        article = repo.save_article(session, feed_item(
+            f"AI model row {i}", f"https://example.org/agree/{i}", hours=i))
+        if article:
+            article.is_processed = True
+            article.final_score = 60
+    session.commit()
+    rows = list(session.scalars(select(Article)))
+    rows[0].is_archived = True
+    rows[1].filtered_out = True
+    rows[2].is_processed = False
+    session.commit()
+
+    listed = repo.query_articles(session, since=since, limit=100)
+    assert len(listed) == 2, [a.title for a in listed]
+    assert repo.count_eligible(session, since=since) == len(listed)
+    assert sum(repo.category_counts(session, since=since).values()) == len(listed)
+    # 归档 / 被过滤 / 未处理 / 时间窗：四道闸门都来自同一个定义
+    assert len(eligibility_conditions(since=since)) == 4
+
+
+def test_the_backlog_count_is_reported_with_the_wait_behind_it():
+    """`/stats` 里"待处理 205 条"要能回答"急不急"，否则只是一个数字。"""
+    from app.services import format as fmt
+
+    base = {"total_articles": 1801, "last_24h": 320, "llm_enabled": False, "sources": 20,
+            "sources_configured": 37, "sources_delivering": 18}
+    quiet = fmt.status_line(dict(base, pending_processing=0))
+    assert "待处理" not in quiet, quiet
+    fresh = fmt.status_line(dict(base, pending_processing=205, processing_oldest_hours=3.0))
+    assert "待处理 205 条（最久 3.0 小时）" in fresh and "⚠️" not in fresh, fresh
+    late = fmt.status_line(dict(base, pending_processing=205, processing_oldest_hours=9.5))
+    assert "⚠️ 待处理 205 条（最久 9.5 小时）" in late, late
+    unknown = fmt.status_line(dict(base, pending_processing=4))
+    assert "待处理 4 条" in unknown and "最久" not in unknown, unknown
+
+
+def test_stats_pending_processing_is_not_capped_by_a_page(session):
+    """`/stats` 上那句"待处理 N 条"以前数的是最新 200 条那一页。"""
+    from app.services.news import NewsService
+
+    _fill_backlog(session, rows=205)
+    stats = NewsService(get_config()).stats()
+    assert stats["pending_processing"] == 205, stats["pending_processing"]
+    assert stats["processing_oldest_hours"] and stats["processing_oldest_hours"] >= 204, stats
+
+
+def test_category_counts_span_more_groups_than_a_page_would_return(session):
+    """分类必须按 SQL 分组数完整：只取一页的话，第 4 个栏目就整栏消失。"""
+    from app.database.repository import category_counts
+
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    names = ["AI Models", "Research", "Open Source", "AI Agent", "Companies", "Other"]
+    for i, name in enumerate(names):
+        for j in range(2):
+            article = repo.save_article(session, feed_item(
+                f"{name} item {j} about an AI model", f"https://example.org/span/{i}/{j}"))
+            if article:
+                article.is_processed = True
+                article.category = name
+                article.final_score = 60
+    session.commit()
+    counts = category_counts(session, since=since)
+    assert len(counts) == len(names), counts
+    assert all(count == 2 for count in counts.values()), counts
+    assert sum(counts.values()) == 12, counts

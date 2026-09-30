@@ -537,9 +537,22 @@ def source_state_flag(state: dict[str, Any], *, enabled: bool = True,
     return flag, ("   <i>" + "；".join(parts) + "</i>" if parts else "")
 
 
+def pending_note(stats: dict[str, Any]) -> str:
+    """积压要连着"最久等了多久"一起说：条数看不出急不急，6 小时才是突发时效的分水岭。"""
+    pending = int(stats.get("pending_processing") or 0)
+    if not pending:
+        return ""
+    hours = stats.get("processing_oldest_hours")
+    if hours is None:
+        return f" · 待处理 {pending} 条"
+    mark = "⚠️ " if float(hours) >= 6 else ""
+    return f" · {mark}待处理 {pending} 条（最久 {float(hours):.1f} 小时）"
+
+
 def status_line(stats: dict[str, Any]) -> str:
     return (
-        f"📈 库内新闻：{stats.get('total_articles', 0)} 条 · 近 24 小时 {stats.get('last_24h', 0)} 条\n"
+        f"📈 库内新闻：{stats.get('total_articles', 0)} 条 · 近 24 小时 {stats.get('last_24h', 0)} 条"
+        f"{pending_note(stats)}\n"
         f"🧠 AI 处理：{'已启用' if stats.get('llm_enabled') else '未配置（使用规则模式）'}\n"
         f"🔌 数据源：{stats.get('sources', 0)} 启用 / {stats.get('sources_configured', 0)} 配置"
         f" · 近 24 小时出过新闻 {stats.get('sources_delivering', 0)} 个"

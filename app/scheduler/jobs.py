@@ -470,16 +470,19 @@ class NewsJobs:
             # Same query, same threshold as `/stats`: one definition of "failing".
             threshold = as_int(self.config.get("alerts.source_fail_threshold"), 5)
             failing, blipping = repo.sources_needing_attention(session, threshold=threshold)
-            pending = repo.unprocessed_articles(session, limit=200)
+            pending_count, oldest_hours = repo.backlog_stats(session)
         if archived:
             log.info("archived %d old article(s)", archived)
-        if pending:
+        if pending_count:
             # Waiting is what silently kills 突发: the gate expires 24h after
             # publishing, and `updated_at` cannot show this because later writes
             # (translation, enrichment, is_sent) keep pushing it forward.
-            oldest = min(row.created_at for row in pending if row.created_at)
-            hours = (datetime.utcnow() - oldest).total_seconds() / 3600.0
-            line = "processing backlog: %d row(s), oldest waiting %.1fh" % (len(pending), hours)
+            # Both numbers must count the whole table: this used to read them off
+            # `unprocessed_articles(limit=200)`, which is *freshest first* - so the
+            # count stuck at 200 and "oldest waiting" measured the newest page,
+            # i.e. the 6h warning went quietest exactly when the backlog was worst.
+            hours = oldest_hours or 0.0
+            line = "processing backlog: %d row(s), oldest waiting %.1fh" % (pending_count, hours)
             (log.warning if hours >= 6 else log.info)(line)
         for source in failing:
             log.warning("source %s has failed %s times in a row (last error: %s)",
@@ -518,7 +521,7 @@ class NewsJobs:
         log.info("health check: %s article(s) in db, %s unprocessed, %s failing "
                  "source(s), %s short blip(s), %s parked host(s), %sMB free"
                  "（%s，告警线 %sMB）",
-                 stats.get("total_articles", "?"), len(pending), len(failing), len(blipping),
+                 stats.get("total_articles", "?"), pending_count, len(failing), len(blipping),
                  len(parked),
                  free_mb if free_mb is not None else "?", disk_note, floor)
 

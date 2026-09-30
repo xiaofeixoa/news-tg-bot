@@ -367,12 +367,18 @@ class NewsService:
         ]
 
     def topics(self) -> list[dict[str, Any]]:
-        counts: dict[str, int] = {}
         with session_scope() as session:
             since = datetime.utcnow() - timedelta(days=7)
-            for article in repo.query_articles(session, since=since, limit=1000, include_duplicates=True):
-                key = article.category or self.config.fallback_category
-                counts[key] = counts.get(key, 0) + 1
+            # SQL counts the whole window. This used to tally one
+            # `query_articles(limit=1000)` page, which quietly turned every number
+            # on `/topics` into a floor: measured 2026-10-01, 报表 1000 条 / 真实 1801 条，
+            # `Other` 显示 68 而真值是 335。
+            counts = repo.category_counts(session, since=since)
+        # 没有分类的行并到兜底栏目（以前在 Python 里逐行数时就是这个语义）。
+        misc = counts.pop("", 0)
+        if misc:
+            fallback = self.config.fallback_category
+            counts[fallback] = counts.get(fallback, 0) + misc
         order = self.config.get("digest.section_order", []) or []
         ranked = sorted(counts.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else 99, -kv[1]))
         return [
@@ -526,7 +532,9 @@ class NewsService:
         day_ago = datetime.utcnow() - timedelta(hours=24)
         threshold = as_int(self.config.get("alerts.source_fail_threshold"), 5)
         with session_scope() as session:
-            pending = len(repo.unprocessed_articles(session, limit=200))
+            # 行数与"最久等了多久"都数整张表（`backlog_stats`）：以前这两个数是从
+            # 最新 200 条那一页里算的，积压越大反而显得越轻。
+            pending, oldest_hours = repo.backlog_stats(session)
             total = repo.count_since(session, datetime(1970, 1, 1))
             delivering = repo.sources_that_delivered(session, day_ago)
             failing, blipping = repo.sources_needing_attention(session, threshold=threshold)
@@ -555,6 +563,9 @@ class NewsService:
             "disk_free_mb": free_mb,
             "disk_24h_delta_mb": delta,
             "disk_days_left": days,
+            # `/stats` 会说"积压最久的一条等了多久"，所以这里不能只带个数：
+            # 只加一个没人读的数字，等于制造下一条"显示了但没接线"的缺陷。
+            "processing_oldest_hours": oldest_hours,
         }
 
     # ------------------------------------------------------------- settings
