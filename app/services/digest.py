@@ -13,7 +13,8 @@ from typing import Any, Sequence
 
 from sqlalchemy import func, select
 
-from app.config import AppConfig, QUIET_TOKEN, as_int, get_config, local_day_start, quiet_window
+from app.config import (AppConfig, QUIET_TOKEN, as_int, get_config, local_day_start,
+                        quiet_opens_in, quiet_window)
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, PushLog
@@ -40,6 +41,9 @@ _HEAT = breaking.HEAT_WATCH
 # 突发 path, the 限免 path and `/设置` cannot disagree about what is configured.
 _QUIET = QUIET_TOKEN
 QUIET_CONFIG = "breaking.quiet_hours"
+# 第五个理由**不是**"会自己打开的闸"：静默窗口结束之前，24 小时时效先到期。
+# 它必须不含上面任何一个 token，否则 `deferral_worthwhile` 会把它留在队列里等一个必然落空的结果。
+_EXPIRES = "时效先到"
 
 
 def deferral_worthwhile(reason: str) -> bool:
@@ -55,6 +59,11 @@ def deferral_worthwhile(reason: str) -> bool:
     Everything else - the gate no longer passing for a non-heat reason, the story ageing
     out, already sent, breaking switched off - will read the same way next round, so
     keeping it in the retry queue would be a query with no possible outcome.
+
+    `时效先到` belongs to that second set even though it is written in the language of
+    clocks: it says the quiet window outlasts the row's own freshness, so waiting to the
+    end of the window is exactly the outcome that must not be booked. The test that keeps
+    the two lists from drifting is `test_a_row_that_expires_inside_the_window_is_not_parked`.
 
     The heat test is a substring, not a prefix: that rejection arrives here through
     `can_send_breaking`, which labels every gate answer "not breaking: …" first.
@@ -291,6 +300,18 @@ class DigestService:
             # forever, because nothing in it ever expires.
             quiet = quiet_window(cfg, getattr(user, "timezone", None))
             if quiet:
+                # 「07:00 之后自动补发」是对未来的一句承诺，而 24 小时时效可能先到期：
+                # 那种情况下窗口打开时这条已经不会被放行，"等一等"就是假话。
+                # 措辞里刻意不含 `静默时段`——`deferral_worthwhile` 正是靠它决定留不留队列，
+                # 留在队列里等一个必然落空的结果，就是这条函数 docstring 说的那类查询。
+                zone = getattr(user, "timezone", None)
+                opens = quiet_opens_in(cfg, zone)
+                left = (breaking.freshness_left(article, config=cfg)
+                        if article_id is not None else None)
+                if opens is not None and left is not None and left < opens:
+                    return False, (f"{_EXPIRES}：还要等 {opens:.1f} 小时才出静默窗口，"
+                                   f"而这条的时效只剩 {left:.1f} 小时"
+                                   f"（上限 {breaking.max_age_hours(cfg):.0f} 小时），届时无话可补")
                 return False, quiet
             today_start = local_day_start(getattr(user, "timezone", None), config=cfg)
             count = repo.pushes_since(session, user=user, kind="breaking", since=today_start)

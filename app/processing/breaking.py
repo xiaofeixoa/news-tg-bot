@@ -47,6 +47,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from app import config as app_config
 from app.config import AppConfig, as_float, get_config, quiet_hours_text
 
 _PATTERN_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
@@ -95,7 +96,33 @@ def _age_hours(article: Any, *, at: datetime | None = None) -> float | None:
     published = getattr(article, "published_at", None)
     if not isinstance(published, datetime):
         return None
-    return ((at or datetime.utcnow()) - published).total_seconds() / 3600.0
+    # `app.config._now_utc()` 而不是 `datetime.utcnow()`：一次"能不能发"的判定里
+    # 只能有一个此刻。时效用真钟、静默窗口用注入的钟，两者相差 1.6 小时就能让
+    # 同一条新闻在半分钟内既是"没过期"又是"过期 24 小时"（写这条时实测撞到的）。
+    # 走属性查找而不是 from … import，测试替换 `app.config._now_utc` 才有效。
+    return ((at or app_config._now_utc()) - published).total_seconds() / 3600.0
+
+
+def max_age_hours(config: AppConfig | None = None) -> float:
+    """`breaking.rule.max_age_hours` 的唯一读取处。
+
+    `gate()` 和"等到窗口结束还来得及吗"必须是同一个数，否则一句承诺可以按另一个上限落空。
+    """
+    config = config or get_config()
+    return as_float(config.get("breaking.rule.max_age_hours"), MAX_AGE_DEFAULT)
+
+
+def freshness_left(article: Any, *, config: AppConfig | None = None,
+                   at: datetime | None = None) -> float | None:
+    """距离时效到期还剩多少小时（负数=已过期）；没有可用时间戳时 None。
+
+    None 的含义沿用 `_age_hours`：这一条永远不会被时效判死，所以不能拿它当"来得及"。
+    """
+    age = _age_hours(article, at=at)
+    limit = max_age_hours(config)
+    if age is None or limit <= 0:
+        return None
+    return limit - age
 
 
 def _may_wait(heat_bar: float, age: float | None, max_age: float) -> bool:
@@ -161,7 +188,7 @@ def gate(article: Any, *, config: AppConfig | None = None, ai_enabled: bool | No
     heat = as_float(getattr(article, "community_heat", None), 0.0)
     heat_bar = as_float(config.get("breaking.rule.min_community_heat"), 0.0)
     rescued = heat_bar > 0 and heat >= heat_bar
-    max_age = as_float(config.get("breaking.rule.max_age_hours"), MAX_AGE_DEFAULT)
+    max_age = max_age_hours(config)
     age = _age_hours(article, at=at)
     # A row that fails the quality/score bars *while it is still inside the freshness
     # window* has not failed for good: the number that would rescue it keeps growing

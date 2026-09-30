@@ -495,6 +495,27 @@ def quiet_window(config: "AppConfig | None" = None, timezone_name: str | None = 
         return ""
     return f"{QUIET_TOKEN} {label}（{local.tzinfo} 当地 {label.partition('-')[2]} 之后自动补发）"
 
+def quiet_opens_in(config: "AppConfig | None" = None, timezone_name: str | None = None, *,
+                   at: "datetime | None" = None) -> "float | None":
+    """静默窗口还有多少小时放行；不在窗口内（含窗口关掉/写坏）时 None。
+
+    与 `quiet_window()` 共用同一次 `_quiet_bounds` 解析和同一个读者钟——"窗口"这件事
+    不能有两个定义，否则放行时刻与承诺时刻会各自漂移。
+    """
+    config = config or get_config()
+    bounds = _quiet_bounds(config.get("breaking.quiet_hours"))
+    if bounds is None:
+        return None
+    start, end, _label = bounds
+    local = local_now(timezone_name, config=config, at=at)
+    minutes = local.hour * 60 + local.minute
+    inside = (minutes >= start or minutes < end) if start > end else (start <= minutes < end)
+    if not inside:
+        return None
+    until = (end - minutes) % (24 * 60)
+    return (until or 24 * 60) / 60.0
+
+
 @lru_cache
 def get_config() -> AppConfig:
     return load_config()

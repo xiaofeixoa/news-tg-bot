@@ -1806,6 +1806,44 @@ def test_a_wait_is_reported_hourly_and_escalates_once_it_gets_old(session, monke
     assert "第 12 轮" in reported[-1][1] and watch in reported[-1][1], reported[-1]
 
 
+def test_a_parked_story_that_dies_is_reported_at_least_as_loudly_as_it_waited(session, monkeypatch):
+    """等待会升到 WARNING，可"不再重试"过去只有 INFO：突发死掉的时刻比它的讣告还安静。"""
+    from app.scheduler import jobs as jobs_module
+    from app.scheduler.jobs import NewsJobs
+
+    lines: list[tuple[str, str]] = []
+
+    class RecLogger:
+        def info(self, msg, *args):
+            lines.append(("info", msg % args))
+
+        def warning(self, msg, *args):
+            lines.append(("warning", msg % args))
+
+        def error(self, msg, *args):
+            lines.append(("error", msg % args))
+
+        def debug(self, msg, *args):
+            lines.append(("debug", msg % args))
+
+    monkeypatch.setattr(jobs_module, "log", RecLogger())
+    art = _hn_candidate(session, "OpenAI agent hacked a government site", "https://example.org/die")
+    watch = "等待全站热度：此刻热度 40 / 门槛 250（来源质量 65 低于 80）"
+    jobs = NewsJobs(get_config(), sender=_Sender())
+    for _ in range(12):
+        jobs._settle_breaking_deferrals(reasons={art: watch}, deferred={art},
+                                        settled=set(), delivered=set())
+    waited = [(lvl, m) for lvl, m in lines if "仍在等待补发" in m]
+    assert waited and waited[-1][0] == "warning", waited
+    lines.clear()
+    jobs._settle_breaking_deferrals(reasons={art: watch}, deferred=set(),
+                                    settled={art}, delivered=set())
+    gone = [(lvl, m) for lvl, m in lines if "不再重试" in m]
+    assert len(gone) == 1, f"结局只该报一次：{gone}"
+    assert gone[0][0] == "warning", f"这条突发就是在这一行死掉的：{gone}"
+    assert "曾推迟 12 次" in gone[0][1] and watch in gone[0][1], gone
+
+
 @pytest.mark.asyncio
 async def test_each_translation_round_starts_with_a_fresh_per_round_allowance(session, monkeypatch):
     """`per_run_limit` 写在配置里是"每一轮"，可翻译器是进程级单例：不清零就等于"每个进程"。

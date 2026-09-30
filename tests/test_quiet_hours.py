@@ -206,3 +206,77 @@ async def test_the_free_offer_path_waits_too(config, session, tmp_path, monkeypa
     morning = FreeAlertService(cfg, sender=chat)
     assert await morning.run([111]) == 1
     assert "限免" in chat.sent[0][1]
+
+
+def _published_ago(session, art: int, hours: float) -> None:
+    """把 published_at 往前挪：让"这条还能不能撑到放行"成为可以被精确设定的一件事。"""
+    from datetime import timedelta
+
+    with session_scope() as s:
+        s.get(Article, art).published_at = NIGHT - timedelta(hours=hours)
+        s.commit()
+
+
+def test_a_row_that_expires_inside_the_window_is_not_promised_a_release(config, session, monkeypatch):
+    """北京 04:00 挡下、07:00 放行——可这条只剩 1.5 小时时效，那句"自动补发"就是假话。"""
+    art = _first_hand_row(session, "Anthropic announces a rebuilt reasoning model",
+                          "https://openai.com/expire1")
+    _published_ago(session, art, 22.5)
+    monkeypatch.setattr("app.config._now_utc", lambda: NIGHT)
+    ok, why = DigestService(quiet_config(config)).can_send_breaking(111111111, article_id=art)
+    assert not ok, "时效撑不到放行，这条本来就不该发"
+    assert "时效先到" in why and "届时无话可补" in why, why
+    assert not deferral_worthwhile(why), "等下去也来不及：留在队列里就是一个没有结果的查询"
+    assert QUIET_TOKEN not in why, "理由里不能带窗口 token，否则又被判成再等等"
+
+
+def test_a_row_that_can_reach_the_opening_is_still_promised_a_release(config, session, monkeypatch):
+    """反方向：时效够的那条，一句"07:00 之后自动补发"仍然要说出口，并且要留在队列里。"""
+    art = _first_hand_row(session, "Google announces a new TPU generation",
+                          "https://openai.com/expire2")
+    _published_ago(session, art, 3.0)
+    monkeypatch.setattr("app.config._now_utc", lambda: NIGHT)
+    ok, why = DigestService(quiet_config(config)).can_send_breaking(111111111, article_id=art)
+    assert not ok and QUIET_TOKEN in why, why
+    assert deferral_worthwhile(why), "这才是等一会儿"
+    assert "时效先到" not in why, why
+
+
+def test_the_remaining_hours_to_the_opening_are_measured_not_guessed(config):
+    """`quiet_opens_in` 必须和 `quiet_window` 判同一个窗口，否则两个函数会各自漂移。"""
+    from datetime import timedelta
+
+    from app.config import quiet_opens_in
+
+    cfg = quiet_config(config)
+    assert quiet_opens_in(cfg, "Asia/Shanghai", at=NIGHT) == pytest.approx(3.0), "北京 04:00 还差 3 小时"
+    assert quiet_opens_in(cfg, "Asia/Shanghai", at=datetime(2026, 9, 30, 15, 0)) == pytest.approx(8.0)
+    assert quiet_opens_in(cfg, "Asia/Shanghai", at=EXACT_OPEN) is None, "07:00 整点已经放行"
+    assert quiet_opens_in(cfg, "Asia/Shanghai", at=DAYTIME) is None
+    assert quiet_opens_in(quiet_config(config, "off"), "Asia/Shanghai", at=NIGHT) is None
+    # 窗口内任意一分钟，两个函数必须同时表态
+    for minutes in range(0, 24 * 60, 7):
+        at = datetime(2026, 9, 30, 0, 0) + timedelta(minutes=minutes)   # 这是 UTC；北京时间 +8
+        local_hour = (at + timedelta(hours=8)).hour
+        inside = local_hour >= 23 or local_hour < 7
+        assert bool(quiet_window(cfg, "Asia/Shanghai", at=at)) == inside, (at, inside)
+        assert (quiet_opens_in(cfg, "Asia/Shanghai", at=at) is not None) == inside, (at, inside)
+
+
+def test_the_gate_ages_against_the_same_injected_clock_as_the_quiet_window(
+        config, session, monkeypatch):
+    """一次"能不能发"的判定里只能有一个此刻。
+
+    `gate()` 过去读 `datetime.utcnow()`，而静默窗口读 `app.config._now_utc()`：
+    相差 1.6 小时就能让同一条新闻既是"没过期"又是"过期 24 小时"——写 v1.80 时实测撞到。
+    """
+    from app.processing import breaking
+
+    art = _first_hand_row(session, "OpenAI announces a frontier reasoning model",
+                          "https://openai.com/clock1")
+    _published_ago(session, art, 22.5)
+    monkeypatch.setattr("app.config._now_utc", lambda: NIGHT)
+    with session_scope() as s:
+        row = s.get(Article, art)
+        ok, why = breaking.gate(row, config=quiet_config(config))
+    assert ok, f"注入的钟说这条 22.5 小时，就该按 22.5 小时判：{why}"

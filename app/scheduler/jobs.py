@@ -299,7 +299,9 @@ class NewsJobs:
                     if article_id in delivered:
                         log.info("breaking #%s 补发成功%s", article_id, waited)
                     else:
-                        log.info("breaking #%s 不再重试%s", article_id, waited)
+                        # 等待时报到 WARNING（第 12 轮起），结局却不该只有一行 INFO：
+                        # "不再重试"就是这条突发死掉的时刻，声音必须至少和预言它的那句一样大。
+                        log.warning("breaking #%s 不再重试%s", article_id, waited)
                 session.commit()
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not kill the round
             log.warning("breaking retry bookkeeping skipped: %s", exc)
