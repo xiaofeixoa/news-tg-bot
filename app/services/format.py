@@ -498,6 +498,38 @@ def source_health_note(stats: dict[str, Any]) -> str:
     return "".join(bits)
 
 
+def source_state_flag(state: dict[str, Any], *, enabled: bool = True,
+                      fail_threshold: int = 5) -> tuple[str, str]:
+    """`/来源` 每行的 (旗子, 说明行)。
+
+    口径必须和 `/stats`、健康检查一致（v1.67 分的两类：连击到警戒线才算坏源，
+    1..阈值-1 次只是刚抖了一下）：**只有连续失败才是坏源**。旧代码看
+    `last_error` 非空就涂红，而 v1.68 之后"我们在守对方给的 Retry-After"也会留下
+    `last_error` 却不计入连击——那会让一个准点干活的源被画成 🔴。
+    等待与否用采集器此刻真实的退避状态（`wait_left` 秒）判断，不去猜错误文案；
+    真在等的时候也不再回抄 `last_error`，因为那一格里写的本来就是同一句话。
+    """
+    if not enabled:
+        return "⚪️", ""
+    errors = int(state.get("error_count") or 0)
+    wait_left = float(state.get("wait_left") or 0)
+    succeeded = bool(state.get("last_success_at"))
+    parts: list[str] = []
+    if errors:
+        flag = "🔴" if errors >= fail_threshold else "🟠"
+        parts.append(f"连续失败 {errors} 次" if errors >= fail_threshold
+                     else f"偶发失败 {errors} 次（警戒线 {fail_threshold} 次）")
+        if wait_left <= 0:
+            text = plain(str(state.get("last_error") or ""), 120)
+            if text:
+                parts.append(text)
+    else:
+        flag = "🟢" if succeeded else "🟡"
+    if wait_left > 0:
+        parts.append(f"正在按对方要求降速，约 {max(1, int(wait_left / 60))} 分钟后再问")
+    return flag, ("   <i>" + "；".join(parts) + "</i>" if parts else "")
+
+
 def status_line(stats: dict[str, Any]) -> str:
     return (
         f"📈 库内新闻：{stats.get('total_articles', 0)} 条 · 近 24 小时 {stats.get('last_24h', 0)} 条\n"

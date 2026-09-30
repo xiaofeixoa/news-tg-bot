@@ -454,3 +454,78 @@ async def test_the_github_token_hint_is_not_replayed_every_round(session, monkey
         jobs._warn_github_budget()
     said = [m for lvl, m in cap.records if "GITHUB_TOKEN" in m]
     assert len(said) == 1, cap.records
+
+
+# --------------------------------- `/来源` 的旗子与 /stats 同一套口径
+def _flag(error_count: int = 0, *, wait_left: float = 0.0, succeeded: bool = True,
+          last_error: str | None = None, enabled: bool = True, fail_threshold: int = 5):
+    from app.services.format import source_state_flag
+
+    state = {"error_count": error_count, "wait_left": wait_left, "last_error": last_error,
+             "last_success_at": datetime(2026, 9, 30, 15, 0) if succeeded else None}
+    return source_state_flag(state, enabled=enabled, fail_threshold=fail_threshold)
+
+
+def test_a_source_we_are_parking_on_is_not_marked_broken():
+    """/来源 以前只看 `last_error` 非空就涂红；v1.68 之后"我们在等"也写那一格。"""
+    flag, note = _flag(wait_left=600, last_error="https://linux.do/x.rss -> 源服务器要求降速，还剩 9 分钟再试")
+    assert flag == "🟢", (flag, note)
+    # 分钟数来自当前还剩多少秒，不是把错误文本里的旧数字抄一遍：那串字是写进
+    # `last_error` 那一刻算的，面板再读已经晚了。
+    assert "降速" in note and "10 分钟" in note and "9 分钟" not in note, note
+
+
+def test_a_real_streak_is_red_and_says_how_many():
+    flag, note = _flag(7, wait_left=0.0, succeeded=False, last_error="HTTP 500")
+    assert flag == "🔴", flag
+    assert "连续失败 7 次" in note and "HTTP 500" in note, note
+
+
+def test_a_short_blip_is_not_called_broken():
+    """v1.67 把"抖一下"和"持续失败"分开了，`/来源` 不能还用一个 🔴 混着说。"""
+    flag, note = _flag(2, last_error="HTTP 500")
+    assert flag == "🟠", flag
+    assert "偶发失败 2 次" in note and "警戒线 5" in note and "HTTP 500" in note, note
+
+
+def test_the_panel_uses_the_same_threshold_as_the_health_check():
+    assert _flag(3, fail_threshold=3)[0] == "🔴"
+    assert _flag(3, fail_threshold=5)[0] == "🟠"
+
+
+def test_a_blip_we_are_now_parked_on_says_both_once():
+    """连击 + 在等：两个都要说，但不把"在等"这句话再抄成失败原因。"""
+    flag, note = _flag(2, wait_left=1200, last_error="ECHOED-TEXT 源服务器要求降速")
+    assert flag == "🟠", flag
+    assert "偶发失败 2 次" in note and "20 分钟" in note, note
+    assert "ECHOED-TEXT" not in note, note
+
+
+def test_a_disabled_source_is_never_shown_as_broken():
+    assert _flag(9, last_error="HTTP 403", enabled=False)[0] == "⚪️"
+
+
+def test_never_contacted_source_stays_yellow_while_waiting():
+    flag, note = _flag(wait_left=300, succeeded=False, last_error="…降速…")
+    assert flag == "🟡", flag
+    assert "降速" in note, note
+
+
+@pytest.mark.asyncio
+async def test_the_panel_reads_the_live_cooldown_rather_than_the_error_text(session):
+    """端到端：真的把一个主机挂起之后，`/来源` 的数据里要有 `wait_left`。"""
+    from app.collectors.base import cool_down
+    from app.services.news import NewsService
+
+    url = "https://example.org/parked-panel.rss"
+    repo.get_or_create_source(session, "Parked Panel", type_="rss", url=url,
+                              quality="C", enabled=True)
+    session.commit()
+    cool_down(url, 420)
+    state = {s["name"]: s for s in NewsService(get_config()).sources()}["Parked Panel"]
+    assert state["wait_left"] > 300, state
+    assert state["error_count"] in (0, None), state
+    from app.services.format import source_state_flag
+
+    flag, note = source_state_flag(state, enabled=True)
+    assert flag == "🟡" and "降速" in note, (flag, note)   # 还没成功过 → 黄，不是红

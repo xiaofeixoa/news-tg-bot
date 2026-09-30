@@ -7,13 +7,15 @@ retried immediately and then re-attempted in full on the next round.
 
 from __future__ import annotations
 
+import json
 import math
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.collectors.base import (CollectorError, MAX_COOLDOWN, RateLimited, BaseCollector,
-                                 backoff_seconds, cooling, out_of_budget)
+                                 backoff_seconds, cool_down, cooling, out_of_budget)
 
 URL = "https://venturebeat.com/category/ai/feed/"
 
@@ -43,14 +45,8 @@ class StubClient:
         return got
 
 
-@pytest.fixture(autouse=True)
-def _clear_cooldowns():
-    from app.collectors import base
-    base._cooldowns.clear()
-    yield
-    base._cooldowns.clear()
-
-
+# `tests/conftest.py::_isolated_cooldowns` owns this isolation now: the backoff
+# table is on disk, so "a fresh process, a fresh file" is the fixture's job.
 def collector(*responses, **source) -> tuple[BaseCollector, StubClient]:
     client = StubClient(*responses)
     return BaseCollector({"name": "VentureBeat AI", "type": "rss", **source}, client=client), client
@@ -116,3 +112,71 @@ async def test_a_source_can_ask_for_its_own_wait():
     with pytest.raises(RateLimited):
         await collector_.get(URL, attempts=2)
     assert cooling(URL) == pytest.approx(60, abs=3)
+
+
+# ------------------------------------------- 重启不能作废对方给的等待（v1.69）
+def _fresh_process():
+    """丢掉内存里的表、留下文件：这正是 `systemctl restart` 对我们做的事。"""
+    from app.collectors import base
+
+    base._cooldowns.clear()
+    base._cooldowns_loaded = False
+
+
+def test_a_promise_written_by_the_old_process_is_kept_by_the_new_one():
+    from app.collectors import base
+    cool_down(URL, 3600)
+    assert base._cooldown_path().is_file(), "不落盘的等待，活不过一次部署"
+    _fresh_process()
+    assert cooling(URL) == pytest.approx(3600, abs=3)
+
+
+async def test_a_restarted_process_still_asks_nothing_of_a_parked_host():
+    """端到端：新进程第一次 `get()` 就该跳过，而不是把 429 再要一遍。"""
+    from app.collectors.base import SourceCooling
+
+    collector_, client = collector(Resp(200, {}, "<rss/>"))
+    cool_down(URL, 3600)
+    _fresh_process()
+    with pytest.raises(SourceCooling):
+        await collector_.get(URL)
+    assert client.calls == []
+
+
+def test_other_hosts_in_the_same_file_keep_their_own_waits():
+    cool_down(URL, 3600)
+    cool_down("https://linux.do/c/welfare/36.rss", 1800)
+    _fresh_process()
+    assert cooling(URL) == pytest.approx(3600, abs=3)
+    assert cooling("https://linux.do/other") == pytest.approx(1800, abs=3)
+
+
+def test_an_expired_wait_is_dropped_instead_of_replayed():
+    from app.collectors import base
+    cool_down(URL, 3600)
+    path = base._cooldown_path()
+    path.write_text(json.dumps({base._host(URL): time.time() - 5}), encoding="utf-8")
+    _fresh_process()
+    assert cooling(URL) == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == {}, "死掉的等待要写回去"
+
+
+def test_a_clock_that_stepped_backwards_cannot_extend_a_wait():
+    """这些机器会被整体回滚快照：文件里一个十年后的期限只能是时钟跳了。"""
+    from app.collectors import base
+
+    path = base._cooldown_path()
+    path.write_text(json.dumps({base._host(URL): time.time() + 10 * 365 * 86400}),
+                    encoding="utf-8")
+    _fresh_process()
+    assert cooling(URL) <= MAX_COOLDOWN + 1
+
+
+@pytest.mark.parametrize("body", ["{not json", "[]", "null", ""])
+def test_a_broken_state_file_costs_a_wait_not_a_round(body):
+    """额度记录是附属信息：坏了就当作没有在等，退避本身还得照常能用。"""
+    from app.collectors import base
+    base._cooldown_path().write_text(body, encoding="utf-8")
+    _fresh_process()
+    assert cooling(URL) == 0
+    assert cool_down(URL, 120) == 120

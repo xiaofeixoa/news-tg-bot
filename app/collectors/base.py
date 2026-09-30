@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Sequence
 
 import httpx
+import json
 import os
+import time
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import AppConfig, as_float, get_config
@@ -64,8 +67,17 @@ def describe_error(exc: BaseException, url: str = "") -> str:
 # Reddit's "x-ratelimit-remaining: 0, reset in 31s" was ignored the same way.
 # A source that tells us when to come back is now believed - and the ask is
 # skipped entirely until then, so the budget goes to sources that answer.
+#
+# The table is on disk (`data/source_cooldowns.json`) and on the **wall clock**,
+# because a restart is not a new promise: measured 2026-09-30, linux.do answered
+# with 352 minutes still to wait at 22:41, the service was restarted at 23:13,
+# and `collect[rss]` asked it again at 23:14, 23:23 and 23:33. An in-memory
+# monotonic table cannot survive that, so every deploy broke a promise a source
+# is entitled to - the same hole the GitHub quota and the translate budget had.
 # --------------------------------------------------------------------------
-_cooldowns: dict[str, float] = {}          # host -> "do not ask before" (monotonic)
+_cooldowns: dict[str, float] = {}          # host -> "do not ask before" (epoch seconds)
+_cooldowns_loaded = False
+COOLDOWN_FILENAME = "source_cooldowns.json"
 MIN_COOLDOWN = 30.0
 MAX_COOLDOWN = 6 * 3600.0
 DEFAULT_COOLDOWN = 30 * 60.0
@@ -168,40 +180,92 @@ def out_of_budget(headers: Any) -> bool:
     return _header_seconds(_hdr(headers, "x-ratelimit-remaining")) == 0
 
 
+def _cooldown_path() -> Path:
+    return get_config().settings.data_path / COOLDOWN_FILENAME
+
+
+def _load_cooldowns() -> None:
+    """Take over the waits this host was already asked to keep.
+
+    Read once per process, and clamped: a wall clock that stepped backwards
+    (NTP, or one of these boxes being restored from a snapshot) must not turn a
+    stored deadline into a wait longer than the cap a fresh answer could set.
+    """
+    global _cooldowns_loaded
+    if _cooldowns_loaded:
+        return
+    _cooldowns_loaded = True
+    try:
+        data = json.loads(_cooldown_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    now = time.time()
+    horizon = now + MAX_COOLDOWN
+    dropped = 0
+    for host, until in data.items():
+        try:
+            until = float(until)
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        if until > now:
+            _cooldowns[str(host)] = min(until, horizon)
+        else:
+            dropped += 1
+    if dropped:
+        # The file is what an operator reads to answer "who are we waiting on",
+        # so a dead wait is rewritten away rather than merely ignored on read.
+        _save_cooldowns()
+
+
+def _save_cooldowns() -> bool:
+    """Never let a bookkeeping write stop a collection round."""
+    path = _cooldown_path()
+    tmp = Path(str(path) + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({h: round(u, 1) for h, u in _cooldowns.items()}),
+                       encoding="utf-8")
+        os.replace(tmp, path)          # atomic: the bot and a round can write at once
+    except OSError:
+        return False
+    return True
+
+
 def cool_down(url: str, seconds: float) -> float:
     """Block `url`'s host for a while; returns the wait actually applied."""
-    import time as _time
-
     seconds = max(MIN_COOLDOWN, min(seconds, MAX_COOLDOWN))
-    _cooldowns[_host(url)] = _time.monotonic() + seconds
+    _load_cooldowns()                  # so saving cannot drop the other hosts
+    _cooldowns[_host(url)] = time.time() + seconds
+    _save_cooldowns()
     return seconds
 
 
 def cooling(url: str) -> float:
     """Seconds left before this host may be asked again (0 when it is free)."""
-    import time as _time
-
+    _load_cooldowns()
     host = _host(url)
     until = _cooldowns.get(host)
     if until is None:
         return 0.0
-    left = until - _time.monotonic()
+    left = until - time.time()
     if left <= 0:
         _cooldowns.pop(host, None)
+        _save_cooldowns()              # a dead wait must not outlive its host entry
         return 0.0
     return left
 
 
 def cooling_hosts() -> dict[str, float]:
-    """What this process is parked on, host -> seconds left.
+    """What we are parked on, host -> seconds left (survives a restart).
 
-    Cooldowns live in memory and use the monotonic clock, so only the running
-    service can see them; what reaches the operator is the error text, which the
-    pipeline stores in `sources.last_error` and `/来源` prints.
+    The file is shared with whatever other process reads it, so a restart keeps
+    honouring the ask; `/来源` renders the same table through `source_state_flag`.
     """
-    import time as _time
-
-    now = _time.monotonic()
+    _load_cooldowns()
+    now = time.time()
     return {host: round(until - now) for host, until in _cooldowns.items() if until > now}
 
 

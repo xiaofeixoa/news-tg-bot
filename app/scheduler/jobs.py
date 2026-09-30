@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.bot.sender import TelegramSender
 from app.collectors import build_collectors, close_client
+from app.collectors.base import cooling_hosts
 from app.config import AppConfig, as_int, get_config, local_day_start, local_now
 from app.database import repository as repo
 from app.database.database import session_scope
@@ -488,13 +489,24 @@ class NewsJobs:
         if free_mb is not None and free_mb <= floor:
             log.warning("only %sMB free on the database volume (alert below %sMB): "
                         "collection will fail silently once it fills", free_mb, floor)
+        # v1.68 stopped the "we are honoring their Retry-After" line from repeating
+        # every round, and v1.69 keeps those waits alive across restarts - so a
+        # parked host is now invisible unless this line says it. "0 failing" plus
+        # a source that yields nothing is exactly the pair an operator has to be
+        # able to tell apart from a quiet feed.
+        parked = cooling_hosts()
+        if parked:
+            log.info("parked on %s host(s) at their own request: %s", len(parked),
+                     ", ".join("%s ≈%s min" % (h, max(1, int(left / 60)))
+                               for h, left in sorted(parked.items())))
         # One line per run, even when everything is fine. Every conditional above
         # can be silent, and when the whole job is silent that is indistinguishable
         # from it never having run: 135 boots in 46 hours left exactly one line to
         # grep for, and telling those two cases apart is the whole job of a log.
         log.info("health check: %s article(s) in db, %s unprocessed, %s failing "
-                 "source(s), %s short blip(s), %sMB free (告警线 %sMB)",
+                 "source(s), %s short blip(s), %s parked host(s), %sMB free (告警线 %sMB)",
                  stats.get("total_articles", "?"), len(pending), len(failing), len(blipping),
+                 len(parked),
                  free_mb if free_mb is not None else "?", floor)
 
     async def startup_report(self) -> None:

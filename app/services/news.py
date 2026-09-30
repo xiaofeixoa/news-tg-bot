@@ -333,6 +333,10 @@ class NewsService:
             return repo.count_since(session, datetime.utcnow() - timedelta(hours=hours))
 
     def sources(self) -> list[dict[str, Any]]:
+        # 采集器此刻真实退避了多久，只有运行中的进程知道；`/来源` 要说"还在等"，
+        # 而不是去猜 `last_error` 的中文文案（v1.68 之后等待也会留在那一格里）。
+        from app.collectors.base import cooling
+
         with session_scope() as session:
             return [
                 {
@@ -346,6 +350,7 @@ class NewsService:
                     "last_error": s.last_error,
                     "error_count": s.error_count,
                     "items": s.item_count,
+                    "wait_left": cooling(str(s.url or "")) if s.url else 0.0,
                 }
                 for s in repo.all_sources(session)
             ]

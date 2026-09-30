@@ -160,7 +160,7 @@ RSSHub 同理：把 `url` 指向你自己的 RSSHub 实例即可（`config/sourc
 | `/summary 123` | 对第 123 号新闻做深度分析（调用强模型） |
 | `/topics` | 分类入口，点按钮看该方向新闻 |
 | `/free` / `/免费` | 现在哪些 agent / 模型 / API 免费，见 §3.1 |
-| `/sources` | 数据源健康状态：🟢 正常 🔴 最近出错 ⚪️ 已禁用 🟡 还没跑过 |
+| `/sources` | 数据源健康状态：🟢 正常 🟠 偶发失败（未到警戒线）🔴 连续失败（≥ `alerts.source_fail_threshold`，默认 5）⚪️ 已禁用 🟡 还没跑过；正在守对方给的 `Retry-After` 会写「约 N 分钟后再问」，这份等待现在活得过重启（§11 v1.69） |
 | `/settings` | 早报/晚报各自的开关与时间、突发新闻开关、评分门槛（点一下告诉他这一档还剩几条）、暂停开关 |
 | `/setinterest` | 自然语言设置兴趣：`/setinterest 我主要关注 AI Agent、开源模型、GPU 和 Claude` |
 | `/pause` / `/resume` | 暂停 / 恢复自动推送 |
@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 610 个用例
+.venv/bin/python -m pytest            # 678 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3074,3 +3074,75 @@ upsert 才是我想测的东西。
 ② 测试进程的 `news` logger 等级继承 root（WARNING），INFO 记录到不了 handler——`_Capture` 现在把等级调到
 INFO 再还原；另外第一版端到端用例其实从没经过 `get()`，所以 `raise SourceCooling` 被改回
 `raise CollectorError` 时全绿——补上真路径那条才抓住。
+
+### v1.69 重启把"我们答应了要等"擦掉了：退避落盘，`/来源` 与 `/stats` 从此同一个坏源定义
+v1.68 让 `Retry-After` 等待不再进连击之后，第一件该查的事是**它自己会不会被绕过**。查出来会：
+
+```
+22:41:24  Linux.do 福利分类: … 还剩 352 分钟再试        ← 对方说"04:33 之前别来"
+23:13:37  我部署，服务重启
+23:14:04 / 23:23:56 / 23:33:58  collect[rss] done …    ← 20 分钟内问了它 3 次
+另一台：22:12-23:13 一小时里重启 5 次（每次都是部署），日志窗口内累计 309 行"要求降速"
+```
+
+退避表 `_cooldowns` 只活在进程内存里，还是**单调时钟**（跨进程无意义）。于是每一次部署
+都作废对方给的等待，而部署的频率就是它的过期频率——`anr-vps` 今天 21:47-23:13 的 86 分钟里
+被我重启 6 次。这和当初 GitHub 配额（`data/github_rate.json`）、v1.56 的翻译额度
+（`data/translate_budget.json`）是同一个洞的第三次出现：**只在内存里的自律，活不过一次重启**。
+
+- `cool_down()`/`cooling()` 改用墙上时钟，并落盘到 `data/source_cooldowns.json`（`.tmp` + `os.replace`
+  原子写，坏了/只读/没有目录都安静返回 False，采集照跑）；新进程第一次问任何主机前先把表读回来。
+- **时钟回跳不能拉长等待**：这些机器会被整体回滚快照，所以载入时按 `now + MAX_COOLDOWN` 夹紧，
+  一个"十年后的期限"最多只能压住 6 小时——和一次新的 `Retry-After` 能要的上限一样。
+- 过期的等待在载入时就从文件里删掉重写，运维读这个文件看到的就只有"此刻真的在等谁"。
+- 想强制立刻问某个主机：删掉这个文件再重启，是唯一的手动解除口子（不配开关，避免又造一个
+  "看起来能关其实没用"的控制）。
+
+同时补掉两处 v1.68 的二次伤害（都是"同一个词两个定义"这一族的续集）：
+
+- `/来源` 旧代码看 `last_error` 非空就涂红，而 v1.68 之后"我们在等"也写那一格，于是
+  **一个准点干活的源会被画成 🔴 并写着"连续失败 6 次：源服务器要求降速"**——次数是旧的、
+  文案是新的，两件事拼成一句假话。现在旗子走 `source_state_flag()` 一处判定：
+  🟢 正常 / 🟠 偶发失败（未到警戒线）/ 🔴 连续失败（≥ `alerts.source_fail_threshold`）/
+  ⚪️ 已关闭 / 🟡 还没跑过，等待另起一句「正在按对方要求降速，约 N 分钟后再问」，
+  分钟数取**此刻**的剩余秒数而不是回抄旧错误文本，真的在等时也不再回抄它。
+  警戒线由 `news.stats()["source_fail_threshold"]` 传入，和 `/stats`、健康检查同一个配置键。
+- `warn_once` 之后"在等"每轮不再刷 WARNING，代价是日志里看不见它了：`0 failing` 加一个
+  什么都不产出的源，和"今天就是没货"分不开。健康行现在带 `parked=N`，并在 N>0 时点名：
+  `parked on 1 host(s) at their own request: www.reddit.com ≈1 min`。
+
+线上立刻可见（部署后第一轮）：
+
+```
+23:53:54  collect[rss] done: fetched=345 … errors=0 waiting=1      ← 省下来的请求没进 errors
+23:56:26  parked on 1 host(s) at their own request: www.reddit.com ≈1 min
+23:56:26  health check: … 0 failing source(s), 0 short blip(s), 1 parked host(s), 1717MB free
+23:56:xx  data/source_cooldowns.json = {"www.reddit.com": 1790783820.3}   ← 应用自己写的
+```
+
+`app+config` 三台同一棵树 `4a45697e17ee7651462f299dac7fd2cd`，两台 `service=active`，
+部署后 Traceback 计数与部署前完全相同（VPS `db.log`/`scheduler.log` 各 4 条仍是 09-26 旧账，
+`anr-jump` 全 0）。磁盘 1717MB free（23:14 是 1729MB，这 12MB 含我这次部署的临时文件和 6 次重启的日志，
+不足以判定增速变了）。
+
+测试：660 → **678 passed**（Linux/UTC 在部署机上跑同一棵树，同样 `exit=0`）。新增 18 条 =
+退避 9 条（承诺活过重启、重启后再问=0 请求且端到端经 `get()`、同文件多主机互不覆盖、过期回写、
+时钟回跳夹紧、坏文件不影响退避 = 4 种坏内容的参数化）+ 面板 8 条（等待不涂红、真连击 🔴 且报次数、
+偶发 🟠 且写明警戒线、阈值随配置、🟠+等待两句都在且不回抄、关闭永不红、没跑过是 🟡、
+`cool_down()` 之后 `wait_left>300`）+ 健康行 1 条（另给"安静时也要留一行"那条补了
+`0 parked host(s)` 断言）。7 处反向验证全部 CAUGHT：`cool_down` 不写盘、新进程不读盘、去掉夹紧、
+过期不回写、任何失败都涂红、面板忽略配置阈值、健康行不再数 parked。
+
+改动测试文件的地方（不是产品豁免，说清楚）：`tests/conftest.py` 新增 autouse
+`_isolated_cooldowns`，给每条用例换一个独立的退避文件并把内存表清空——和 v1.56 计数器落盘后
+撞到的坑一模一样，共用 `DATA_DIR` 会让上一条用例挂起的主机压住下一条断言；
+`tests/test_backoff.py` 原来那个 `_clear_cooldowns` fixture 因此删掉（隔离规则只留一处定义）。
+我自己在这一步先"复制"了那个 fixture 又删，中途文件里一度有两个同名定义；另外第一版
+`test_a_broken_state_file_costs_a_wait_not_a_round` 的函数名里写了逗号（语法错误），
+以及 `9 分钟` 那条断言写死了旧文案——按代码实际算出的 `10 分钟` 改正，并顺手把它变成
+"证明分钟数取自当前剩余秒数、不是回抄错误文本"的断言。
+
+另外记一笔测量纪律：我先用 `grep -c "AI News Radar online"` 得出"VPS 今天重启 169 次"，
+那数字是错的——它数的是日志保留窗口内的累计；`systemctl show -p NRestarts` = **0**，
+真正的重启是我今天手动部署的那几次。结论方向没变（部署即作废等待），但"多少倍"必须来自
+带时间戳的启动行，不是 `grep -c`。

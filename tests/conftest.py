@@ -90,6 +90,21 @@ def _restore_settings():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_cooldowns(tmp_path, monkeypatch):
+    """主机降速表现在落在盘上（v1.69），每条用例要有自己的一份，否则互相污染。
+
+    和 v1.56 那次的计数器落盘是同一个坑：`DATA_DIR` 是整套测试共用的临时目录，
+    上一条用例挂起了 example.org，下一条"没挂起"的断言就会被它压住。
+    """
+    from app.collectors import base
+
+    monkeypatch.setattr(base, "_cooldown_path", lambda: tmp_path / "source_cooldowns.json")
+    monkeypatch.setattr(base, "_cooldowns", {}, raising=False)
+    monkeypatch.setattr(base, "_cooldowns_loaded", False, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clean_tables():
     """Each test starts from an empty database; row counts stay meaningful."""
     from sqlalchemy import delete

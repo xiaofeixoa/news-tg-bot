@@ -136,26 +136,22 @@ async def cmd_topics(message: Message, news: NewsService) -> None:
 async def cmd_sources(message: Message, news: NewsService, app_config: AppConfig) -> None:
     configured = news.configured_sources()
     live = {s["name"]: s for s in news.sources()}
+    stats = news.stats()
     lines = ["🔌 <b>信息来源</b>", ""]
     for source in configured:
         state = live.get(source["name"], {})
-        if not source["enabled"]:
-            flag = "⚪️"
-        elif state.get("last_error"):
-            flag = "🔴"
-        elif state.get("last_success_at"):
-            flag = "🟢"
-        else:
-            flag = "🟡"
+        flag, note = fmt.source_state_flag(
+            state, enabled=bool(source["enabled"]),
+            fail_threshold=int(stats.get("source_fail_threshold") or 5))
         detail = f"{fmt.esc(app_config.source_type_label(source['type']))} · {fmt.esc(app_config.quality_label(source['quality']))}"
         if state.get("last_success_at"):
             detail += f" · 上次成功 {state['last_success_at']:%m-%d %H:%M}"
         if state.get("items"):
             detail += f" · 采集 {state['items']} 条"
         lines.append(f"{flag} <b>{fmt.esc(source['name'])}</b>\n   {detail}")
-        if state.get("last_error"):
-            lines.append(f"   <i>错误：{fmt.esc(fmt.plain(state['last_error'], 120))}</i>")
-    lines += ["", fmt.status_line(news.stats())]
+        if note:
+            lines.append(note)
+    lines += ["", fmt.status_line(stats)]
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 

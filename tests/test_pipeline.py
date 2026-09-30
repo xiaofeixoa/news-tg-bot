@@ -1205,6 +1205,33 @@ async def test_a_quiet_maintenance_still_says_it_ran(monkeypatch):
     line = [i for i in info if i.startswith("health check:")]
     assert line, f"维护跑完一个字都没留：{info}"
     assert "7 article(s) in db" in line[0] and "999999MB free" in line[0]
+    assert "0 parked host(s)" in line[0], line[0]
+
+
+@pytest.mark.asyncio
+async def test_a_host_we_are_parked_on_shows_up_in_the_health_line(monkeypatch):
+    """v1.68 不再每轮刷"我们在等"，v1.69 又让等待活过重启——那这一行必须说清楚。
+
+    否则运维看到的是一句 `0 failing` 加上一个什么都不产出的源，和"这个源今天
+    就是没货"完全分不开。
+    """
+    from app.collectors.base import cool_down
+    from app.scheduler import jobs as jobs_mod
+    from app.scheduler.jobs import NewsJobs
+    from app.services.news import NewsService
+
+    cool_down("https://linux.do/c/welfare/36.rss", 3600)
+    info: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "info", lambda *a, **k: info.append(str(a[0]) % a[1:] if a else ""))
+    monkeypatch.setattr(NewsService, "archive_old", lambda self: 0)
+    monkeypatch.setattr(NewsService, "stats", lambda self: {"total_articles": 7, "disk_free_mb": 999_999})
+    jobs = NewsJobs(get_config())
+    monkeypatch.setattr(jobs.news, "user_for", lambda chat_id, **k: {})
+    await jobs.run_maintenance()
+    health = [i for i in info if i.startswith("health check:")][0]
+    assert "1 parked host(s)" in health, health
+    named = [i for i in info if i.startswith("parked on")]
+    assert named and "linux.do" in named[0] and "60 min" in named[0], info
 
 
 # ------------------------------------ 空简报：日志不能拿"该发了"当理由
