@@ -32,12 +32,14 @@ STALE_CALLBACK = "这条消息已经不可用了，请再用 /免费 打开一�
 async def cmd_free(message: Message, command: CommandObject, news: NewsService,
                    app_config: AppConfig) -> None:
     days, tool, keyword = _parse_args((command.args or "").strip(), app_config)
-    items, note = _collect(news, days=days, tool=tool, keyword=keyword, config=app_config)
+    items, note, total = _collect(news, days=days, tool=tool, keyword=keyword,
+                                  config=app_config)
     live, checked = await _live(app_config, term=keyword or tool)
     tz_name = news.user_for(message.chat.id).get("timezone") or app_config.settings.timezone
     text = fmt.clip(fmt.free_offer_list(items, config=app_config, tz_name=tz_name,
                                         days=days, tool=tool, live=live, note=note,
-                                        live_checked=checked, unverified=bool(note)))
+                                        live_checked=checked, unverified=bool(note),
+                                        total=total))
     store.remember_days(message.chat.id, days)
     await message.answer(text, parse_mode="HTML",
                          reply_markup=K.free_keyboard(news.free_offer_tools(days=days), days=days))
@@ -71,12 +73,14 @@ async def cb_free(callback: CallbackQuery, news: NewsService, app_config: AppCon
         log.warning("unknown free callback payload %r from chat %s; using the default window",
                     payload, chat_id)
     store.remember_days(chat_id, days)
-    items, note = _collect(news, days=days, tool=tool, keyword=None, config=app_config)
+    items, note, total = _collect(news, days=days, tool=tool, keyword=None,
+                                  config=app_config)
     live, checked = await _live(app_config, term=tool)
     tz_name = news.user_for(chat_id).get("timezone") or app_config.settings.timezone
     text = fmt.clip(fmt.free_offer_list(items, config=app_config, tz_name=tz_name or "UTC",
                                         days=days, tool=tool, live=live, note=note,
-                                        live_checked=checked, unverified=bool(note)))
+                                        live_checked=checked, unverified=bool(note),
+                                        total=total))
     keyboard = K.free_keyboard(news.free_offer_tools(days=days), days=days)
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
@@ -136,7 +140,7 @@ async def _live(config: AppConfig, *, term: str | None = None) -> tuple[str, boo
 
 
 def _collect(news: NewsService, *, days: int, tool: str | None, keyword: str | None,
-             config: AppConfig) -> tuple[list[ArticleView], str]:
+             config: AppConfig) -> tuple[list[ArticleView], str, int | None]:
     """Free-offer rows for this scope, plus a note when we had to fall back.
 
     The fallback matters: a keyword search that finds no promo still returns the
@@ -146,13 +150,13 @@ def _collect(news: NewsService, *, days: int, tool: str | None, keyword: str | N
     if tool and not keyword:
         found = news.free_offers(days=days, limit=limit, tool=tool)
         if found:
-            return found, ""
+            return found, "", news.free_offer_count(days=days, tool=tool)
         # 词表里有这个工具，但没采到它的限免：至少把相关新闻找出来，
         # 并标注它们不是限免（/free qoder 只回一句"没有"等于没答）。
         keyword = tool
     items = news.free_offers(days=days, limit=limit)
     if not keyword:
-        return items, ""
+        return items, "", news.free_offer_count(days=days)
     # 关键词（例如 "zcode"）可能还没被登记成免费资讯，回落到全文检索 + 现场判定
     from app.processing.free_offers import detect
 
@@ -161,10 +165,12 @@ def _collect(news: NewsService, *, days: int, tool: str | None, keyword: str | N
     matched = [item for item in searched
                if detect(item.title, item.summary, item.content, config=config) is not None]
     if matched:
-        return matched, ""
+        # 回落路径数是"检索命中且判定为限免"的行数，和限免表的总数不是一回事，
+        # 所以这里不给总数（宁可不写，也不写一个别的口径的数字）。
+        return matched, "", None
     # 明确告诉用户"有这个关键词的新闻，但没看到免费信息"，比空列表有用
     return searched[:limit], (f"🔎 没有找到“{keyword} 免费”的明确消息，"
-                              "下面只是相关新闻，别当成限免。")
+                              "下面只是相关新闻，别当成限免。"), None
 
 
 FREE_INTENT_RE = re.compile(r"(免费|白嫖|限免|不要钱|free)", re.I)
@@ -189,7 +195,7 @@ async def answer_free(message: Message, news: NewsService, config: AppConfig, *,
         7 if any(k in question for k in ("这周", "本周", "7 天", "最近几天")) else \
         int(config.get("free.days_default", 30))
     keyword = tool and None
-    items, note = _collect(news, days=days, tool=None, keyword=None, config=config)
+    items, note, _total = _collect(news, days=days, tool=None, keyword=None, config=config)
     if tool:
         filtered = [i for i in items if (i.free_offer or {}).get("tool", "").lower() == tool.lower()]
         if not filtered:

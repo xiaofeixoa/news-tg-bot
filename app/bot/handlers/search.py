@@ -29,8 +29,11 @@ async def cmd_search(message: Message, command: CommandObject, news: NewsService
         )
         return
     days = 30
-    items = search.search(query, days=days, limit=PER_PAGE * 2)
-    title = f"🔎 “{fmt.esc(fmt.plain(query, 40))}” · 最近 {days} 天 {len(items)} 条"
+    result = search.search_result(query, days=days, limit=PER_PAGE * 2)
+    items = result.items
+    # 命中的条数与这一页的条数是两件事，写法收在 fmt.search_title 里（可测）。
+    title = fmt.search_title(query, matched=result.matched, shown=len(items), days=days,
+                             pool_capped=result.pool_capped, pool=result.pool)
     if not items:
         await message.answer(
             f"{title}\n\n没有找到相关新闻。\n"

@@ -305,7 +305,7 @@ def free_offer_list(items: Sequence[ArticleView], *, config: AppConfig | None = 
                     tz_name: str = "UTC", days: int = 30, tool: str | None = None,
                     with_links: bool = True, live: str = "", note: str = "",
                     live_checked: bool = True, heading: str | None = None,
-                    unverified: bool = False) -> str:
+                    unverified: bool = False, total: int | None = None) -> str:
     """Render the /免费 answer: 什么工具/模型现在免费."""
     config = config or get_config()
     from app.processing.free_offers import kind_emoji
@@ -335,7 +335,7 @@ def free_offer_list(items: Sequence[ArticleView], *, config: AppConfig | None = 
 
     # A caller-supplied heading brings its own emoji.
     title = f"{esc(heading)}" if heading else "🎁 <b>近期免费 / 限免</b>"
-    lines = [f"{title}（{days} 天内 {len(items)} 条{scope}）", ""]
+    lines = [f"{title}（{days} 天内 {offer_scope(total, len(items))}{scope}）", ""]
     if note:
         lines += [esc(note), ""]
     if live:
@@ -535,6 +535,28 @@ def source_state_flag(state: dict[str, Any], *, enabled: bool = True,
         if note:
             parts.append(f"这一轮没有去问它：{note}")
     return flag, ("   <i>" + "；".join(parts) + "</i>" if parts else "")
+
+
+def search_title(query: str, *, matched: int, shown: int, days: int,
+                 pool_capped: bool = False, pool: int = 0) -> str:
+    """检索标题：先说命中几条，再说这一页几条，池子满了就承认数得保守。
+
+    以前这一行是 `f"最近 {days} 天 {len(items)} 条"`，而 `items` 是被 `limit` 截过的
+    一页：线上 `/search Claude` 于是对 245 条真实命中说"20 条"。
+    """
+    title = f"🔎 “{esc(plain(query, 40))}” · 最近 {days} 天命中 {matched} 条"
+    if matched > shown:
+        title += f"，这里列出前 {shown} 条"
+    if pool_capped:
+        title += f"（只数了近 {pool} 条里的命中，关键词越宽这个数越保守）"
+    return title
+
+
+def offer_scope(total: int | None, shown: int) -> str:
+    """"共 245 条，这里列出最新 12 条"——以前这一行只会说"12 条"，那是页大小。"""
+    if total is None or total <= shown:
+        return f"{shown} 条"
+    return f"共 {total} 条，这里列出最新 {shown} 条"
 
 
 def pending_note(stats: dict[str, Any]) -> str:

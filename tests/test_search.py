@@ -186,3 +186,62 @@ def test_a_row_stored_with_the_wrong_sense_is_still_found_by_the_right_word(sess
     # 反过来：他照着旧简报里的"模特"去搜，也该走到 AI 行的方向
     assert [a.title for a in service().search("模特", days=7, limit=5)] == \
         ["OpenAI pauses training of its most capable ones"]
+
+
+# ------------------------------------ 标题要说"命中几条"，不是"这一页有几条"
+def _rich_nvidia(session, *, n: int) -> None:
+    """每一条都同时含 NVIDIA / GPU / 模型，保证权重过 `MIN_MATCH_WEIGHT` 那道槛。"""
+    for i in range(n):
+        add(session, title=f"Nvidia releases GPU model {i} for agents",
+            title_zh=f"Nvidia 发布第 {i} 个 GPU 模型",
+            summary="Nvidia says the new GPU model lowers inference cost.",
+            summary_zh=f"Nvidia 表示这款 GPU 模型降低了推理成本，第 {i} 版。",
+            hours_ago=0.5 + i * 0.1)          # i 越大越早
+
+
+def test_search_result_keeps_the_answer_and_the_page_apart(session):
+    from app.services.search import SearchResult
+
+    _rich_nvidia(session, n=5)
+    result = service().search_result("NVIDIA", days=7, limit=2)
+    assert isinstance(result, SearchResult)
+    assert result.matched == 5, f"命中数被页大小截断了：{result.matched}"
+    assert len(result.items) == 2, result.items
+    assert result.pool_capped is False, result
+    # 权重与分数相同的这一批，页取的仍是"最新的那两条"（先按 published_at 排过）
+    assert [a.title for a in result.items] == [
+        "Nvidia releases GPU model 0 for agents",
+        "Nvidia releases GPU model 1 for agents"], [a.title for a in result.items]
+    assert len(service().search("NVIDIA", days=7, limit=2)) == 2, "老契约不能变"
+
+
+def test_a_wide_query_is_no_longer_counted_only_within_one_page(session):
+    """/search 用 limit=2 时旧实现每词只读 6 行，标题最多也就敢说 6 条。"""
+    _rich_nvidia(session, n=9)
+    result = service().search_result("NVIDIA", days=7, limit=2)
+    assert result.matched == 9, result.matched
+    assert len(result.items) == 2, result.items
+
+
+def test_a_pool_that_fills_up_says_so_instead_of_looking_final(session):
+    from app.config import AppConfig
+    from app.services.search import SearchService
+
+    _rich_nvidia(session, n=6)
+    cfg = AppConfig(settings=get_config().settings,
+                    raw={"search": {"pool_per_term": 3}}, sources=[])
+    result = SearchService(cfg).search_result("NVIDIA", days=7, limit=2)
+    assert result.pool == 3 and result.pool_capped is True, result
+    assert result.matched < 6, f"候选被截断却没承认：{result.matched}"
+
+
+def test_the_search_title_separates_the_hit_count_from_the_page():
+    from app.services import format as fmt
+
+    whole = fmt.search_title("Claude", matched=245, shown=20, days=30)
+    assert "命中 245 条" in whole and "这里列出前 20 条" in whole, whole
+    exact = fmt.search_title("英伟达", matched=3, shown=3, days=30)
+    assert "命中 3 条" in exact and "列出" not in exact, exact
+    capped = fmt.search_title("AI", matched=400, shown=20, days=30,
+                              pool_capped=True, pool=400)
+    assert "命中 400 条" in capped and "关键词越宽这个数越保守" in capped, capped

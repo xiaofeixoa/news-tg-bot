@@ -156,10 +156,10 @@ RSSHub 同理：把 `url` 指向你自己的 RSSHub 实例即可（`config/sourc
 | `/latest` | 最近 24 小时 |
 | `/today` / `/yesterday` | 今日 / 昨日（按你的时区） |
 | `/digest` / `/digest evening` | 立即生成早报 / 晚报 |
-| `/search 关键词` | 搜索历史新闻，如 `/search MCP` |
+| `/search 关键词` | 搜索历史新闻，如 `/search MCP`；标题报的是**真实命中条数**，并说明这一页列了几条（v1.74 之前那个数字就是页大小 20） |
 | `/summary 123` | 对第 123 号新闻做深度分析（调用强模型） |
 | `/topics` | 分类入口，点按钮看该方向新闻；每栏的数字是**整个 7 天窗口**的真实条数（v1.73 之前只数得到最新 1000 条那一页） |
-| `/free` / `/免费` | 现在哪些 agent / 模型 / API 免费，见 §3.1 |
+| `/free` / `/免费` | 现在哪些 agent / 模型 / API 免费，标题说「共 N 条，这里列出最新 M 条」（v1.74 之前只说 M），见 §3.1 |
 | `/sources` | 数据源健康状态：🟢 正常 🟠 偶发失败（未到警戒线）🔴 连续失败（≥ `alerts.source_fail_threshold`，默认 5）⚪️ 已禁用 🟡 还没跑过；正在守对方给的 `Retry-After` 会写「约 N 分钟后再问」，这份等待现在活得过重启（§11 v1.69） |
 | `/settings` | 早报/晚报各自的开关与时间、突发新闻开关、评分门槛（点一下告诉他这一档还剩几条）、暂停开关 |
 | `/setinterest` | 自然语言设置兴趣：`/setinterest 我主要关注 AI Agent、开源模型、GPU 和 Claude` |
@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 709 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 715 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3399,3 +3399,48 @@ Other               67         94      +27
 线上（部署后）：`/topics` 的合计从 1000 变成 **1300**（=SQL 真值，见上表）；
 健康行 `processing backlog: 1 row(s), oldest waiting 0.0h`、`1812 article(s) in db, 1 unprocessed … 1811MB free（24h 方向未知，告警线 1024MB）`；
 Traceback 计数与部署前逐文件一致（`db.log`/`scheduler.log` 各 4 条仍是 09-26 旧账），两台 `active`、`NRestarts=0`。
+
+### v1.74 `/search` 的"最近 30 天 20 条"是页大小：真实命中 245 条
+v1.73 修完 `/topics` 之后，同一个问题还剩两处没人看：**凡是"标题里带条数"的列表，那个数是数出来的还是一页？** 答案是两页。
+
+线上真实数据（部署后原样跑 `search_result()` / `free_offer_count()`，只读，不发消息）：
+
+```
+旧标题                                       新标题
+🔎 “Claude” · 最近 30 天 20 条            →  🔎 “Claude” · 最近 30 天命中 245 条，这里列出前 20 条
+🔎 “GPU” · 最近 30 天 20 条               →  🔎 “GPU” · 最近 30 天命中 175 条，这里列出前 20 条
+🔎 “英伟达” · 最近 30 天 20 条             →  🔎 “英伟达” · 最近 30 天命中 99 条，这里列出前 20 条
+🔎 “open source” · 最近 30 天 20 条        →  🔎 “open source” · 最近 30 天命中 570 条，这里列出前 20 条
+/免费 30 天：12 条                        →  /免费 30 天：共 42 条，这里列出最新 12 条
+```
+
+为什么必然如此：`handlers/search.py` 写的是 `f"最近 {days} 天 {len(items)} 条"`，而 `items = search(query, limit=PER_PAGE*2)`；
+更要紧的是检索内部每个关键词只读 `limit * 3 = 60` 行候选——**那个数字同时决定了"答案最多有多少"**，
+所以标题不管库里有多少，永远不会超过 20。`/免费` 同理（`free.limit` 默认 12，取 24 显示 12）。
+
+- `SearchService.search_result()` 返回 `SearchResult(items, matched, pool_capped, pool)`：
+  **一页**和**一共**是两件事，一次排序里同时算出来，不复制第二套门槛判定。
+  `search()` 保留原契约（返回那一页），所有老调用方与测试不动。
+- 候选池与页大小解耦：`search.pool_per_term`（默认 400）。旧写法 `max(limit*3, …)` 那个 ×3 是遗留魔法数，
+  测试当场把它抓了出来（配置写 3、limit 写 2 时池子变成 6），已改成"至少够填满这一页"。
+- 池子真被填满时不装死：标题追加"（只数了近 400 条里的命中，关键词越宽这个数越保守）"——
+  宁可说"我数得保守"，不说一个像答案的页大小。
+- 每条 `ArticleView` 要查一次事件成员与来源列表，所以视图只为一页而构建；
+  旧代码给整个 ranked 列表建视图再切 `[:limit]`，池子放宽后这一点从"整洁"变成必要。
+- `/免费`：新增 `repo.count_free_offers()` 与 `_free_offer_conditions()`——列表和计数共用一套闸门
+  （归档 / `filtered_out` / 时间窗 / 工具名），`NewsService.free_offer_count()` 供标题用；
+  回落路径（关键词命中但不是限免）**不给总数**，因为那是另一个口径，宁可不写。
+- 标题文案从 handler 搬进 `fmt.search_title()` / `fmt.offer_scope()`：handler 保持薄（这本来就是本项目的分层规矩），
+  而且这样可测。
+
+测试：709 → **715 passed**（Windows 与 `anr-jump` 上 Linux/UTC 同一棵树，`exit=0`）。
+新增 6 条：命中与一页分离、宽词不再被一页框住、池满要承认、检索标题的三种写法、
+`/免费` 标题的"共/列出"、限免计数与列表共用闸门（归档→3、filtered→2、按工具→2 逐步核对）。
+本轮 7 处反向验证全部 CAUGHT：候选池退回 `limit*3`、命中数写成一页条数、页不再截断、
+池满不说、标题不区分命中与本页、`/免费` 回到页大小、限免两道闸门被抄歪。
+本轮被自己的套件抓到两处：`scripts/preview.py` 也在调 `_collect()`（3 元组一改它就先炸，
+说明这条"和 bot 走同一条路径"的测试确实有用）；另一处是我在测试里写了一句
+`assert X if False else Y` 的垃圾表达式，重写时才清掉。
+
+线上核对：`/search` 走真数据的新旧对照见本节开头；两台 `service=active`、`NRestarts=0`，
+部署后 Traceback 与部署前逐文件一致（VPS `db.log`/`scheduler.log` 各 4 条仍是 09-26 旧账，jump 0）。

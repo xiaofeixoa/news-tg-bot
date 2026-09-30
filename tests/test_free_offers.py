@@ -185,6 +185,56 @@ def test_free_list_rendering_is_chinese_and_grouped(session):
     assert "判断依据" in text
 
 
+def test_the_free_header_names_the_total_and_the_page(session):
+    """/免费 标题里的"几天内 N 条"以前也是页大小（`free.limit` 默认 12）。"""
+    from app.services.news import get_news_service
+
+    for i in range(3):
+        seed_free(session, f"opencode adds free DeepSeek V3 access variant {i}",
+                  f"https://reddit.com/r/b{i}")
+    news = get_news_service()
+    items = news.free_offers(days=7, limit=2)
+    total = news.free_offer_count(days=7)
+    assert (len(items), total) == (2, 3), (len(items), total)
+    text = fmt.free_offer_list(items, config=get_config(), days=7, total=total)
+    assert "共 3 条" in text and "这里列出最新 2 条" in text, text
+    plain_page = fmt.free_offer_list(items, config=get_config(), days=7)
+    assert "共" not in plain_page and "2 条" in plain_page, plain_page
+
+
+
+
+def test_the_free_count_shares_the_list_gates_not_just_the_words(session):
+    """"一共几条"和"列表里有什么"必须同一套闸门，否则又是一处两个定义。"""
+    from sqlalchemy import select
+
+    from app.database.database import session_scope
+    from app.database.models import Article
+    from app.services.news import get_news_service
+
+    def flag(id_: int, column: str, value: bool) -> None:
+        with session_scope() as s:
+            setattr(s.get(Article, id_), column, value)
+
+    for i in range(4):
+        seed_free(session, f"opencode adds free DeepSeek V3 access case {i}",
+                  f"https://reddit.com/r/gate{i}")
+    with session_scope() as s:
+        ids = list(s.scalars(select(Article.id).order_by(Article.id)))
+    news = get_news_service()
+    assert (news.free_offer_count(days=7), len(news.free_offers(days=7, limit=10))) == (4, 4)
+    flag(ids[0], "is_archived", True)
+    assert (news.free_offer_count(days=7), len(news.free_offers(days=7, limit=10))) == (3, 3)
+    flag(ids[1], "filtered_out", True)
+    assert (news.free_offer_count(days=7), len(news.free_offers(days=7, limit=10))) == (2, 2)
+    # 工具过滤也必须是同一套：数出来的和列出来的要指向同一批行
+    offers = news.free_offers(days=7, limit=10)
+    tool = (offers[0].free_offer or {}).get("tool")
+    assert tool, offers[0].free_offer
+    assert (news.free_offer_count(days=7, tool=tool),
+            len(news.free_offers(days=7, limit=10, tool=tool))) == (2, 2)
+
+
 def test_empty_free_list_gives_a_useful_hint():
     text = fmt.free_offer_list([], config=get_config(), days=7)
     assert "没有发现" in text and "/free deepseek" in text

@@ -313,20 +313,35 @@ def rows_needing_key_points(session: Session, *, limit: int = 200,
     return list(session.scalars(stmt))
 
 
+def _free_offer_conditions(*, days: int, tool: str | None = None,
+                           since: datetime | None = None) -> list[Any]:
+    """One definition of "a recent free-offer row" for both the list and its count."""
+    start = since or (datetime.utcnow() - timedelta(days=max(1, days)))
+    conds: list[Any] = [Article.is_free_offer.is_(True), Article.is_archived.is_(False),
+                        Article.filtered_out.is_(False), Article.published_at >= start]
+    if tool:
+        conds.append(func.lower(Article.free_offer_tool) == tool.lower())
+    return conds
+
+
+def count_free_offers(session: Session, *, days: int = 30, tool: str | None = None,
+                      since: datetime | None = None) -> int:
+    """`/免费` 标题里那句"共几条"：和列表同一套条件，但不受页大小影响。"""
+    stmt = select(func.count(Article.id)).where(
+        *_free_offer_conditions(days=days, tool=tool, since=since))
+    return int(session.scalar(stmt) or 0)
+
+
 def free_offers(session: Session, *, days: int = 30, limit: int = 20,
                 tool: str | None = None, since: datetime | None = None) -> list[Article]:
     """Latest "this is free right now" items, newest first."""
-    start = since or (datetime.utcnow() - timedelta(days=max(1, days)))
     stmt = (
         select(Article)
-        .where(Article.is_free_offer.is_(True), Article.is_archived.is_(False),
-               Article.filtered_out.is_(False), Article.published_at >= start)
+        .where(*_free_offer_conditions(days=days, tool=tool, since=since))
         .order_by(Article.published_at.desc(), Article.final_score.desc())
         .limit(limit)
         .options(selectinload(Article.tags))
     )
-    if tool:
-        stmt = stmt.where(func.lower(Article.free_offer_tool) == tool.lower())
     return list(session.scalars(stmt))
 
 

@@ -106,13 +106,14 @@ async def main(argv: list[str] | None = None) -> int:
 
         tool = args.argument or None
         # 和 bot 走同一条代码路径，否则这里绿、线上红
-        items, note = _collect(news, days=args.days, tool=tool, keyword=None, config=config)
+        items, note, total = _collect(news, days=args.days, tool=tool, keyword=None,
+                                      config=config)
         live, checked = await _live(config, term=tool)
         print(render(fmt.clip(fmt.free_offer_list(items, config=config,
                                                   tz_name=config.settings.timezone,
                                                   days=args.days, tool=tool, live=live,
                                                   note=note, live_checked=checked,
-                                                  unverified=bool(note)))))
+                                                  unverified=bool(note), total=total))))
         print("\n工具统计:", [(t["tool"], t["count"]) for t in news.free_offer_tools(days=args.days)])
         return 0
 

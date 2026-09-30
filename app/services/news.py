@@ -310,6 +310,11 @@ class NewsService:
         with session_scope() as session:
             return _views(session, repo.free_offers(session, days=days, limit=limit * 2, tool=tool))[:limit]
 
+    def free_offer_count(self, *, days: int = 30, tool: str | None = None) -> int:
+        """`/免费` 标题要的"一共有几条"：SQL 数，不受 `free.limit` 那块页大小影响。"""
+        with session_scope() as session:
+            return repo.count_free_offers(session, days=days, tool=tool)
+
     def free_offer_tools(self, *, days: int = 30, limit: int = 12) -> list[dict[str, Any]]:
         from app.processing.free_offers import kind_emoji
 

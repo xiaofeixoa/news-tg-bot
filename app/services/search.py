@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.config import AppConfig, get_config
+from app.config import AppConfig, as_int, get_config
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article
@@ -27,6 +27,20 @@ NOISE = [
     "哪些", "什么", "请问", "帮我", "看看", "一下", "关于", "the", "latest", "recent",
     "what", "is", "are", "any", "news", "about", "of",
 ]
+
+
+@dataclass
+class SearchResult:
+    """一次检索的两件事：这一页要显示什么，以及一共命中了多少。
+
+    以前只有前者存在，于是 `/search` 的标题把 `len(items)` 当成"最近 30 天有几条"
+    报了出去——那个数永远不可能超过页大小。
+    """
+
+    items: list[ArticleView]
+    matched: int
+    pool_capped: bool = False
+    pool: int = 0
 
 
 @dataclass
@@ -51,24 +65,43 @@ class SearchService:
 
     def search(self, query: str, *, days: int = 30, limit: int = 10,
                min_score: float = 0) -> list[ArticleView]:
+        """The page only. Anything that shows a count wants `search_result`."""
+        return self.search_result(query, days=days, limit=limit,
+                                  min_score=min_score).items
+
+    def search_result(self, query: str, *, days: int = 30, limit: int = 10,
+                      min_score: float = 0) -> SearchResult:
         """Run every LIKE the query justifies, then rank the union.
 
         One LIKE cannot answer Chinese: `%模型发布%` misses "阿里发布了新模型", and
         `%英伟达%` misses the row that says NVIDIA. The windows and the alias table
         close those two holes, and a row is then ranked by how much of the query it
         actually carries rather than by which pattern happened to be tried first.
+
+        `matched` counts everything that passes the gates, so a header can say
+        "命中 245 条" instead of repeating the page size: measured on the live box
+        2026-10-01, `/search Claude` announced 20 条 while 245 rows matched (GPU 175,
+        NVIDIA/英伟达 98, and "AI"/"Agent" 500+). Two numbers come out of this pass -
+        the answer and the page - and the title must not confuse them.
         """
         since = datetime.utcnow() - timedelta(days=max(1, days))
         terms = clean_query(query)
         pool = build_pool(terms, query, self.config)
         coverage, needed = concept_coverage(pool, terms, query, self.config)
+        # 候选池与页大小解耦：以前每词只取 `limit*3` 行，于是"命中多少"永远不可能
+        # 超过页大小三倍——那正是被当成答案报出去的那个数。现在池子只看配置，
+        # 下限是"至少够填满要显示的那一页"。
+        per_term = max(limit, as_int(self.config.get("search.pool_per_term", 400), 400))
+        capped = False
         with session_scope() as session:
             hits: dict[int, list[Any]] = {}
             for candidate, weight in pool.items():
                 rows = repo.query_articles(
-                    session, since=since, search=candidate, limit=limit * 3,
+                    session, since=since, search=candidate, limit=per_term,
                     min_score=min_score, order_by_score=False, require_processed=False,
                 )
+                if len(rows) >= per_term:
+                    capped = True
                 for article in rows:
                     entry = hits.get(article.id)
                     if entry is None:
@@ -77,7 +110,7 @@ class SearchService:
                         entry[1] += weight
                         entry[2] |= coverage.get(candidate) or set()
             if not hits:
-                return []
+                return SearchResult([], 0, capped, per_term)
             ranked = sorted(hits.values(), key=lambda entry: entry[0].published_at or since,
                             reverse=True)
             # Stable two-pass sort: newest first, then query coverage, then score.
@@ -85,7 +118,10 @@ class SearchService:
                 [entry for entry in ranked
                  if entry[1] >= MIN_MATCH_WEIGHT and len(entry[2]) >= needed],
                 key=lambda entry: (entry[1], entry[0].final_score or 0), reverse=True)
-            return [r for r in _views(session, [entry[0] for entry in ranked])][:limit]
+            # 一条 view 要查一次事件成员与来源列表：只为数出来的那一页构建，
+            # 池子放宽之后这一点从"整洁"变成了必要。
+            return SearchResult(_views(session, [entry[0] for entry in ranked][:limit]),
+                                len(ranked), capped, per_term)
 
     def counts_by_source(self, *, days: int = 7) -> list[tuple[str, int]]:
         since = datetime.utcnow() - timedelta(days=days)
