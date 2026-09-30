@@ -40,14 +40,16 @@ async def cmd_summary(message: Message, command: CommandObject, news: NewsServic
         f"🧠 正在对 #{item.id} 做深度分析…"
         if app_config.settings.llm_configured
         else f"📄 #{item.id}：这台机器没配 LLM，直接给你规则摘要…")
-    text = await search.deep_summary(article_id)
-    if not text:
+    result = await search.deep_summary_result(article_id)
+    if not result.text:
         await placeholder.edit_text("分析失败，请稍后重试。")
         return
     await placeholder.delete()
-    await message.answer(text, parse_mode="HTML",
-                         reply_markup=K.deep_keyboard(item.id, item.url))
-    log.info("deep analysis #%s for chat_id=%s", article_id, message.chat.id)
+    await message.answer(result.text, parse_mode="HTML",
+                         reply_markup=K.deep_keyboard(item.id, item.url,
+                                                      summary_available=result.analyzed))
+    log.info("deep analysis #%s for chat_id=%s analyzed=%s", article_id, message.chat.id,
+             result.analyzed)
 
 
 def _resolve_id(chat_id: int, argument: str | None) -> int | None:

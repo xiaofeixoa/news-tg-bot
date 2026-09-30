@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 729 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 732 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3574,3 +3574,52 @@ anr-vps / anr-jump：llm_base_url 未设、llm_model 为空串 → llm_configure
 `anr-jump`（4GB）跑，`anr-vps` 只留一个不碰数据库的配置级证明。两个教训：
 内存紧张的机器上不要并发跑"测试 + 真库探针"；一个进程没有输出时先看 `/proc/<pid>/state` 和它打开的
 fd，再决定是等还是杀——`grep -c Traceback` 前后一致才算"杀掉它没有留下后遗症"的证据。
+
+### v1.78 v1.77 的镜像：`/summary` 回了一张卡片，下面又挂一个"看这张卡片"的按钮
+
+上一轮砍掉 🧠 之后，同一类缺陷在**另一块键盘**上活了下来，而且它比 🧠 更可及：
+`/summary <编号>` 是 `preview.py` 的页脚**主动教给用户**的入口（"想看 AI 深度分析：/summary <编号>；
+没配 LLM 时它只会给规则摘要"）。规则模式下这条路径回的就是卡片本身，
+而 `deep_keyboard()` 无条件追加 `📄 常规摘要 → a:<id>`，`cb_article` 再发的正是同一张卡片——
+一个把用户刚看到的东西当成"更多内容"的按钮。改动前的真实构成：
+
+```
+deep_keyboard()：[🔗 阅读原文, 📄 常规摘要(a:1424), ⬅️ 返回新闻]   ← 无条件，三处调用共用
+其中两处（cmd_summary / cb_deep）在规则模式下回的就是卡片
+`a:` 的收件人 cb_article 做的事 = 再渲染一次同一张卡片
+```
+
+修法不能是"handler 自己判断文本长得像不像卡片"——那是第二个定义。判定放回产生这条消息的地方：
+
+- `deep_summary_result()` 返回 `DeepAnalysis(text, analyzed)`，`analyzed=True` 只在**真的拿到强模型结果**时为真；
+  规则模式、模型异常（回退成卡片）都是 `False`。`deep_summary()` 保留为只取 `.text` 的薄封装，
+  `scripts/preview.py` 这类只要文本的调用方不受影响。
+- `deep_keyboard(..., summary_available=…)`：`analyzed=False` 时不给「📄 常规摘要」，
+  与 v1.77 的 `article_keyboard(deep_available=…)` 形成对称——**两个方向的"点了没新东西"都关掉了**。
+- `cb_deep` 那句 `callback.answer("正在用 AI 深入分析…")` 同样按配置决定：
+  没配 key 时它现在回答"这台机器没配 LLM，只能给规则摘要"。🧠 已经不渲染，
+  但**过期回调仍然可达**（旧消息里的按钮不会因为新代码而消失），所以这句话仍然要说实话。
+
+测试：729 → **732 passed**（开发机 Windows 全绿；`anr-jump` Linux/UTC 部署后同一棵树 `exit=0`）。
+新增 3 条 + 加强 2 条：`test_the_summary_button_is_offered_only_when_there_is_a_deeper_view_to_return_to`、
+`test_the_result_carries_a_flag_saying_whether_the_model_ran`、
+`test_a_stale_deep_callback_is_told_what_this_machine_can_do`（过期回调 + toast 两件事一起钉），
+并在 v1.77 的 `/summary` 用例与强模型用例里各加一个方向（规则模式没有 `a:`，有 key 时必须有）。
+**8 处反向验证，第一轮 7 CAUGHT / 1 SURVIVED**：M6（把"点进来的规则模式分支"的 `analyzed` 改成 `True`）
+活了下来——因为我的变异脚本只跑了 `tests/test_search.py`，而那一轮的标志位断言只覆盖了冷启动分支。
+补上 `already_shown=True` 的断言后同一变异立刻变红。这是"变异测试要测自己的变异"第二次真的抓到东西：
+**SURVIVED 有两种原因，代码没被覆盖，或者我根本没去碰那块覆盖；先看 scoping 再下结论。**
+
+部署与真机复验（两台 `service=active schema=ok stamp=20260930T210205Z`，三端代码树 md5 一致
+`0b5e03e2016d9856fcea2fce7778e61a`，`Traceback` 计数与部署前相同）：
+
+```
+anr-jump（真库、只读，条目 #1424）：analyzed=False、回的就是卡片（含 📊）
+                                    deep keyboard = [🔗 阅读原文, ⬅️ 返回新闻]，挂着 a: 按钮吗 = False
+anr-vps（机器人所在机，不碰库）    ：summary_available=False -> [阅读原文, 返回新闻]
+                                    summary_available=True  -> [阅读原文, 📄 常规摘要(a:1424), 返回新闻]
+Linux/UTC 部署后同一棵树            ：732 collected，exit=0
+```
+
+有 key 那一侧没有被砍掉：`summary_available=True` 仍然给出「📄 常规摘要」，因为那时屏幕上确实是
+更深的分析，退回常规摘要就是新内容——这一条由 anr-vps 的第二个样本直接印出来，不只是靠测试。

@@ -105,8 +105,17 @@ def article_keyboard(article_id: int, url: str, *, back_tag: str = "news",
     return _keyboard(rows)
 
 
-def deep_keyboard(article_id: int, url: str, *, back_tag: str = "news") -> InlineKeyboardMarkup:
-    rows = [[_url("🔗 阅读原文", url), _cb("📄 常规摘要", cb(ARTICLE, article_id))]]
+def deep_keyboard(article_id: int, url: str, *, back_tag: str = "news",
+                  summary_available: bool = True) -> InlineKeyboardMarkup:
+    """`summary_available=False` 时不给「📄 常规摘要」：屏幕上那段已经是它了（v1.78）。
+
+    和 v1.77 那条 🧠 是同一个缺陷的反方向：那次是按钮给不出新内容，这次是
+    `/summary` 冷启动——规则模式下回的就是卡片，再挂一个"看卡片"的按钮。
+    """
+    row: list[Slot] = [_url("🔗 阅读原文", url)]
+    if summary_available:
+        row.append(_cb("📄 常规摘要", cb(ARTICLE, article_id)))
+    rows: list[list[Slot]] = [row]
     rows.append([_cb("⬅️ 返回新闻", cb(BACK, back_tag))])
     return _keyboard(rows)
 

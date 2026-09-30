@@ -44,6 +44,19 @@ class SearchResult:
 
 
 @dataclass
+class DeepAnalysis:
+    """深度分析的回帖，以及"这一帖里到底有没有新东西"。
+
+    `analyzed=False` 意味着屏幕上那段就是规则摘要，此时"📄 常规摘要"按钮点下去只会
+    重发同一条消息（v1.78）。这个判断只能在这里做——handler 拿到的是一段文本，
+    猜不出它是模型写的还是规则拼的。
+    """
+
+    text: str | None
+    analyzed: bool = False
+
+
+@dataclass
 class AgentAnswer:
     text: str
     used_ids: list[int] = field(default_factory=list)
@@ -220,28 +233,32 @@ class SearchService:
                                fallback=True, intent=intent, query=query)
         return AgentAnswer(F.clip(text, 3600), [a.id for a in results], intent=intent, query=query)
 
-    async def deep_summary(self, article_id: int, *, llm: LLMService | None = None,
-                           already_shown: bool = False) -> str | None:
+    async def deep_summary_result(self, article_id: int, *, llm: LLMService | None = None,
+                                  already_shown: bool = False) -> DeepAnalysis:
         """Layer-3 strong-model analysis (design doc section 23).
 
         没配 LLM 时这里要说实话，而且说实话的方式取决于上下文：从卡片按钮点进来时，
         卡片就在上面一条消息里，再发一遍同样的内容不是"更多分析"，是噪音（今天这台
         机器上每一次点 🧠 得到的都是一张重复卡片加一句末尾小字）。
+
+        `analyzed` 是给调用方看的：只有真的跑过强模型，"📄 常规摘要"才是一个能给出
+        新内容的按钮（v1.78）。它必须在这里判定，而不是让 handler 去猜文本长什么样。
         """
         service = self._llm(llm)
         item = self.news.by_id(article_id)
         if item is None:
-            return None
+            return DeepAnalysis(None, False)
         tz_name = self.config.settings.timezone
         await self.news.ensure_chinese([item])
         if not service.enabled:
             note = ("<i>这台机器没有配置 LLM（<code>LLM_BASE_URL / LLM_API_KEY / LLM_MODEL</code>），"
                     "AI 深度分析不可用。</i>")
             if already_shown:
-                return F.clip(note + "\n\n<i>上一条卡片就是这台机器能给的全部内容；"
-                                     "配上 key 之后这里才会多出跨来源与背景分析（README §5）。</i>")
-            return F.clip(note + "\n\n"
-                          + F.article_card(item, config=self.config, tz_name=tz_name))
+                return DeepAnalysis(F.clip(note + "\n\n<i>上一条卡片就是这台机器能给的全部内容；"
+                                                 "配上 key 之后这里才会多出跨来源与背景分析（README §5）。</i>"),
+                                    False)
+            return DeepAnalysis(F.clip(note + "\n\n"
+                                  + F.article_card(item, config=self.config, tz_name=tz_name)), False)
         related: list[dict[str, Any]] = []
         if item.event_id:
             with session_scope() as session:
@@ -254,11 +271,19 @@ class SearchService:
             deep = await service.deep_analyze(item.to_dict() | {"content": item.content}, related)
         except Exception as exc:
             log.info("deep analysis unavailable for #%s: %s", article_id, exc)
-            return F.clip(
+            # 失败时屏幕上就是常规摘要，所以"看常规摘要"同样不该再给按钮
+            return DeepAnalysis(F.clip(
                 F.article_card(item, config=self.config, tz_name=tz_name)
                 + f"\n\n<i>AI 深度分析暂时失败（{F.esc(type(exc).__name__)}），以上为常规摘要。</i>"
-            )
-        return F.clip(F.article_card(item, config=self.config, tz_name=tz_name, deep=deep))
+            ), False)
+        return DeepAnalysis(F.clip(
+            F.article_card(item, config=self.config, tz_name=tz_name, deep=deep)), True)
+
+    async def deep_summary(self, article_id: int, *, llm: LLMService | None = None,
+                           already_shown: bool = False) -> str | None:
+        """只关心文本的调用方用这个；要不要给按钮请用 `deep_summary_result`。"""
+        return (await self.deep_summary_result(article_id, llm=llm,
+                                               already_shown=already_shown)).text
 
 
 # ------------------------------------------------------------------ helpers

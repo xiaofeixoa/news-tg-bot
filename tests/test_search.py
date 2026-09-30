@@ -282,3 +282,34 @@ async def test_the_deep_analysis_path_is_still_used_when_a_key_exists(session, m
     assert text and "跨来源与背景分析已生成" in text, text
     assert "行业影响" in text, text
     assert "没有配置 LLM" not in text, text
+
+
+async def test_the_result_carries_a_flag_saying_whether_the_model_ran(session, monkeypatch):
+    """按钮该不该挂，只有这里说得清：handler 拿到的是一段文本，看不出是谁写的（v1.78）。"""
+    from app.services.llm import LLMService
+
+    article = add(session, title="Google ships a new TPU", title_zh="Google 发布新 TPU")
+    svc = SearchService(get_config())
+
+    rule = await svc.deep_summary_result(article.id)
+    assert rule.analyzed is False and rule.text, rule
+    # 点进来的那一条也必须说"没有新东西"：这条路径的按钮就是全部差别
+    tapped = await svc.deep_summary_result(article.id, already_shown=True)
+    assert tapped.analyzed is False, tapped.text
+    assert "上一条卡片" in tapped.text, tapped.text
+
+    async def ok(self, payload, related):
+        return {"what_happened": "跨来源分析已生成", "industry_impact": "影响：价格分层"}
+
+    monkeypatch.setattr(LLMService, "deep_analyze", ok)
+    monkeypatch.setattr(LLMService, "enabled", True, raising=False)
+    good = await svc.deep_summary_result(article.id, llm=LLMService(get_config()))
+    assert good.analyzed is True, good.text
+
+    async def boom(self, payload, related):
+        raise RuntimeError("upstream 502")
+
+    monkeypatch.setattr(LLMService, "deep_analyze", boom)
+    failed = await svc.deep_summary_result(article.id, llm=LLMService(get_config()))
+    assert failed.analyzed is False, "模型失败时屏幕上就是常规摘要，别挂一个重发的按钮"
+    assert "暂时失败" in (failed.text or ""), failed.text

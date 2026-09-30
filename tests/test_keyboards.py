@@ -91,3 +91,19 @@ def test_the_deep_button_is_not_offered_when_no_llm_is_configured():
     assert "d:7" not in off_data, off_data
     assert "d:7" in on_data, on_data
     assert any(v == "b:news" for v in off_data), f"返回按钮不能被连坐：{off_data}"
+
+
+def test_the_summary_button_is_offered_only_when_there_is_a_deeper_view_to_return_to():
+    """屏幕上已经是常规摘要时，「📄 常规摘要」点下去只是重发同一条消息（v1.78）。"""
+    off = K.deep_keyboard(7, "https://example.com/a", summary_available=False)
+    on = K.deep_keyboard(7, "https://example.com/a")
+    off_data = [b.callback_data for row in off.inline_keyboard for b in row
+                if getattr(b, "callback_data", None)]
+    on_data = [b.callback_data for row in on.inline_keyboard for b in row
+               if getattr(b, "callback_data", None)]
+    assert "a:7" not in off_data, off_data
+    assert "a:7" in on_data, on_data
+    off_texts = [b.text for row in off.inline_keyboard for b in row]
+    assert not any("常规摘要" in t for t in off_texts), off_texts
+    assert any("阅读原文" in t for t in off_texts), f"链接按钮无害，不该被连坐：{off_texts}"
+    assert any(v == "b:news" for v in off_data), off_data

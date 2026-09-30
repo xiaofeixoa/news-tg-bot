@@ -192,11 +192,16 @@ async def cb_deep(callback: CallbackQuery, news: NewsService, search: SearchServ
     if item is None:
         await callback.answer("这条新闻已经不在库里了", show_alert=True)
         return
-    await callback.answer("正在用 AI 深入分析…")
-    text = await search.deep_summary(article_id, already_shown=True)
-    if callback.message is not None and text:
+    # 这条提示同样不能空头承诺：没配 key 的机器上它只会说要去做的正是它做不到的事
+    # （🧠 按钮已经不渲染，能走到这里的只有旧消息里的过期回调）
+    await callback.answer(
+        "正在用 AI 深入分析…" if app_config.settings.llm_configured
+        else "这台机器没配 LLM，只能给规则摘要")
+    result = await search.deep_summary_result(article_id, already_shown=True)
+    if callback.message is not None and result.text:
         await callback.message.answer(
-            text, parse_mode="HTML", reply_markup=K.deep_keyboard(item.id, item.url)
+            result.text, parse_mode="HTML",
+            reply_markup=K.deep_keyboard(item.id, item.url, summary_available=result.analyzed)
         )
 
 

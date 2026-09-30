@@ -233,6 +233,10 @@ async def test_deep_summary_uses_the_strong_model(seeded, fake_llm):
     await cmd_summary(message, Command(str(seeded[0])), get_news_service(), search, get_config())
     assert "行业影响" in message.all_text() or "核心内容" in message.all_text()
     assert "deep_analyze" in fake_llm.calls
+    # 真的跑了强模型，「📄 常规摘要」才是一个能给出新内容的按钮（v1.78 的反方向）
+    data = [b.callback_data for r in message.sent[-1][1]["reply_markup"].inline_keyboard
+            for b in r if getattr(b, "callback_data", None)]
+    assert f"a:{seeded[0]}" in data, data
 
 
 @pytest.mark.asyncio
@@ -247,6 +251,11 @@ async def test_the_placeholder_promises_only_what_it_can_deliver(seeded, fake_ll
     placeholder = message.sent[0][0]
     assert "正在" not in placeholder, placeholder
     assert "没配 LLM" in placeholder, placeholder
+    # 这条回帖本身就是卡片，所以「📄 常规摘要」会是第二个点了没有新内容的按钮（v1.78）
+    data = [b.callback_data for r in message.sent[1][1]["reply_markup"].inline_keyboard
+            for b in r if getattr(b, "callback_data", None)]
+    assert f"a:{seeded[0]}" not in data, data
+    assert any(d == "b:news" for d in data), data
 
     monkeypatch.setattr(config.settings, "llm_base_url", "https://example.org/v1")
     monkeypatch.setattr(config.settings, "llm_api_key", "sk-test")
@@ -255,6 +264,23 @@ async def test_the_placeholder_promises_only_what_it_can_deliver(seeded, fake_ll
     await cmd_summary(second, Command(str(seeded[0])), get_news_service(),
                       SearchService(config, get_news_service(), fake_llm), config)
     assert "正在" in second.sent[0][0], second.sent[0][0]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_deep_callback_is_told_what_this_machine_can_do(seeded):
+    """🧠 已经不渲染了，但旧消息里的过期回调仍会走到 cb_deep——toast 不能承诺做不到的事。"""
+    from app.bot.handlers.news import cb_deep
+
+    callback = FakeCallback(f"d:{seeded[0]}")
+    await cb_deep(callback, get_news_service(),
+                  SearchService(get_config(), get_news_service()), get_config())
+    assert callback.answers[0][0] == "这台机器没配 LLM，只能给规则摘要", callback.answers
+    body = callback.message.sent[-1][0]
+    assert "上一条卡片" in body, body
+    data = [b.callback_data for r in callback.message.last_kwargs["reply_markup"].inline_keyboard
+            for b in r if getattr(b, "callback_data", None)]
+    assert f"a:{seeded[0]}" not in data, f"这条解释上面没有卡片，但也不该给一个重发卡片的按钮：{data}"
+    assert any(d == "b:news" for d in data), data
 
 
 @pytest.mark.asyncio
