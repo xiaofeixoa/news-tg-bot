@@ -152,7 +152,7 @@ codex.txt — AI News Radar 的长期 AI 开发上下文档案
 也可以把"补发"与"当天新发"的名额分开计。v1.82 只恢复了配置里写了却没生效的那根闸门，
 没有替换任何他自己定的数字。
 
-【Git】commit 待推送；两台 `service=active schema=ok stamp=20260930T232713Z`，
+【Git】commit `e644468`（已推送）；两台 `service=active schema=ok stamp=20260930T232713Z`，
 三端代码树 md5 `8c5f202af081b5bb5c6daa51c3d14717`，`Traceback` 计数不变。
 
 【下一步】
