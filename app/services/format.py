@@ -476,13 +476,35 @@ def plain(value: str, limit: int = 200) -> str:
     return text.strip()[:limit]
 
 
+def source_health_note(stats: dict[str, Any]) -> str:
+    """持续失败的按名字说，抖一下的只说个数。
+
+    以前这两种共用"正在报错"四个字：2026-09-30 线上 `/stats` 报"3 个正在报错"时，
+    那三个是 GitHub 匿名配额抖动（计数 1-2，下一轮自愈），而真正的坏源（Reddit 连着
+    15 次 403）报的是同一句话。能行动的信息和噪音必须分开写。
+    """
+    detail = list(stats.get("sources_failing_detail") or [])
+    failing = int(stats.get("sources_failing") or 0) or len(detail)
+    blipping = int(stats.get("sources_blipping") or 0)
+    bits: list[str] = []
+    if failing:
+        named = "、".join("%s（连续 %s 次：%s）" % (
+            str(item.get("name") or "?"), item.get("errors"),
+            str(item.get("error") or "").strip()[:40] or "原因未记录") for item in detail[:2])
+        more = f" 等共 {failing} 个" if failing > len(detail[:2]) else ""
+        bits.append(f" · ⛔ 持续失败：{named or f'{failing} 个'}{more}")
+    if blipping:
+        bits.append(f" · {blipping} 个刚抖了一下（下一轮自动重试）")
+    return "".join(bits)
+
+
 def status_line(stats: dict[str, Any]) -> str:
     return (
         f"📈 库内新闻：{stats.get('total_articles', 0)} 条 · 近 24 小时 {stats.get('last_24h', 0)} 条\n"
         f"🧠 AI 处理：{'已启用' if stats.get('llm_enabled') else '未配置（使用规则模式）'}\n"
         f"🔌 数据源：{stats.get('sources', 0)} 启用 / {stats.get('sources_configured', 0)} 配置"
         f" · 近 24 小时出过新闻 {stats.get('sources_delivering', 0)} 个"
-        + (f" · {stats.get('sources_failing')} 个正在报错" if stats.get("sources_failing") else "")
+        + source_health_note(stats)
         + disk_warning(stats)
     )
 

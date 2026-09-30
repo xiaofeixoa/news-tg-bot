@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 from datetime import datetime
 
 import pytest
 import yaml
+from sqlalchemy import select
 
 from app.config import get_config
 from app.database import repository as repo
@@ -193,3 +195,76 @@ def test_the_reddit_rss_sources_identify_themselves_rather_than_spoof():
         ua = str((source.get("headers") or {}).get("User-Agent") or "")
         assert "Mozilla" not in ua, f"{source.get('name')} 又戴回 Chrome UA 了：{ua[:40]}"
     assert all("attempts" not in source or int(source["attempts"]) == 1 for source in reddit),         "reddit 按 IP 限流，一轮多次请求只会互相抢额度"
+
+
+# ------------------------------------------------ 什么才算"这个源坏了"
+def _source_with_errors(session, name: str, *, failures: int, error: str = "HTTP 403") -> None:
+    """`sync_sources` 会把没列出的源当成"配置里删掉了"并顺手清零，所以这里直接 upsert。"""
+    source = repo.get_or_create_source(session, name, type_="rss", url=f"https://example.org/{name}.rss",
+                                      quality="B", enabled=True)
+    session.commit()
+    for _ in range(failures):
+        repo.mark_source_fetch(session, source.id, ok=False, error=error)
+    session.commit()
+
+
+def _config_with_alert(config, **values):
+    base = dict(config.raw or {})
+    alerts = {**(base.get("alerts") or {}), **values}
+    base["alerts"] = alerts
+    return dataclasses.replace(config, raw=base)
+
+
+def test_a_healable_hiccup_is_not_reported_as_a_failing_source(session):
+    """线上实测 2026-09-30：/stats 说"3 个正在报错"，那三个是 GitHub 配额抖动（1-2 次），
+    而真正的坏源（Reddit 连着 15 次 403）说的是同一句话。分不开就是他没有行动依据。"""
+    from app.services.format import status_line
+    from app.services.news import NewsService
+
+    _source_with_errors(session, "GitHub Releases", failures=2, error="GitHub API 匿名配额用完")
+    _source_with_errors(session, "Reddit LocalLLaMA RSS", failures=15)
+    stats = NewsService(get_config()).stats()
+    assert stats["sources_failing"] == 1, stats
+    assert stats["sources_blipping"] == 1, stats
+    assert stats["sources_failing_detail"][0]["name"] == "Reddit LocalLLaMA RSS"
+    line = status_line(stats)
+    assert "持续失败：Reddit LocalLLaMA RSS（连续 15 次：HTTP 403）" in line, line
+    assert "1 个刚抖了一下" in line, line
+    assert "正在报错" not in line, line
+
+
+@pytest.mark.asyncio
+async def test_the_same_configured_threshold_drives_stats_and_the_health_log(session, monkeypatch):
+    """一个配置数字，两个读者：改它必须同时改变 /stats 与运维报警。"""
+    from app.services.news import NewsService
+
+    _source_with_errors(session, "Quirky Feed", failures=2, error="HTTP 500")
+    warned: list[str] = []
+    monkeypatch.setattr(jobs_mod.log, "warning",
+                        lambda msg, *a, **k: warned.append(str(msg) % a if a else str(msg)))
+
+    roomy = _config_with_alert(get_config(), source_fail_threshold=5)
+    await jobs_mod.NewsJobs(roomy).run_maintenance()
+    assert not [w for w in warned if "Quirky" in w], warned
+    assert NewsService(roomy).stats()["sources_failing"] == 0
+
+    warned.clear()
+    strict = _config_with_alert(get_config(), source_fail_threshold=1)
+    await jobs_mod.NewsJobs(strict).run_maintenance()
+    assert [w for w in warned if "Quirky" in w and "in a row" in w], warned
+    stats = NewsService(strict).stats()
+    assert stats["sources_failing"] == 1, stats
+    assert stats["sources_blipping"] == 0, stats
+
+
+def test_a_success_clears_the_streak_so_the_warning_means_what_it_says(session):
+    """"连续 N 次"只有在成功时归零才是真话（mark_source_fetch 的这条规矩由用例钉住）。"""
+    from app.services.news import NewsService
+
+    _source_with_errors(session, "Flaky Feed", failures=9)
+    assert NewsService(get_config()).stats()["sources_failing"] == 1
+    source = session.scalar(select(Source).where(Source.name == "Flaky Feed"))
+    repo.mark_source_fetch(session, source.id, ok=True, items=3)
+    session.commit()
+    stats = NewsService(get_config()).stats()
+    assert stats["sources_failing"] == 0 and stats["sources_blipping"] == 0, stats

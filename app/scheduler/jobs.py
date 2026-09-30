@@ -466,8 +466,9 @@ class NewsJobs:
         with session_scope() as session:
             # `enabled` mirrors the config now (see repo.sync_sources), so a feed
             # he switched off can no longer be reported as broken every six hours.
-            failing = [s for s in repo.all_sources(session)
-                       if s.enabled and (s.error_count or 0) >= 5]
+            # Same query, same threshold as `/stats`: one definition of "failing".
+            threshold = as_int(self.config.get("alerts.source_fail_threshold"), 5)
+            failing, blipping = repo.sources_needing_attention(session, threshold=threshold)
             pending = repo.unprocessed_articles(session, limit=200)
         if archived:
             log.info("archived %d old article(s)", archived)
@@ -492,8 +493,8 @@ class NewsJobs:
         # from it never having run: 135 boots in 46 hours left exactly one line to
         # grep for, and telling those two cases apart is the whole job of a log.
         log.info("health check: %s article(s) in db, %s unprocessed, %s failing "
-                 "source(s), %sMB free (告警线 %sMB)",
-                 stats.get("total_articles", "?"), len(pending), len(failing),
+                 "source(s), %s short blip(s), %sMB free (告警线 %sMB)",
+                 stats.get("total_articles", "?"), len(pending), len(failing), len(blipping),
                  free_mb if free_mb is not None else "?", floor)
 
     async def startup_report(self) -> None:

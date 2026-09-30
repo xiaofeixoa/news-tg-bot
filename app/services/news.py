@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from app.config import AppConfig, get_config
+from app.config import AppConfig, as_int, get_config
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, Source, User
@@ -440,11 +440,12 @@ class NewsService:
 
     def stats(self) -> dict[str, Any]:
         day_ago = datetime.utcnow() - timedelta(hours=24)
+        threshold = as_int(self.config.get("alerts.source_fail_threshold"), 5)
         with session_scope() as session:
             pending = len(repo.unprocessed_articles(session, limit=200))
             total = repo.count_since(session, datetime(1970, 1, 1))
             delivering = repo.sources_that_delivered(session, day_ago)
-            states = list(repo.all_sources(session))
+            failing, blipping = repo.sources_needing_attention(session, threshold=threshold)
         configured = self.configured_sources()
         enabled = {str(s["name"]) for s in configured if s["enabled"]}
         return {
@@ -457,8 +458,12 @@ class NewsService:
             "sources": len(enabled),
             "sources_configured": len(configured),
             "sources_delivering": len(delivering & enabled),
-            "sources_failing": sum(1 for s in states if (s.error_count or 0) > 0
-                                   and str(s.name) in enabled),
+            # 两个词、两件事：持续失败的要按名字告诉他，抖一下的只报个数。
+            "sources_failing": len(failing),
+            "sources_blipping": len(blipping),
+            "source_fail_threshold": threshold,
+            "sources_failing_detail": [{"name": s.name, "errors": s.error_count or 0,
+                                         "error": (s.last_error or "").strip()} for s in failing],
             # 磁盘写满是静默死亡：SQLite 报错、Bot 停止入库，看起来像"今天没新闻"。
             # 美西那台 2026-09-26 实测只剩 770MB，而 syslog 每天涨 260MB。
             "disk_free_mb": int(shutil.disk_usage(str(self.config.settings.data_path)).free / 1024 / 1024),

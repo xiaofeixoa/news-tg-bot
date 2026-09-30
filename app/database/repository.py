@@ -116,6 +116,27 @@ def all_sources(session: Session) -> list[Source]:
     return list(session.scalars(select(Source).order_by(Source.name)))
 
 
+def sources_needing_attention(session: Session, *, threshold: int
+                              ) -> tuple[list[Source], list[Source]]:
+    """(持续失败的, 刚抖了一下的) among enabled sources - one rule, all callers.
+
+    `error_count` resets on any success (`mark_source_fetch`), so "5 in a row" means
+    five consecutive rounds of refusal, while `> 0` also catches a GitHub anonymous
+    quota blip that heals next round. Measured 2026-09-30 with the live library:
+    /stats said "3 个正在报错" for counts of 1 and 2 (all three GitHub quota), at the
+    very moment zero sources were actually failing, days after Reddit had been down
+    for 15 consecutive rounds. The health check and `/stats` now read the same number
+    from the same query instead of each inventing one.
+    """
+    bar = max(1, int(threshold))
+    rows = list(session.scalars(select(Source).where(Source.enabled.is_(True))))
+    failing = sorted((s for s in rows if (s.error_count or 0) >= bar),
+                     key=lambda s: -(s.error_count or 0))
+    blipping = sorted((s for s in rows if 0 < (s.error_count or 0) < bar),
+                      key=lambda s: -(s.error_count or 0))
+    return failing, blipping
+
+
 # --------------------------------------------------------------- articles
 def article_exists(session: Session, url_hash: str) -> bool:
     return session.scalar(select(Article.id).where(Article.url_hash == url_hash)) is not None

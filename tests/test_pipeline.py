@@ -632,7 +632,16 @@ def test_status_line_reports_enabled_sources_not_the_config_file(session):
 
     healthy = status_line({**stats, "sources_failing": 0})
     assert "报错" not in healthy, "a clean system must not advertise an error column"
-    assert "3 个正在报错" in status_line({**stats, "sources_failing": 3})
+    # 2026-09-30：旧文案把"配额抖一下"和"连着 15 轮 403"都写成"N 个正在报错"。
+    # 现在分成两件事，各说各的话（见 tests/test_sources.py 的分工用例）。
+    blip_only = status_line({**stats, "sources_failing": 0, "sources_blipping": 3})
+    assert "正在报错" not in blip_only and "3 个刚抖了一下" in blip_only, blip_only
+    broken = status_line({**stats, "sources_failing": 1, "sources_blipping": 3,
+                          "sources_failing_detail": [
+                              {"name": "Reddit LocalLLaMA RSS", "errors": 15,
+                               "error": "HTTP 403"}]})
+    assert "持续失败：Reddit LocalLLaMA RSS（连续 15 次：HTTP 403）" in broken, broken
+    assert "3 个刚抖了一下" in broken, broken
 
 
 # ------------------------------------------------------- 突发 alert gate

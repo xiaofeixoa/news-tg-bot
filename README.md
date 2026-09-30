@@ -2982,3 +2982,46 @@ Kathmandu +05:45）与跨日界的岛（Kiritimati +14、Midway −11）都有�
 和输出一起过滤掉而看起来像 0 条——读代码 + 数出现次数后才确认报警本来就在，别拿自己 grep 的
 空结果当结论；② 我先假设 error_count 是累计值不归零（那样"in a row"就是谎话），读
 `mark_source_fetch` 才确认成功会归零，这次它说的是真话。
+
+### v1.67 `/stats` 那句"3 个正在报错"是在说配额抖动：把它和真坏源分开
+
+`alerts.source_fail_threshold` 之前不存在，但两个读者各自有一个"什么算坏源"的判断：
+
+| 地方 | 旧口径 | 2026-09-30 实测说的是什么 |
+| --- | --- | --- |
+| `/stats` 面板 | `error_count > 0` | "3 个正在报错" —— 实际是 GitHub Releases / Coding Agent Releases / GitHub Trending 的**匿名配额抖了一下**（计数 1-2，下一轮自愈） |
+| 健康检查日志 | 硬编码 `>= 5` | `1 failing source(s)` —— 那几天真坏的是 Reddit（连着 15 次 403） |
+
+同一个中文词写着两件事，而且他读到那句"正在报错"时既没有名字也没有严重程度，等于没有行动依据；
+等到真有源连续被拒 15 轮时，面板上的数字还是 3。
+
+改成一份定义 + 两种说法：
+- `repository.sources_needing_attention(session, threshold=…)` 一次返回 `(持续失败, 刚抖动)`，
+  `/stats` 与健康检查都读它，阈值来自 `alerts.source_fail_threshold`（默认 5，两边同一处）。
+- `/stats` 现在把持续失败的**按名字**报出来，带上连续次数与最后一条错误；抖动只报个数：
+  「⛔ 持续失败：Reddit LocalLLaMA RSS（连续 15 次：HTTP 403） · 3 个刚抖了一下（下一轮自动重试）」。
+- 健康检查行也补上抖动数，方便对着日志分辨："0 failing source(s), 4 short blip(s)"。
+- 顺手量到一件事并**没有**据此报警：近 24 小时没出新闻的 3 个启用源（Google AI、Google DeepMind、
+  Microsoft Research）`error_count=0`、刚刚都抓成功过，只是官方博客这些天没发文——
+  "24 小时 0 条"对官方源是正常的，拿它报警就会天天误报，所以没做。
+
+线上用**他库的只读副本**跑了一遍（生产代码，不写他的库）：
+
+```
+真实库里 /stats 现在这样说：
+🔌 数据源：20 启用 / 37 配置 · 近 24 小时出过新闻 17 个 · 4 个刚抖了一下（下一轮自动重试）
+副本里制造一个连着失败 7 次的源之后：
+stats 分类：failing=1 blipping=4 threshold=5
+🔌 数据源：… · ⛔ 持续失败：Reddit LocalLLaMA RSS（连续 7 次：HTTP 403） · 4 个刚抖了一下（下一轮自动重试）
+WARN  source Reddit LocalLLaMA RSS has failed 7 times in a row (last error: HTTP 403)
+INFO  health check: 1736 article(s) in db, 0 unprocessed, 1 failing source(s), 4 short blip(s), …
+```
+
+646 → **649 passed**（本地与 anr-jump Linux/UTC 在已部署目录里各一遍），5 处反向验证全部 CAUGHT：
+`/stats` 不再读配置阈值 / 回到不报名字 / 健康检查保留自己硬编码的 5 / 分类器忽略传进来的阈值 /
+成功时不再清零计数（那会让"in a row"变成谎话）。部署 `stamp=20260930T144807Z`，
+两台 active，部署后健康检查 `0 failing source(s), 0 short blip(s)`，traceback 与部署前逐项相同。
+
+写用例时也栽了一次自己的坑：fixture 用 `sync_sources([单个源])` 建源，会顺手把没列出的源
+按"配置里已删除"处理并清零 —— 第一个用例因此把抖动数读成 0。改成 `get_or_create_source` 直接
+upsert 才是我想测的东西。
