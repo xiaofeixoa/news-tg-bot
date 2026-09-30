@@ -47,12 +47,16 @@ class TelegramSender:
                    parse_mode: str | None = "HTML") -> bool:
         """Deliver one message. The formatters emit HTML, so this is the path that
         has to ask Telegram to parse it - interactive replies set it themselves."""
-        # The formatters already fit messages to this limit; a raw slice here would
-        # cut a briefing line mid-word without saying so, so the ellipsis stays.
-        if len(text or "") > MAX_MESSAGE:
-            text = text[: MAX_MESSAGE - 1] + "…"
-        else:
-            text = text or ""
+        # 兜底也得是"看得出来的截断"：原来这里是一刀 `text[:4095] + "…"`，
+        # 会正好切进 `<b>…</b>` 中间，Telegram 回一句 can't parse，用户看到的就是
+        # "我问了，没有回答"。改成走 fmt.clip：按行切、留下说明、按码元量长度。
+        from app.services import format as fmt
+
+        text = text or ""
+        if fmt.utf16_len(text) > MAX_MESSAGE:
+            log.warning("message of %d units exceeded the limit; clipping",
+                        fmt.utf16_len(text))
+            text = fmt.clip(text, MAX_MESSAGE - 24)
         if not text.strip():
             return False
         from aiogram.exceptions import (TelegramAPIError, TelegramBadRequest,

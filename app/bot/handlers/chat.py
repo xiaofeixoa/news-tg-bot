@@ -46,7 +46,9 @@ async def free_text(message: Message, news: NewsService, search: SearchService,
         if answer.intent in {"help", "settings", "sources"}
         else f"\n\n<i>依据 {len(answer.used_ids)} 条库内新闻 · 关键词：{fmt.esc(fmt.plain(answer.query, 40)) or '-'}</i>"
     )
-    await message.answer(body + footer, parse_mode="HTML")
+    # 聊天回答是唯一没经过 fmt.clip 的那条用户可见输出（简报走 split_messages，
+    # /免费 与 /news 都 clip 过）。答案长度取决于模型/条数，不能赌它一定短。
+    await message.answer(fmt.clip(body + footer), parse_mode="HTML")
     if answer.used_ids:
         store.remember(message.chat.id, answer.used_ids, kind="answer")
     log.info("agent intent=%s ids=%d chat_id=%s", answer.intent, len(answer.used_ids), message.chat.id)

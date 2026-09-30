@@ -383,7 +383,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 715 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 718 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3444,3 +3444,46 @@ v1.73 修完 `/topics` 之后，同一个问题还剩两处没人看：**凡是"
 
 线上核对：`/search` 走真数据的新旧对照见本节开头；两台 `service=active`、`NRestarts=0`，
 部署后 Traceback 与部署前逐文件一致（VPS `db.log`/`scheduler.log` 各 4 条仍是 09-26 旧账，jump 0）。
+
+### v1.75 发送层最后那一刀会切进 HTML 标签里：一条"过长"的消息可以整条发不出去
+先说清楚性质：**这是潜伏缺陷，今天还没咬人**。留存的 `telegram.log` 里最大的一条是 2603 码元，
+`resending as plain text` 与 `message is too long` 都是 0 次。它值得修的原因是那把刀的形状：
+
+```python
+if len(text or "") > MAX_MESSAGE:            # 4096
+    text = text[: MAX_MESSAGE - 1] + "…"     # 从中间硬切，不看行、不看标签、不算 emoji
+```
+
+`fmt.clip()` 一直是"按行切 + 留下『内容过长已截断』"的那个；发送层这份兜底是第二次实现，
+而且实现得更差。切进 `<b>…</b>` 中间时 Telegram 回 `can't parse`，那条消息整条发不出去——
+对用户来说就是"我问了，没有回答"（聊天回答会留下一个"🤔 正在检索新闻库…"的占位消息永远不消失）。
+测试里那条用例的名字写着 *not mid-sentence*，断言却是 `len(sent) == MAX_MESSAGE`——**它在给这刀背书**。
+
+- `fmt.utf16_len()`：Telegram 数的长度是 **UTF-16 码元**，一个 🟢 占两个。`clip()` 改按码元量，
+  先按行退到安全位置，再逐步收窄到真的放得下——以前 `len()` 数出 3000 的 emoji 消息，
+  Telegram 看到的是 6000，会被整条拒收。
+- 发送层不再自己动刀：超长时走 `fmt.clip(text, MAX_MESSAGE - 24)`，并留一行
+  `message of N units exceeded the limit; clipping`——兜底触发了要能在日志里看见，
+  不然它永远是一个"偶尔少一句话"的都市传说。
+- `handlers/chat.py` 是唯一没有 clip 过的用户可见输出（简报走 `split_messages`，
+  `/news`、`/免费`、`/来源` 都过 `fmt.clip`），现在也过了。
+- 已有的"标签解析失败 → 改纯文本重发一次"保持不变：那是最后一道，让内容以纯文本抵达，
+  而不是干脆没有。
+
+线上验证（部署后真机，假 bot，不发消息）：
+
+```
+HTML 行  原文 8700 码元 → 送出 4070，结尾 '\n…（内容过长已截断）'，<b>/</b> 各 92 个（闭合）
+全 emoji 3000 字=6000 码元 → 送出 4011，同样带说明
+日志出现：message of 8700 units exceeded the limit; clipping
+```
+
+测试：715 → **718 passed**（Windows；`anr-jump` 上 Linux/UTC 同一棵树）。
+净增 3 条：删掉那条替旧刀法背书的用例，换成"在行边界切、标签必须闭合、码元必须放得下"，
+另加"全是 emoji 不能蒙混过关""兜底触发要写日志""聊天回答被裁而不是没送到"。
+6 处反向验证全部 CAUGHT：发送层退回一刀切、`clip` 改用 `len()`、截断不留说明、
+去掉逐步收窄的循环、兜底不写日志、聊天回答不 clip。
+
+顺带一处本轮的负面结论：`/stats` 那句"库内新闻 1818 条"我用真机查过——
+`published_at` 为空的行是 0，`count_since(1970)` 与 `COUNT(*)` 完全相等，
+所以那个总数是诚实的（已归档 15 条、被过滤 266 条算在"库内"里，与标签字面意思一致），不改。

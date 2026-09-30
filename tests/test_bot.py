@@ -303,6 +303,27 @@ async def test_setinterest_without_llm_falls_back_to_rules(seeded):
 
 
 @pytest.mark.asyncio
+async def test_a_long_chat_answer_is_delivered_clipped_not_lost(seeded, fake_llm, monkeypatch):
+    """/news、/免费、简报都 clip 过；聊天回答是唯一没有的那一条。"""
+    from app.bot.handlers.chat import free_text
+    from app.services import format as fmt
+    from app.services.digest import DigestService
+    from app.services.search import AgentAnswer, SearchService
+
+    async def long_answer(self, question, **kwargs):
+        return AgentAnswer(text="这是一句很长的回答。" * 1200, used_ids=[],
+                           intent="search", query=question)
+
+    monkeypatch.setattr(SearchService, "answer", long_answer)
+    message = FakeMessage(ALLOWED, "最近 AI Agent 有什么值得关注的？")
+    await free_text(message, get_news_service(), SearchService(get_config()),
+                    DigestService(get_config()), get_config())
+    sent = message.last or ""
+    assert "内容过长已截断" in sent, sent[-40:]
+    assert fmt.utf16_len(sent) <= fmt.SAFE_LIMIT, fmt.utf16_len(sent)
+
+
+@pytest.mark.asyncio
 async def test_digest_command_sends_briefing(seeded, fake_llm):
     from app.bot.handlers.digest import cmd_digest
     from app.services.digest import DigestService

@@ -461,14 +461,28 @@ def command_name(command: str) -> str:
     return command.split()[0].strip()
 
 
+def utf16_len(value: str) -> int:
+    """Telegram 数的长度是 **UTF-16 码元**，不是 Python 的字符数：🟢 占两个。"""
+    return len((value or "").encode("utf-16-le")) // 2
+
+
 def clip(value: str, limit: int = SAFE_LIMIT) -> str:
-    """Never exceed Telegram's 4096-char message limit; cut on a line break."""
+    """Never exceed Telegram's message limit; cut on a line break and say so.
+
+    按码元量：一条全是 emoji 的 3000 字消息，`len()` 说 3000，Telegram 看到的是
+    6000，会被整条拒收——而"被拒收"在用户那边等于"我问了，没有回答"。
+    """
     text = value or ""
-    if len(text) <= limit:
+    mark = "\n…（内容过长已截断）"
+    room = limit - utf16_len(mark)
+    if utf16_len(text) <= limit:
         return text
-    cut = text.rfind("\n", 0, limit - 12)
-    cut = cut if cut > limit // 2 else limit - 12
-    return text[:cut].rstrip() + "\n…（内容过长已截断）"
+    cut = text.rfind("\n", 0, max(1, room))
+    cut = cut if cut > room // 2 else max(1, room)
+    head = text[:cut]
+    while head and utf16_len(head) > room:
+        head = head[: max(0, len(head) - 40)]
+    return head.rstrip() + mark
 
 
 def plain(value: str, limit: int = 200) -> str:

@@ -127,11 +127,46 @@ async def test_empty_text_never_reaches_the_api():
     assert bot.calls == []
 
 
-async def test_an_over_long_message_is_cut_with_a_mark_not_mid_sentence():
+async def test_an_over_long_message_is_cut_on_a_line_break_not_inside_a_tag():
+    """以前这一刀是 `text[:4095] + "…"`：正好能切进 `<b>…</b>` 中间。
+
+    标签被切一半时 Telegram 回的是 can't parse，整条消息都发不出去——
+    用户那边就是"我问了，没有回答"。旧用例的名字写着 not mid-sentence，
+    断言却把 `len(sent) == MAX_MESSAGE` 钉死，等于替这刀背书。
+    """
+    from app.services import format as fmt
+
     bot = Bot()
-    await TelegramSender(bot).send(1, "字" * (MAX_MESSAGE + 50))    # type: ignore[arg-type]
+    line = "<b>这一行讲的是一个很长的标题，里面有 NVIDIA 与 GPU 两个关键词</b>\n"
+    await TelegramSender(bot).send(1, line * 100)                 # type: ignore[arg-type]
     sent = bot.calls[0]["text"]
-    assert len(sent) == MAX_MESSAGE and sent.endswith("…"), "尾部要看得出来被截过"
+    assert sent.endswith("…（内容过长已截断）"), sent[-40:]
+    assert sent.count("<b>") == sent.count("</b>"), "不能在标签中间下刀"
+    assert fmt.utf16_len(sent) <= MAX_MESSAGE, fmt.utf16_len(sent)
+    assert sent.endswith(line.strip() + "\n…（内容过长已截断）") or "行" in sent
+
+
+async def test_emoji_cannot_smuggle_a_message_past_the_limit():
+    """Telegram 数的是 UTF-16 码元：🟢 一个字符占两个。"""
+    from app.services import format as fmt
+
+    bot = Bot()
+    await TelegramSender(bot).send(1, "🟢" * 3000)                # type: ignore[arg-type]
+    sent = bot.calls[0]["text"]
+    assert fmt.utf16_len(sent) <= MAX_MESSAGE, fmt.utf16_len(sent)
+    assert "内容过长已截断" in sent, sent[-30:]
+    assert len(sent) < 3000, "字符数也该真的降下来，不是只把尾巴换成 …"
+
+
+async def test_the_clipping_is_reported_in_the_log(monkeypatch):
+    from app.bot import sender as sender_mod
+
+    notes: list[str] = []
+    monkeypatch.setattr(sender_mod.log, "warning",
+                        lambda *a, **k: notes.append(str(a[0]) % a[1:] if a else str(a[0])))
+    bot = Bot()
+    await TelegramSender(bot).send(1, "行\n" * 4000)              # type: ignore[arg-type]
+    assert any("exceeded the limit; clipping" in m for m in notes), notes
 
 
 # ------------------------------------------------------- 一份简报可能分几条消息
