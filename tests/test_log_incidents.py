@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -105,3 +105,83 @@ def test_a_trailing_traceback_with_no_next_line_is_still_reported(tmp_path):
 def test_a_missing_log_directory_is_reported_not_crashed(tmp_path, capsys):
     assert li.main(["--logs", str(tmp_path / "nope")]) == 1
     assert "找不到日志目录" in capsys.readouterr().out
+
+
+# 真机量过的形状（2026-10-01, anr-jump）：同一批日志、同一句 `--since 6`，
+# 进程钟是北京时间时列出 15 类（最早 5.25 小时前，正确），换成 UTC 就变成 21 类、
+# 最早 12.6 小时前——问"最近 6 小时"答出 12.6 小时。
+WINDOW = """2026-10-01 00:05:00,100 WARNING [news.collector] base.py:41 - recent outage A: HTTP 429
+2026-09-30 16:39:14,100 WARNING [news.scheduler] jobs.py:77 - old trouble B: something else
+"""
+
+
+def _window_groups(tmp_path):
+    logs = _write(tmp_path, collector=WINDOW)
+    return logs, _groups(logs)
+
+
+def test_the_window_is_measured_on_the_log_clock_even_for_a_utc_caller(tmp_path):
+    """调用者的钟不能决定窗口：日志里的时刻是服务写下的墙上时间。"""
+    from datetime import timezone
+
+    logs, groups = _window_groups(tmp_path)
+    beijing_now = datetime(2026, 10, 1, 5, 12)              # 日志时区的此刻
+    same_in_utc = datetime(2026, 9, 30, 21, 12, tzinfo=timezone.utc)   # 同一个瞬间
+
+    text = li.render(groups, logs_dir=logs, since_hours=6, now=beijing_now,
+                     tz_name="Asia/Shanghai")
+    utc_caller = li.render(groups, logs_dir=logs, since_hours=6, now=same_in_utc,
+                           tz_name="Asia/Shanghai")
+    assert "recent outage A" in text and "old trouble B" not in text, text
+    assert utc_caller == text, "换个机器跑，答案不该变"
+    # 旧行为正是把 UTC 的钟当北京时间用：窗口自己变成 6+8=14 小时
+    widened = li.render(groups, logs_dir=logs, since_hours=6,
+                        now=beijing_now - timedelta(hours=8), tz_name="Asia/Shanghai")
+    assert "old trouble B" in widened, "去掉时区换算后，这条必须重新被错误地收进来"
+
+
+def test_the_header_reports_the_windowed_count_not_just_the_total(tmp_path):
+    """`命中 99 类` 配 15 条列表：那个 99 根本不是这句问题的答案。"""
+    logs, groups = _window_groups(tmp_path)
+    text = li.render(groups, logs_dir=logs, since_hours=6,
+                     now=datetime(2026, 10, 1, 5, 12), tz_name="Asia/Shanghai")
+    assert "日志里共 2 类" in text, text
+    assert "最近 6 小时内还在出现的 1 类" in text, text
+    assert "窗口按 Asia/Shanghai 的 10-01 05:12 起算" in text, text
+
+
+def test_since_wants_hours_and_says_so_in_chinese(tmp_path, capsys):
+    """我自己就喂过 `--since 21:02`，收到的回答是 `invalid float value`。"""
+    import argparse
+
+    logs = _write(tmp_path, scheduler=WINDOW)
+    assert li._hours("6") == 6.0
+    assert li._hours("0.5") == 0.5
+    for bad in ("21:02", "昨天", "0", "-3"):
+        with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+            li._hours(bad)
+        assert "小时" in str(excinfo.value), bad
+    with pytest.raises(SystemExit) as exitinfo:
+        li.main(["--logs", str(tmp_path), "--since", "21:02"])
+    assert exitinfo.value.code == 2
+    err = capsys.readouterr().err
+    # 只认我这句话：`[--since 小时]` 那段的 metavar 里也有"小时"，光看它会被骗过
+    assert "不是时刻" in err, err
+    assert "invalid float value" not in err, err
+    assert li.main(["--logs", str(logs), "--since", "6"]) == 0
+    assert "窗口按 Asia/Shanghai" in capsys.readouterr().out
+
+
+def test_the_log_zone_matches_the_clock_the_service_writes_with():
+    """unit 里的 `TZ=` 与 settings.timezone 必须同源，否则这个窗口又是猜的。"""
+    import re as _re
+
+    from app.config import get_config
+
+    zone = get_config().settings.timezone
+    units = sorted((ROOT / "deploy").glob("*.service"))
+    assert units, "deploy/ 里找不到 systemd 单元"
+    for unit in units:
+        stamps = _re.findall(r"^Environment=TZ=(\S+)$", unit.read_text(encoding="utf-8"), _re.M)
+        assert stamps and stamps[0] == zone, (unit.name, stamps, zone)
+

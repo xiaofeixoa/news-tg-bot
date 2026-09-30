@@ -331,6 +331,7 @@ scripts/deploy.sh anr-vps
 
 # 日志对账（只读）：按"事件"归组看错误，给出次数与首次/末次时刻
 .venv/bin/python scripts/log_incidents.py --since 12       # 部署后问这一句，而不是 grep -c Traceback
+                                                            # 窗口按日志自己的时区算（v1.79），换台机器跑答案不变
 .venv/bin/python scripts/log_incidents.py --level ERROR    # 只看错误（WARNING 也含在默认里）
 .venv/bin/python scripts/preview.py free --days 30        # /免费 会输出什么
 .venv/bin/python scripts/telegram_smoke.py --free         # 把 /免费 的真实结果发给自己
@@ -383,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 732 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 736 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3623,3 +3624,54 @@ Linux/UTC 部署后同一棵树            ：732 collected，exit=0
 
 有 key 那一侧没有被砍掉：`summary_available=True` 仍然给出「📄 常规摘要」，因为那时屏幕上确实是
 更深的分析，退回常规摘要就是新内容——这一条由 anr-vps 的第二个样本直接印出来，不只是靠测试。
+
+### v1.79 我用来做部署后核对的那句 `--since 6`，量的其实是"调用者的钟 + 6 小时"
+
+前三轮都在挑服务给用户看的东西，这一轮挑的是**我自己手里的尺**：`scripts/log_incidents.py`。
+它的 docstring 说"日志与时刻都是北京时间"，代码里却是
+
+```python
+cutoff = (now or datetime.now()) - timedelta(hours=since_hours)   # ← 调用者的墙钟
+```
+
+`entry["last"]` 是从日志文本里解析出来的**北京时间**（naive），`datetime.now()` 是**跑这条命令的人**的钟。
+两者不同源，于是"最近 6 小时"这个问题有了多个答案。真机 A/B（`anr-jump`，同一批日志，同一句 `--since 6`）：
+
+```
+调用者的钟            旧版列出     新版列出
+Asia/Shanghai（=日志钟）   15 类        15 类      ← 最早 5.25 小时前，正确
+UTC（CI、任何 UTC 机器）   21 类        15 类      ← 窗口自己变成 ~14 小时
+America/Los_Angeles        43 类        15 类      ← 窗口 ~21 小时
+```
+
+而钟比日志**快**的方向更危险：新出现的错误会被窗口滤掉，然后打印一句
+"✅ 最近 6 小时内没有任何新记录"。我每轮部署后引用的正是这句话——它听起来像太平，实际可能是量错了钟。
+顺带同一条消息里还有第二个老毛病：表头 `命中 99 类` 是**过滤前**的总数，下面列的是过滤后的 15 条，
+和 v1.73/v1.74 那串"看起来是总量、其实是别的数"是同一族。
+
+- `_log_zone_now(tz_name, at=…)` 复用 `app.config.local_now()`：窗口按 `settings.timezone` 的墙上时间起算，
+  与 systemd 写日志用的 `TZ=` 同源；表头直接把这件事印出来：`（窗口按 Asia/Shanghai 的 10-01 05:22 起算）`。
+- 表头改成两个数一起报：`日志里共 99 类，最近 6 小时内还在出现的 15 类`。
+- `--since` 的解析交给 `_hours()`：`--since 21:02` 现在回答"`--since` 要的是小时数（例如 `--since 6`），不是时刻"。
+  这句报错是给我自己的——昨天我在真机上就这么敲过，收到的是 argparse 的 `invalid float value: '21:02'`。
+- 新增同源不变量测试：`deploy/*.service` 里的 `Environment=TZ=` 必须等于 `settings.timezone`，
+  否则这个窗口又是猜的（两边现在各写一处，早晚会漂）。
+
+测试：732 → **736 passed**（开发机 Windows 全绿；`anr-jump` 同一棵树 `exit=0`）。
+新增 4 条，其中一条专门防"换个机器跑答案就变"：注入同一个瞬间的 aware UTC 与 naive 北京时间，
+两次 `render()` 的输出必须逐字相等；并保留一个"窗口被放宽成 6+8 小时"的对照断言，
+这样删掉时区换算就会立刻变红。**6 处反向验证里第一轮 5 CAUGHT / 1 SURVIVED**：
+M5（把 `type=_hours` 改回 `type=float`）活了，因为我的断言写的是 `"小时" in stderr`，
+而 argparse 的 usage 行里有 `metavar="小时"`——它替我说了一句我根本没验证的话。
+改成断言只有我的报错才可能给出的片段（`不是时刻` 在、`invalid float value` 不在）之后同一变异立刻变红。
+这是"测试因为无关的原因变绿"的第三次，也是我这一轮第二次被 SURVIVED 抓到真东西。
+
+交付方式这次**不重启**：改动只在 `scripts/` 与 `tests/`，`app/` 一字未动，
+而 `log_incidents.py` 是手跑的只读诊断、服务不 import 它。重启会立刻跑一轮采集、
+再吃掉一次匿名 GitHub 配额（README v1.71 记过），所以用 scp 到目标路径 + 两端 `md5sum` 逐字节核对
+（`fe31bad8500a4370c09d5d42aac8c125` / `935083b76430dfb8c5561b065ec8a854`，两台一致，`service=active`）。
+本轮自己走歪的两次核对也记在这里：第一次用 `sudo -u news env TZ=…` 跑 A/B，sudo 把 `TZ` 重置了，
+两栏输出一模一样，看起来像"没有这个 bug"；第二次把旧版脚本放到 `/tmp` 去跑，它的
+`sys.path.insert(parent.parent)` 因此指向 `/`，`from app.config import …` 直接失败，
+旧版那一栏报了 **0 类**——又是一个"空输出被当成答案"。两次都是在真机上把命令写成同目录、
+不经 sudo 重置才量出 21/43 vs 15。**一条 A/B 在被相信之前，先证明它两边都真的跑起来了。**
