@@ -277,21 +277,16 @@ class NewsJobs:
                     row = session.get(Article, article_id)
                     if row is None:
                         continue
-                    tries = breaking.note_deferral(row, reasons.get(article_id, ""))
                     reason = reasons.get(article_id, "")
-                    if breaking.HEAT_WATCH in reason:
-                        # A story waiting to get hot is expected to wait for hours, so
-                        # it is reported once and then about hourly. One line per
-                        # 10-minute round per row would be the 204-line log again.
-                        if tries == 1 or tries % 6 == 0:
-                            log.info("breaking 热度观察 #%s（第 %s 轮）：%s",
-                                     article_id, tries, reason)
-                    elif tries >= 3:
-                        log.warning("breaking #%s 已连续 %s 轮被推迟，仍未送达：%s",
-                                    article_id, tries, reasons.get(article_id, ""))
-                    else:
-                        log.info("breaking #%s 排入稍后重试（第 %s 次）：%s",
-                                 article_id, tries, reasons.get(article_id, ""))
+                    tries = breaking.note_deferral(row, reason)
+                    # One line per round per row is the log-noise shape I already fixed
+                    # once (204 "skipped" lines in a day): a quiet-hours wait can run 48
+                    # rounds and the daily-cap wait was measured at 16. Report the first
+                    # booking, then hourly, and escalate once it has been waiting long
+                    # enough that a human should look.
+                    if tries == 1 or tries % 6 == 0:
+                        emit = log.warning if tries >= 12 else log.info
+                        emit("breaking #%s 仍在等待补发（第 %s 轮）：%s", article_id, tries, reason)
                 for article_id in sorted(clear):
                     row = session.get(Article, article_id)
                     if row is None:

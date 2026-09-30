@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 from sqlalchemy import func, select
 
-from app.config import AppConfig, as_int, get_config
+from app.config import AppConfig, QUIET_TOKEN, as_int, get_config, quiet_window
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, PushLog
@@ -36,17 +36,22 @@ _DAILY_CAP = "daily cap"
 # The third one is the gate's own heat wording; read from the gate module, never
 # retyped, for the same drift reason - `tests/test_pipeline.py` asserts the two agree.
 _HEAT = breaking.HEAT_WATCH
+# The fourth is the quiet window, whose rule and token both live in config so the
+# 突发 path, the 限免 path and `/设置` cannot disagree about what is configured.
+_QUIET = QUIET_TOKEN
+QUIET_CONFIG = "breaking.quiet_hours"
 
 
 def deferral_worthwhile(reason: str) -> bool:
     """Is this rejection about *timing*, so the same row may pass a later round?
 
-    Cooldown and the daily cap open again on a clock. So does the 突发 heat bar: a row's
-    `community_heat` is refreshed upward every time a collector meets the same URL again,
-    while the gate is asked about that row once, minutes after publication. Measured on
-    the live box over 2026-09-25..29, three stories crossed 250 only after processing
-    (#581 26 -> 741 upvotes, #509 90 -> 495, #1182 47 -> 593) and nothing re-asked, so
-    the bar could never rescue the very stories it was added for.
+    Cooldown, the daily cap and the quiet window open again on a clock. So does the
+    突发 heat bar: a row's `community_heat` is refreshed upward every time a collector
+    meets the same URL again, while the gate is asked about that row once, minutes
+    after publication. Measured on the live box over 2026-09-25..29, three stories
+    crossed 250 only after processing (#581 26 -> 741 upvotes, #509 90 -> 495,
+    #1182 47 -> 593) and nothing re-asked, so the bar could never rescue the very
+    stories it was added for.
     Everything else - the gate no longer passing for a non-heat reason, the story ageing
     out, already sent, breaking switched off - will read the same way next round, so
     keeping it in the retry queue would be a query with no possible outcome.
@@ -55,7 +60,7 @@ def deferral_worthwhile(reason: str) -> bool:
     `can_send_breaking`, which labels every gate answer "not breaking: …" first.
     """
     return (reason.startswith(_COOLDOWN) or reason.startswith(_DAILY_CAP)
-            or _HEAT in reason)
+            or _HEAT in reason or _QUIET in reason)
 
 
 def select_briefing(items: Sequence[ArticleView], *, top_items: int,
@@ -280,6 +285,13 @@ class DigestService:
                 if article.event_id and repo.breaking_already_sent(
                         session, user=user, event_id=article.event_id):
                     return False, "same event already sent to this reader"
+            # After the gate and the "already sent" checks on purpose: those are
+            # final for this row and must settle it, while the quiet window is only
+            # a wait. A stale row deferred as "quiet" would sit in the retry queue
+            # forever, because nothing in it ever expires.
+            quiet = quiet_window(cfg, getattr(user, "timezone", None))
+            if quiet:
+                return False, quiet
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             count = repo.pushes_since(session, user=user, kind="breaking", since=today_start)
             if count >= max_per_day:

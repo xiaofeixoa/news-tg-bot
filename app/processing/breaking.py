@@ -47,7 +47,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from app.config import AppConfig, as_float, get_config
+from app.config import AppConfig, as_float, get_config, quiet_hours_text
 
 _PATTERN_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
 DEFERRAL_KEY = "breaking_defer"
@@ -220,7 +220,12 @@ def describe(config: AppConfig | None = None, *, ai_enabled: bool | None = None)
     heat_bar = as_float(config.get("breaking.rule.min_community_heat"), 0.0)
     rescued = (f"，或全站热度 ≥{heat_bar:.0f} 的大事件（社区来源也可破例；"
                f"只差热度的会在 {hours:.0f} 小时内每轮再问一次）" if heat_bar > 0 else "")
-    return f"标题里有大事件 + 一手来源 + {hours:.0f} 小时内{rescued}"
+    # The reader is told *when* it may arrive, not only what counts: a rule that
+    # decides whether to wake him belongs on the same line as the rule that decides
+    # whether it is news.
+    quiet = quiet_hours_text(config)
+    quiet_text = f"；{quiet} 静默，出窗口自动补发" if quiet else ""
+    return f"标题里有大事件 + 一手来源 + {hours:.0f} 小时内{rescued}{quiet_text}"
 
 
 def note_deferral(row: Any, reason: str) -> int:

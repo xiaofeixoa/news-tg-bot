@@ -379,6 +379,93 @@ def as_float(value: Any, default: float) -> float:
         _config_log("config value %r is not a number, using %s", value, default)
         return default
 
+
+# The token `digest.deferral_worthwhile` matches, so it is exported rather than private.
+QUIET_TOKEN = "静默时段"
+_QUIET_OFF = {"", "off", "none", "false", "0"}
+
+
+def _minutes_of_day(text: Any) -> int | None:
+    parts = str(text or "").strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hours, minutes = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hours < 24 and 0 <= minutes < 60):
+        return None
+    return hours * 60 + minutes
+
+
+def _quiet_bounds(raw: str) -> tuple[int, int, str] | None:
+    """(start, end, label) in minutes-of-day, or None when quiet hours are off/broken.
+
+    A window that ends *before* it starts wraps past midnight ("23:00-07:00"); an
+    equal pair or a malformed string is not a window at all, and saying so once in
+    the log beats quietly delivering at the hours he tried to switch off.
+    """
+    if str(raw or "").strip().lower() in _QUIET_OFF:
+        return None
+    start_text, _, end_text = str(raw).strip().partition("-")
+    start, end = _minutes_of_day(start_text), _minutes_of_day(end_text)
+    if start is None or end is None or start == end:
+        _config_log("ignoring malformed breaking.quiet_hours=%r (expected e.g. \"23:00-07:00\")",
+                    raw)
+        return None
+    return start, end, f"{start_text.strip()}-{end_text.strip()}"
+
+
+def quiet_hours_text(config: "AppConfig | None" = None) -> str:
+    """The configured window as "23:00-07:00", or "" when it is off or unusable."""
+    bounds = _quiet_bounds((config or get_config()).get("breaking.quiet_hours"))
+    return bounds[2] if bounds else ""
+
+
+def _now_utc() -> "datetime":
+    """One indirection so a wall-clock policy can be tested at a fixed instant.
+
+    Without it the suite would pass at 14:00 UTC and fail at 16:00 UTC, because the
+    quiet window is judged against the reader's local clock.
+    """
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def quiet_window(config: "AppConfig | None" = None, timezone_name: str | None = None, *,
+                 at: "datetime | None" = None) -> str:
+    """Why this reader must not be pinged right now, or "" when they may.
+
+    Measured on the live box over 2026-09-16..30 (42 pushes in `push_logs`): 6 of 13
+    突发 pushes and 5 of 17 限免 pushes landed between 23:00 and 07:00 Beijing time,
+    two of them after 03:00 -
+    while the briefing times *he* configured are 08:00 and 20:00. A quiet window drops
+    nothing: the offer and the gateway ledger are only written after a delivery, and the
+    突发 retry queue re-asks, so a 03:11 event arrives at 07:00 instead of waking anybody.
+
+    The clock that matters is the reader's: every timestamp in the database is naive
+    UTC, and reading "23:00" off UTC would silence the wrong eight hours for a +08:00
+    reader - and the wrong reader entirely for another zone.
+    """
+    config = config or get_config()
+    bounds = _quiet_bounds(config.get("breaking.quiet_hours"))
+    if bounds is None:
+        return ""
+    start, end, label = bounds
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
+
+    zone = timezone_name or config.settings.timezone
+    when = at or _now_utc()
+    stamp = when if when.tzinfo is not None else when.replace(tzinfo=_tz.utc)
+    local = stamp.astimezone(ZoneInfo(zone))
+    minutes = local.hour * 60 + local.minute
+    inside = (minutes >= start or minutes < end) if start > end else (start <= minutes < end)
+    if not inside:
+        return ""
+    return f"{QUIET_TOKEN} {label}（{zone} 当地 {label.partition('-')[2]} 之后自动补发）"
+
 @lru_cache
 def get_config() -> AppConfig:
     return load_config()

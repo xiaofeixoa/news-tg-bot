@@ -42,6 +42,10 @@ def _environment() -> Iterable[None]:
     # Keep the suite hermetic: the rendering tests must not reach the network.
     # tests/test_translate.py turns this back on with stubbed HTTP clients.
     config.raw.setdefault("translate", {})["enabled"] = False
+    # 静默时段是按读者的墙上时钟判断的（Asia/Shanghai）。不钉住，同一套测试会在
+    # UTC 15:00 之后集体变红——那正是北京 23:00-07:00。要测它就用注入的时刻去测，
+    # 不让整个套件依赖真实时钟（CI 与开发机本来就差 8 小时）。
+    config.raw.setdefault("breaking", {})["quiet_hours"] = "off"
     from app.database.database import init_db
 
     init_db()

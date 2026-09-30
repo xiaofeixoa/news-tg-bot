@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Sequence
 
-from app.config import AppConfig, as_float, as_int, get_config
+from app.config import AppConfig, as_float, as_int, get_config, quiet_window
 from app.database import repository as repo
 from app.database import session_scope
 from app.logging_setup import get_logger
@@ -156,6 +156,13 @@ class FreeAlertService:
             user = repo.ledger_user(session, chat_id, timezone=self.config.settings.timezone)
             if user is not None and user.paused:
                 return False, "user paused"
+            # A promo at 05:00 is the least defensible ping of the day, and nothing is
+            # lost by waiting: neither the offer rows nor the gateway ledger is written
+            # until a delivery succeeds, so the next round after the window simply
+            # offers the same thing again.
+            quiet = quiet_window(self.config, getattr(user, "timezone", None))
+            if quiet:
+                return False, quiet
             day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             if repo.pushes_since(session, user=user, kind=KIND, since=day_start) >= max_per_day:
                 return False, f"daily cap {max_per_day} reached"

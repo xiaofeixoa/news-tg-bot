@@ -1653,12 +1653,14 @@ async def test_a_row_one_reader_got_stays_booked_for_the_reader_in_cooldown(sess
 
 
 def test_only_timing_rejections_are_worth_retrying():
-    """推迟只认会自己重新打开的三道门禁；其余理由每轮都一样。"""
+    """推迟只认会自己重新打开的四道门禁；其余理由每轮都一样。"""
     from app.processing import breaking
     from app.services.digest import deferral_worthwhile
 
     assert deferral_worthwhile("cooldown 29 min left")
     assert deferral_worthwhile("daily cap reached (5/5)")
+    assert deferral_worthwhile("静默时段 23:00-07:00（Asia/Shanghai 当地 07:00 之后自动补发）"), \
+        "夜里到的突发要留在队列里等早上，不该被判成永久失败"
     assert deferral_worthwhile(
         f"not breaking: {breaking.HEAT_WATCH}：此刻热度 249 / 门槛 250（来源质量 65 低于 80）"), \
         "热度会随后续采集继续上涨，出窗之前每一轮都该重新问一次门禁"
@@ -1723,42 +1725,42 @@ async def test_the_processing_round_marks_a_heat_short_story_itself(session):
             f"HN 大事件只差热度时，本轮就该排进重试队列：meta={row.meta}"
 
 
-def test_the_heat_watch_reports_hourly_not_every_round(session, monkeypatch):
-    """一篇正在攒热度的稿子会等几个小时：每 10 分钟报一次就成了新的日志噪音。"""
+def test_a_wait_is_reported_hourly_and_escalates_once_it_gets_old(session, monkeypatch):
+    """等待要按小时报，不是按轮次报：静默时段一行能等 48 轮，每天上限实测 16 轮。
+
+    2026-09-30 线上 `breaking #1497 补发成功（曾推迟 16 次…）`——按旧规矩那是 14 行
+    "已连续 N 轮被推迟"的警告，比它挡掉的噪音还吵。
+    """
     from app.scheduler import jobs as jobs_module
     from app.scheduler.jobs import NewsJobs
 
     lines: list[tuple[str, str]] = []
 
-    class Recorder:
+    class RecLogger:
         def info(self, msg, *args):
             lines.append(("info", msg % args))
 
         def warning(self, msg, *args):
             lines.append(("warning", msg % args))
 
-        def debug(self, msg, *args):
-            lines.append(("debug", msg % args))
-
         def error(self, msg, *args):
             lines.append(("error", msg % args))
 
-    monkeypatch.setattr(jobs_module, "log", Recorder())
+        def debug(self, msg, *args):
+            lines.append(("debug", msg % args))
+
+    monkeypatch.setattr(jobs_module, "log", RecLogger())
     art = _hn_candidate(session, "OpenAI agent hacked a government site", "https://example.org/quiet")
     watch = "等待全站热度：此刻热度 40 / 门槛 250（来源质量 65 低于 80）"
     jobs = NewsJobs(get_config(), sender=_Sender())
-    for _ in range(7):
+    for _ in range(13):
         jobs._settle_breaking_deferrals(reasons={art: watch}, deferred={art},
                                         settled=set(), delivered=set())
-    reported = [m for _t, m in lines if "热度观察" in m]
-    assert len(reported) == 2, f"7 轮只该报第 1 轮和第 6 轮：{lines}"
-    assert not [m for _t, m in lines if "已连续" in m], "还在攒热度的行不该每轮刷警告"
-
-    lines.clear()
-    for _ in range(4):
-        jobs._settle_breaking_deferrals(reasons={art: "cooldown 59 min left"}, deferred={art},
-                                        settled=set(), delivered=set())
-    assert [m for _t, m in lines if "已连续" in m], "真正一再被推迟的仍要升级为警告"
+    reported = [(lvl, m) for lvl, m in lines if "仍在等待补发" in m]
+    assert len(reported) == 3, f"13 轮只该在第 1/6/12 轮各报一次：{reported}"
+    assert [lvl for lvl, _m in reported] == ["info", "info", "warning"], \
+        f"等到第 12 轮（两小时）才该升级：{reported}"
+    assert "第 12 轮" in reported[-1][1] and watch in reported[-1][1], reported[-1]
 
 
 @pytest.mark.asyncio
