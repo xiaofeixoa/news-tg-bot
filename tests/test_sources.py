@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pathlib
 from datetime import datetime
 
 import pytest
+import yaml
 
 from app.config import get_config
 from app.database import repository as repo
@@ -161,3 +163,33 @@ async def test_maintenance_stops_warning_about_sources_he_switched_off(session, 
     session.commit()
     await jobs.run_maintenance()
     assert not warned, f"关掉的源不该再报：{warned}"
+
+
+def test_a_spoofed_browser_user_agent_must_come_with_browser_tls():
+    """UA 与 TLS 指纹是一套签名：只改 UA 会被判成机器人。
+
+    线上实测 2026-09-30（美西 VPS，真实采集器同一 URL 各一次）：戴着 Chrome/124 UA、
+    走 httpx 握手的 `Reddit LocalLLaMA RSS` 得到 **HTTP 403** 并连着失败 15 次；
+    换成默认的 `AI-News-Radar/1.0 (+personal research agent…)` 单次请求 **200 / 50 条**。
+    Linux.do 那条相反——Cloudflare 按 TLS 指纹拦 python 客户端，所以浏览器 UA 必须与
+    `browser_tls` 成对出现。两者拆开写，就等于发明了一个真实浏览器不会有的签名。
+    """
+    cfg = yaml.safe_load(pathlib.Path("config/sources.yaml").read_text(encoding="utf-8"))
+    offenders = []
+    for source in cfg["sources"]:
+        ua = str((source.get("headers") or {}).get("User-Agent") or "")
+        claims_browser = any(tag in ua for tag in ("Mozilla/", "Chrome", "Safari", "Gecko"))
+        if claims_browser and not source.get("browser_tls"):
+            offenders.append((source.get("name"), ua[:44]))
+    assert offenders == [], f"这些源伪装了浏览器 UA 却没配 browser_tls：{offenders}"
+
+
+def test_the_reddit_rss_sources_identify_themselves_rather_than_spoof():
+    """Reddit 只肯伺候自报家门的客户端：这条把测到的那个例外钉在配置里。"""
+    cfg = yaml.safe_load(pathlib.Path("config/sources.yaml").read_text(encoding="utf-8"))
+    reddit = [s for s in cfg["sources"] if "reddit.com" in str(s.get("url") or "")]
+    assert reddit, "reddit 源不该从配置里消失（近 7 天它入库 351 条）"
+    for source in reddit:
+        ua = str((source.get("headers") or {}).get("User-Agent") or "")
+        assert "Mozilla" not in ua, f"{source.get('name')} 又戴回 Chrome UA 了：{ua[:40]}"
+    assert all("attempts" not in source or int(source["attempts"]) == 1 for source in reddit),         "reddit 按 IP 限流，一轮多次请求只会互相抢额度"

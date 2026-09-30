@@ -276,6 +276,10 @@ sources:
   # ---------- /免费 的信息源：白嫖与限免公告最密集的地方 ----------
   # Reddit 的 .json 接口对机房 IP 返回 403，但 .rss 正常；同时 Reddit 会按 IP 限流，
   # 所以 attempts 设成 1，避免一轮里三个源互相抢额度。
+  # 这些源**不要再加浏览器 User-Agent**：2026-09-30 在美西 VPS 上用真实采集器测过，
+  # 伪装 Chrome 的 UA 配 httpx 的 TLS 指纹 = HTTP 403（它正是连着失败 15 次的那条），
+  # 而默认的 `AI-News-Radar/1.0 (+personal research agent…)` 单次请求 200、50 条。
+  # 要伪装 UA 就必须同时配 browser_tls（见下面 Linux.do 那条）；拆开只会被当成机器人。
   - name: Reddit LocalLLaMA RSS
     type: rss
     url: https://www.reddit.com/r/LocalLLaMA/hot/.rss?limit=50
@@ -283,8 +287,6 @@ sources:
     category: community
     quality: C
     attempts: 1
-    headers:
-      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
   - name: Reddit ChatGPTCoding RSS
     type: rss
@@ -293,8 +295,6 @@ sources:
     category: community
     quality: C
     attempts: 1
-    headers:
-      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
   - name: Reddit ClaudeAI RSS
     type: rss
@@ -303,8 +303,6 @@ sources:
     category: community
     quality: C
     attempts: 1
-    headers:
-      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
   # 检索型源：直接盯"免费"关键词，比等热帖里偶然出现要可靠得多
   - name: Reddit Free 搜索
@@ -314,8 +312,6 @@ sources:
     category: community
     quality: C
     attempts: 1
-    headers:
-      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
   - name: Reddit Coding Free 搜索
     type: rss
@@ -324,8 +320,6 @@ sources:
     category: community
     quality: C
     attempts: 1
-    headers:
-      User-Agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
   # 福利 / 羊毛分类：/免费 最主要的中文信源。
   # 注意必须用带 id 的规范地址，/c/welfare.rss 会 301 到挑战页。

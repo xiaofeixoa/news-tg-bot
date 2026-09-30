@@ -2932,3 +2932,53 @@ Kathmandu +05:45）与跨日界的岛（Kiritimati +14、Midway −11）都有�
 ```
 
 同一份账本，两位读者各按自己的日子与自己的钟点得到不同答案——这正是"每天"二字本来该说的话。
+
+### v1.66 那条 403 是我们自己造成的：伪装 Chrome 的 UA 配 httpx 的握手
+
+健康检查连着几天报 `1 failing source(s)`。这次先弄清它是谁、再验它说的话是不是真的：
+`Reddit LocalLLaMA RSS`（近 7 天入库 351 条，是社区面最大的源之一）`error_count=15`、
+`last_error=HTTP 403`，而它 2 小时前还成功过——`error_count` 在成功时归零，所以"连着 15 次"是真的，
+从 12:06 UTC 之后每一轮都被 403。
+
+关键在 `config/sources.yaml` 那条源自己带着 `headers.User-Agent: "Mozilla/5.0 … Chrome/124.0 Safari/537.36"`，
+却**没有**配 `browser_tls`。在美西 VPS 上用真实采集器各跑一次同一个 URL：
+
+| 请求写法 | 结果 |
+| --- | --- |
+| 假 Chrome UA + httpx 握手（配置里的写法） | **HTTP 403** |
+| 默认 `AI-News-Radar/1.0 (+personal research agent…)` | **HTTP 200，解析出 50 条** |
+| curl_cffi impersonate=chrome | 429（那一瞬间我刚连打了几次） |
+
+也就是说 Reddit 对"自报家门的 agent"是客气的（429 + `Retry-After`，程序照做退避），
+对"声称是 Chrome 却带着 python TLS 指纹"的请求直接 403。这个 UA 是从 Linux.do 那条抄来的——
+那里 Cloudflare 按 TLS 指纹拦 python 客户端，所以 UA 伪装**必须**和 `browser_tls: true` 成对出现；
+拆开写就等于发明了一个真实浏览器不可能有的签名。
+
+改动：5 个 reddit `.rss` 源去掉 UA 覆写（`Reddit LocalLLaMA RSS`、ChatGPTCoding、ClaudeAI、
+两个 search.rss），条目上方写清这次实测；Linux.do 那条**保持** `browser_tls + 浏览器 UA` 不动。
+配置层面能防复发的是新增两条 sources.yaml 卫生用例：
+
+- `test_a_spoofed_browser_user_agent_must_come_with_browser_tls`：全表扫一遍，凡 UA 里出现
+  `Mozilla/`/`Chrome`/`Safari`/`Gecko` 而该源没配 `browser_tls` 就红。
+- `test_the_reddit_rss_sources_identify_themselves_rather_than_spoof`：reddit 源不许再戴回浏览器 UA，
+  并保持 `attempts: 1`（同一轮多发只会互相抢 IP 额度）。
+
+线上效果（同一台机器、同一个 URL、分钟级对照，22:31 北京部署后第一轮）：
+
+```
+22:13:09 health check: 1725 article(s) in db, 3 unprocessed, 1 failing source(s), 1745MB free
+22:22:58 WARNING collector Reddit LocalLLaMA RSS failed: … -> HTTP 403
+22:31:25 INFO    collector Reddit LocalLLaMA RSS: 5 new of 50 fetched
+22:31:33 health check: 1736 article(s) in db, 9 unprocessed, 0 failing source(s), 1742MB free
+```
+
+该源账本 `error_count` 从 15 归 0、`last_error` 清空、`last_success_at=14:31:25 UTC`。
+
+644 → **646 passed**（本地与 anr-jump Linux/UTC 在已部署目录里各跑一遍）；反向验证 3 处全部 CAUGHT：把假 Chrome UA 加回 `Reddit LocalLLaMA RSS`、去掉 Linux.do 的
+`browser_tls`（UA 留着）、把该源 `attempts` 改成 3。第一次试 S3 时我往条目里**插入**第二个
+`attempts:` 键，YAML 后者覆盖前者，测试当然照绿——那是变异写错了，不是用例没用；改成替换
+原有那行后立刻红。另外这次排查里我自己
+犯了两个可记录的错：① 我先假设"健康检查只报数字不报名字"，`grep -a "has failed"` 却因我把标签
+和输出一起过滤掉而看起来像 0 条——读代码 + 数出现次数后才确认报警本来就在，别拿自己 grep 的
+空结果当结论；② 我先假设 error_count 是累计值不归零（那样"in a row"就是谎话），读
+`mark_source_fetch` 才确认成功会归零，这次它说的是真话。
