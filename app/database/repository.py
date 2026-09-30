@@ -94,6 +94,19 @@ def sync_sources(session: Session, configured: Sequence[dict[str, Any]]) -> int:
     return changed
 
 
+def note_source_cooldown(session: Session, source_id: int, note: str) -> None:
+    """这个源没坏，是我们自己在守它给的 `Retry-After`：只记原因，不动连击数。
+
+    `error_count` 是"连续失败次数"，把一次礼貌的等待记进去，就等于让对方的限速
+    把我们自己的健康检查点亮（5 轮就到门槛，而我们是 10 分钟一轮）。
+    """
+    source = session.get(Source, source_id)
+    if source is None:
+        return
+    source.last_fetch_at = datetime.utcnow()
+    source.last_error = (note or "")[:500]
+
+
 def mark_source_fetch(session: Session, source_id: int, *, ok: bool, error: str | None = None,
                       items: int = 0) -> None:
     source = session.get(Source, source_id)

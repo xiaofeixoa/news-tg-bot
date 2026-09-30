@@ -268,3 +268,189 @@ def test_a_success_clears_the_streak_so_the_warning_means_what_it_says(session):
     session.commit()
     stats = NewsService(get_config()).stats()
     assert stats["sources_failing"] == 0 and stats["sources_blipping"] == 0, stats
+
+
+class _Capture:
+    """真实的 logging handler：`warn_once` 走 `logger.log(level, …)`，
+    只替 `.warning`/`.info` 方法是捕不到的（第一版就漏在这里）。"""
+
+    def __init__(self, logger):
+        import logging as _logging
+
+        self.records: list[tuple[str, str]] = []
+
+        class _Sink(_logging.Handler):
+            def emit(_self, record):  # noqa: N805
+                self.records.append((record.levelname, record.getMessage()))
+
+        self.handler = _Sink()
+        self.logger = logger
+        # 测试进程没跑 setup_logging，"news" 这个 logger 的等级继承 root（WARNING），
+        # INFO 记录会在到达 handler 之前就被丢掉：把它调到和线上一致。
+        self.previous = logger.level
+        logger.setLevel(_logging.INFO)
+        logger.addHandler(self.handler)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.logger.removeHandler(self.handler)
+        self.logger.setLevel(self.previous)
+        return False
+
+
+
+# --------------------------- 我们在守 Retry-After，不是源坏了
+class _Cooling:
+    """一个"这轮什么都不做"的采集器：对方说了等 N 分钟。"""
+
+    source_name = "Linux.do 福利分类"
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+    async def collect(self):
+        raise self.error
+
+
+def _source_row(session, name: str) -> Source:
+    return session.scalar(select(Source).where(Source.name == name))
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_wait_does_not_become_a_source_failure(session, monkeypatch):
+    """线上实测：一句"源服务器要求降速"5 天打了 246 行，还被记进 error_count。
+
+    我们是 10 分钟一轮，对方要 100 分钟，于是礼貌自己就把连击推到 5 的门槛上——
+    健康检查和 `/stats` 会报"这个源持续失败"，而它其实什么也没做错。
+    """
+    from app.collectors.base import SourceCooling
+    from app.logging_setup import reset_warned_once
+    from app.processing.pipeline import collect
+
+    reset_warned_once()
+    repo.get_or_create_source(session, "Linux.do 福利分类", type_="rss",
+                             url="https://linux.do/c/welfare/36.rss", quality="C", enabled=True)
+    session.commit()
+
+    pipeline_log = __import__("app.processing.pipeline", fromlist=["log"]).log
+    cfg = get_config()
+    error = SourceCooling("https://linux.do/c/welfare/36.rss -> 源服务器要求降速，还剩 97 分钟再试")
+    with _Capture(pipeline_log) as cap:
+        for _ in range(5):                  # 旧逻辑：5 轮就点亮"持续失败"
+            stats = await collect(session, [_Cooling(error)], config=cfg, llm=None)
+            session.commit()
+    assert stats.errors == [] and len(stats.skipped) == 1, stats
+    assert "waiting=1" in str(stats) and "errors=0" in str(stats), str(stats)
+
+    row = _source_row(session, "Linux.do 福利分类")
+    assert (row.error_count or 0) == 0, f"礼貌的等待不该记成连击：{row.error_count}"
+    assert "降速" in (row.last_error or ""), row.last_error
+    assert [lvl for lvl, _ in cap.records if lvl in ("WARNING", "ERROR")] == [], cap.records
+    said = [m for _l, m in cap.records if m.startswith("collector Linux.do")]
+    assert len(said) == 1, f"同一件事每轮重播：{said}"
+
+
+@pytest.mark.asyncio
+async def test_the_wait_travels_through_the_real_collector_path(session):
+    """上面那几条是自己 raise 异常，测不到"真代码到底抛什么"。
+
+    少了这一条就会漏掉最要紧的接线：`BaseCollector.get()` 若把这次等待退回
+    普通的 `CollectorError`，管道依旧会把它记成连击，而所有单元测试照样绿。
+    """
+    from app.collectors.base import cool_down, cooling
+    from app.collectors.rss import RSSCollector
+    from app.logging_setup import reset_warned_once
+    from app.processing.pipeline import collect
+
+    reset_warned_once()
+    url = "https://example.org/parked.rss"
+    repo.get_or_create_source(session, "Parked Feed", type_="rss", url=url,
+                              quality="C", enabled=True)
+    session.commit()
+    pipeline_log = __import__("app.processing.pipeline", fromlist=["log"]).log
+    collector = RSSCollector({"name": "Parked Feed", "type": "rss", "url": url,
+                              "attempts": 1, "quality": "C"})
+    cool_down(url, 600)
+    assert cooling(url) > 0, "先把这个主机挂起，模拟对方给的 Retry-After"
+    with _Capture(pipeline_log), _Capture(repo.log):
+        stats = await collect(session, [collector], config=get_config(), llm=None)
+        session.commit()
+    row = _source_row(session, "Parked Feed")
+    assert (row.error_count or 0) == 0, f"真路径把等待记成了失败：{row.error_count}"
+    assert "降速" in (row.last_error or ""), row.last_error
+    assert stats.errors == [] and len(stats.skipped) == 1, stats
+
+
+@pytest.mark.asyncio
+async def test_a_real_failure_right_after_a_wait_still_builds_the_streak(session):
+    """不把等待算进连击，也不能顺手把真实的连击清掉。"""
+    from app.collectors.base import CollectorError, SourceCooling
+    from app.logging_setup import reset_warned_once
+    from app.processing.pipeline import collect
+
+    reset_warned_once()
+    repo.get_or_create_source(session, "Flaky After Wait", type_="rss",
+                              url="https://example.org/flaky.rss", quality="C", enabled=True)
+    session.commit()
+    cfg = get_config()
+    pipeline_log = __import__("app.processing.pipeline", fromlist=["log"]).log
+
+    class Feed:
+        source_name = "Flaky After Wait"
+
+        async def collect(self):
+            raise CollectorError("HTTP 500")
+
+    with _Capture(pipeline_log), _Capture(repo.log):
+        await collect(session, [Feed()], config=cfg, llm=None)
+        session.commit()
+        row = _source_row(session, "Flaky After Wait")
+        assert row.error_count == 1, row.error_count
+
+        cooling = _Cooling(SourceCooling("https://example.org/flaky.rss -> 源服务器要求降速，还剩 3 分钟再试"))
+        cooling.source_name = "Flaky After Wait"
+        await collect(session, [cooling], config=cfg, llm=None)
+        session.commit()
+    row = _source_row(session, "Flaky After Wait")
+    assert row.error_count == 1, f"等待不该加连击，也不该清零：{row.error_count}"
+
+
+def test_warn_once_says_a_repeating_state_once_per_process():
+    import logging as _logging
+
+    from app.logging_setup import reset_warned_once, warn_once
+
+    reset_warned_once()
+    seen: list[tuple[int, str]] = []
+
+    class Sink:
+        def log(self, level, msg, *args):
+            seen.append((level, msg % args if args else str(msg)))
+
+        def debug(self, msg, *args):
+            seen.append((_logging.DEBUG, msg % args if args else str(msg)))
+
+    assert warn_once(Sink(), "some-key", "第一轮说明：%s", "原因") is True
+    assert warn_once(Sink(), "some-key", "第二轮说明：%s", "原因") is False
+    assert warn_once(Sink(), "other-key", "另一件事：%s", "原因") is True
+    assert [lvl for lvl, _ in seen] == [_logging.INFO, _logging.DEBUG, _logging.INFO], seen
+
+
+@pytest.mark.asyncio
+async def test_the_github_token_hint_is_not_replayed_every_round(session, monkeypatch):
+    """这一句 5 天打了 115 行：同一个缺密钥状态，每轮都说一次。"""
+    from app.logging_setup import reset_warned_once
+
+    reset_warned_once()
+    cfg = get_config()
+    if cfg.settings.github_token:           # 只有在真没配的时候这条才有意义
+        pytest.skip("这台机器配了 GITHUB_TOKEN")
+    jobs = jobs_mod.NewsJobs(cfg)
+    with _Capture(jobs_mod.log) as cap:
+        jobs._warn_github_budget()
+        jobs._warn_github_budget()
+        jobs._warn_github_budget()
+    said = [m for lvl, m in cap.records if "GITHUB_TOKEN" in m]
+    assert len(said) == 1, cap.records

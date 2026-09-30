@@ -104,3 +104,27 @@ def setup_logging(log_dir: Path | str, level: str = "INFO", max_bytes: int = 5_2
 
 def get_logger(subsystem: str = "app") -> logging.Logger:
     return logging.getLogger("news" if subsystem == "app" else f"news.{subsystem}")
+
+
+_WARNED_ONCE: set[str] = set()
+
+
+def warn_once(logger: logging.Logger, key: str, message: str, *args,
+              level: int = logging.INFO) -> bool:
+    """说一句就够了：重复成立的状态不该每轮重播。
+
+    线上实测（`scripts/log_incidents.py`，2026-09-26..30）：一句"没配 GITHUB_TOKEN"打了
+    115 行，一句"源服务器要求降速"打了 246 行——都是每轮都成立的同一件事。真正的异常
+    就埋在这种噪音里。新进程会说一次，那是有用的"重启之后问题还在"信号。
+    """
+    if key in _WARNED_ONCE:
+        logger.debug(message, *args)
+        return False
+    _WARNED_ONCE.add(key)
+    logger.log(level, message, *args)
+    return True
+
+
+def reset_warned_once() -> None:
+    """测试用：清掉"已经说过"的记账。"""
+    _WARNED_ONCE.clear()

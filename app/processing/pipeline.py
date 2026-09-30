@@ -17,10 +17,11 @@ from typing import Any, Iterable, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.collectors.base import SourceCooling
 from app.config import AppConfig, as_int, get_config
 from app.database import repository as repo
 from app.database.models import Article, Source
-from app.logging_setup import get_logger
+from app.logging_setup import get_logger, warn_once
 from app.processing import breaking, classifier, deduplicate, enrich, scorer, summarizer, tagger
 from app.processing.normalize import is_blocked_title, is_blocked_url
 from app.services.llm import LLMService
@@ -40,10 +41,13 @@ class CollectStats:
     duplicates: int = 0
     blocked: int = 0
     errors: list[str] = field(default_factory=list)
+    # 我们在守对方给的 Retry-After：不是错误，但要让运维看得见有几个在等。
+    skipped: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         return (f"fetched={self.fetched} stored={self.stored} dup={self.duplicates} "
-                f"blocked={self.blocked} errors={len(self.errors)}")
+                f"blocked={self.blocked} errors={len(self.errors)}"
+                + (f" waiting={len(self.skipped)}" if self.skipped else ""))
 
 
 @dataclass
@@ -97,6 +101,18 @@ async def collect(
         name = getattr(collector, "source_name", None) or collector.__class__.__name__
         try:
             items: list[dict[str, Any]] = list(await collector.collect())
+        except SourceCooling as exc:
+            # 这是我们在守对方给的 `Retry-After`，不是源坏了：计入 `error_count` 的话，
+            # 一台要求安静 100 分钟的主机就会在我们自己 10 分钟一轮的节奏上被数成
+            # "连续 5 次失败"，于是健康检查与 `/stats` 一起把礼貌报成故障。
+            # 记一条"在等"，让 `/来源` 看得见；不清零也不加计数——真实的连击要留着。
+            stats.skipped.append(f"{name}: {exc}")
+            warn_once(log, f"cooling:{name}", "collector %s waiting: %s", name, exc)
+            source = _find_source(session, name)
+            if source:
+                repo.note_source_cooldown(session, source.id, str(exc))
+            session.commit()
+            continue
         except Exception as exc:  # a dead source must not stop the run (section 21)
             log.warning("collector %s failed: %s", name, exc)
             stats.errors.append(f"{name}: {type(exc).__name__}: {exc}")

@@ -33,6 +33,17 @@ class CollectorError(RuntimeError):
     pass
 
 
+class SourceCooling(CollectorError):
+    """We are parked on the host's own `Retry-After`, so this round asks nothing.
+
+    Not a source failure: counting it as one made our politeness look like an outage.
+    A host that asks for 100 minutes of quiet produces five consecutive "failures" on
+    this box's 10-minute cadence, which is exactly the bar the health check and
+    `/stats` call 持续失败 (measured 2026-09-30: 246 such lines since 09-26, logged as
+    WARNING and pushed into `sources.error_count`).
+    """
+
+
 def describe_error(exc: BaseException, url: str = "") -> str:
     """Transport exceptions often stringify to '' - keep class name and URL.
 
@@ -401,7 +412,7 @@ class BaseCollector:
         if waiting:
             # Raised outside the retry loop on purpose: this is not a failure to
             # retry, it is a scheduled skip, and the round should spend nothing.
-            raise CollectorError(
+            raise SourceCooling(
                 f"{url} -> 源服务器要求降速，还剩 {max(1, int(waiting / 60))} 分钟再试")
         last: Exception | None = None
         try:

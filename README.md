@@ -328,6 +328,10 @@ scripts/deploy.sh anr-vps
 
 # 投递对账（只读）：某个订阅者的简报到底发没发、账上有没有、发送层日志怎么说
 .venv/bin/python scripts/delivery_report.py --hours 168 --kind morning
+
+# 日志对账（只读）：按"事件"归组看错误，给出次数与首次/末次时刻
+.venv/bin/python scripts/log_incidents.py --since 12       # 部署后问这一句，而不是 grep -c Traceback
+.venv/bin/python scripts/log_incidents.py --level ERROR    # 只看错误（WARNING 也含在默认里）
 .venv/bin/python scripts/preview.py free --days 30        # /免费 会输出什么
 .venv/bin/python scripts/telegram_smoke.py --free         # 把 /免费 的真实结果发给自己
 .venv/bin/python scripts/telegram_smoke.py --free --query glm
@@ -3025,3 +3029,48 @@ INFO  health check: 1736 article(s) in db, 0 unprocessed, 1 failing source(s), 4
 写用例时也栽了一次自己的坑：fixture 用 `sync_sources([单个源])` 建源，会顺手把没列出的源
 按"配置里已删除"处理并清零 —— 第一个用例因此把抖动数读成 0。改成 `get_or_create_source` 直接
 upsert 才是我想测的东西。
+
+### v1.68 我们自己"守限速"的动作被记成了源故障：`Retry-After` 等待不再进连击，也不再每轮重播
+
+这一轮换了个办法找问题：把日志**按事件归组**来看（新脚本 `scripts/log_incidents.py`），
+而不是继续 `grep -c Traceback`。后者只会变大、不会变小，也分不清"刚才这一轮"和"五天前"——
+我每轮部署后都在引用它。归组之后立刻掉出三件事：
+
+| 分组（近 5 天） | 次数 | 最后一次 |
+| --- | --- | --- |
+| `未配置 GITHUB_TOKEN…`（jobs.py） | **115** | 09-30 23:01 |
+| `collector Linux.do 福利分类 failed: … 源服务器要求降速，还剩 N 分钟再试` | **246** | 09-30 22:41 |
+| `scheduler.log` 里的 4 块 Traceback | 4 | **全部来自同一个时刻 09-26 10:20:56** |
+| `database is locked` | **0**（两台都没有；WAL + `busy_timeout=30000` 早就配好） | — |
+
+第三、四行顺手清掉了一条挂了很久的"待查"：那条 `database is locked` 根因排查其实**没有可查的东西**，
+`scheduler.log` 那 4 条也不是"历史遗留的活问题"，是 09-26 那一次 `article_tags` 唯一键事故的
+四块 traceback（早已修好）。
+
+第二行才是真正的 bug：`BaseCollector.get()` 遇到主机给的 `Retry-After` 会抛 `CollectorError`
+表示"这轮不问它"，而采集循环把任何异常都当源故障：`log.warning(... failed ...)` +
+`stats.errors` + `mark_source_fetch(ok=False)` → **`error_count += 1`**。我们是 10 分钟一轮，
+对方要 100 分钟，于是礼貌自己就能在 5 轮内把连击推到 v1.67 的"持续失败"门槛上：
+我们的克制会被自己的健康检查报成故障。（Linux.do 那条 246 次、Reddit 的 429 同理。）
+
+- `app/collectors/base.py` 新增 `SourceCooling(CollectorError)`，只有这一种情形抛它；
+- 管道单独接住：记一条 `collector X waiting: …`（`warn_once`，每进程一次）+
+  `repo.note_source_cooldown()`——只写 `last_fetch_at`/`last_error`，**不加也不清** `error_count`，
+  真实的连击还在；
+- `CollectStats.skipped` 与轮末摘要 `waiting=N`，`errors=` 从此只数真失败；
+- `logging_setup.warn_once(logger, key, …)`：重复成立的状态一句就够（GITHUB_TOKEN 那句 115 行），
+  新进程会说一次，那是"重启之后问题还在"的有用信号；
+- `scripts/log_incidents.py`（只读）：`--since N` 只看最近 N 小时还出现的类别，`--level`/`--all`，
+  按根因归组并给首次/末次时刻。以后"部署后有没有新异常"就是一条带时刻的命令。
+
+线上立刻可见（同一份日志，部署前后各算一次）：`未配置 GITHUB_TOKEN` 旧组停在 **115 次 / 23:01**，
+新组（走 `warn_once`，出处变成 `logging_setup.py:124`）**只有 1 次 / 23:13:49**，就是部署后第一轮；
+`源服务器要求降速` 的 WARNING 组停在 22:41，之后再没有以"failed"出现。
+
+测试：659 → **660 passed**（新增 5 条：等待不进连击、真实采集路径端到端、等待后真失败仍累计、
+`warn_once` 只说一句、GITHUB_TOKEN 提示不重播）。5 处反向验证全部 CAUGHT：`get()` 退回抛普通
+`CollectorError`、管道不再特判、`note_source_cooldown` 仍加计数、`warn_once` 重播（两条用例各抓一次）。
+中间两次我自己的用例写错也留在记录里：① 只替 `logger.warning/info` 方法捕不到 `logger.log(level,…)`，
+② 测试进程的 `news` logger 等级继承 root（WARNING），INFO 记录到不了 handler——`_Capture` 现在把等级调到
+INFO 再还原；另外第一版端到端用例其实从没经过 `get()`，所以 `raise SourceCooling` 被改回
+`raise CollectorError` 时全绿——补上真路径那条才抓住。

@@ -27,7 +27,7 @@ from app.config import AppConfig, as_int, get_config, local_day_start, local_now
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, User
-from app.logging_setup import get_logger
+from app.logging_setup import get_logger, warn_once
 from app.processing.pipeline import collect, process_pending, translate_pending
 from app.services.digest import DigestService, deferral_worthwhile
 from app.services.llm import LLMService
@@ -526,11 +526,13 @@ class NewsJobs:
             return
         per_hour = repos * max(1, int(60 / max(1, int(self.config.get(
             "schedule.github_minutes", 30) or 30))))
-        log.warning(
-            "未配置 GITHUB_TOKEN：%d 个 releases 仓库约需 %d 次/小时请求，"
-            "而匿名上限是 60 次/小时 - GitHub 源会经常空转。"
-            "在 /etc/ai-news-radar/env 里加 GITHUB_TOKEN=<PAT> 可放宽到 5000 次/小时",
-            repos, per_hour)
+        # 每轮都成立的状态说一次就够：线上 5 天里这一句打了 115 行，
+        # 把真正的异常埋在了噪音里（`scripts/log_incidents.py` 量出来的）。
+        warn_once(log, "github-token",
+                  "未配置 GITHUB_TOKEN：%d 个 releases 仓库约需 %d 次/小时请求，"
+                  "而匿名上限是 60 次/小时 - GitHub 源会经常空转。"
+                  "在 /etc/ai-news-radar/env 里加 GITHUB_TOKEN=<PAT> 可放宽到 5000 次/小时",
+                  repos, per_hour, level=logging.WARNING)
 
 
 def guarded(func: Callable[..., Coroutine[Any, Any, Any]], name: str):
