@@ -28,22 +28,34 @@ log = get_logger("app")
 # The briefing reads 4x its length so the per-source cap has material left over.
 BRIEFING_DEPTH = 4
 
-# The two guards that close on their own. They are constants because
+# The guards that close on their own. They are constants because
 # `deferral_worthwhile` below has to match them exactly, and a reason string that
 # drifts away from its prefix silently turns "retry later" into "drop forever".
 _COOLDOWN = "cooldown"
 _DAILY_CAP = "daily cap"
+# The third one is the gate's own heat wording; read from the gate module, never
+# retyped, for the same drift reason - `tests/test_pipeline.py` asserts the two agree.
+_HEAT = breaking.HEAT_WATCH
 
 
 def deferral_worthwhile(reason: str) -> bool:
     """Is this rejection about *timing*, so the same row may pass a later round?
 
-    Cooldown and the daily cap are the only two gates that open again on a clock.
-    Everything else - the gate no longer passing, the story ageing out, already
-    sent, breaking switched off - will read the same way next round, so keeping it
-    in the retry queue would be a query with no possible outcome.
+    Cooldown and the daily cap open again on a clock. So does the 突发 heat bar: a row's
+    `community_heat` is refreshed upward every time a collector meets the same URL again,
+    while the gate is asked about that row once, minutes after publication. Measured on
+    the live box over 2026-09-25..29, three stories crossed 250 only after processing
+    (#581 26 -> 741 upvotes, #509 90 -> 495, #1182 47 -> 593) and nothing re-asked, so
+    the bar could never rescue the very stories it was added for.
+    Everything else - the gate no longer passing for a non-heat reason, the story ageing
+    out, already sent, breaking switched off - will read the same way next round, so
+    keeping it in the retry queue would be a query with no possible outcome.
+
+    The heat test is a substring, not a prefix: that rejection arrives here through
+    `can_send_breaking`, which labels every gate answer "not breaking: …" first.
     """
-    return reason.startswith(_COOLDOWN) or reason.startswith(_DAILY_CAP)
+    return (reason.startswith(_COOLDOWN) or reason.startswith(_DAILY_CAP)
+            or _HEAT in reason)
 
 
 def select_briefing(items: Sequence[ArticleView], *, top_items: int,

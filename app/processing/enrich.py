@@ -125,18 +125,21 @@ async def maybe_enrich(data: dict[str, Any], article: Any, config: AppConfig,
         return False
     body = await fetch(str(data.get("url") or ""),
                        max_chars=as_int(config.get("enrich.max_chars", 12000), 12000))
-    if len(body) > len(content):
+    gained = len(body) > len(content)
+    if gained:
         data["content"] = body
         article.content = body
         drop_stale_translation(article)
-        data["meta"] = {**(data.get("meta") or {}), "enriched": True}
-        article.meta = data["meta"]
-        return True
-    # Record the failed attempt too: `requeue_stubs` uses it to stop knocking on
-    # a blocked host at every boot.
-    data["meta"] = {**(data.get("meta") or {}), "enriched": False}
-    article.meta = data["meta"]
-    return False
+    # Record the failed attempt too: `requeue_stubs` uses `enriched: False` to stop
+    # knocking on a blocked host at every boot.
+    # Both dicts are merged *from the row*: markers that do not come from the
+    # collector live in the same field (the 突发 heat watch, `zh_misses`, a free-offer
+    # note), and `article.meta = data["meta"]` used to wipe whatever this pass did not
+    # know about.
+    merged = {**(article.meta or {}), **(data.get("meta") or {}), "enriched": gained}
+    data["meta"] = dict(merged)
+    article.meta = merged
+    return gained
 
 
 def requeue_stubs(session: Session, *, config: AppConfig | None = None,

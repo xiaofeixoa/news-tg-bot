@@ -188,18 +188,75 @@ def test_a_blocklisted_source_stays_blocklisted_however_hot():
 
 
 def test_heat_below_the_bar_still_needs_a_first_hand_source():
+    """只差热度 ≠ 不合格：门禁照样说不，但要说清"这是在等一个会涨的数字"。
+
+    线上 2026-09-25..29：#581 打分时 26 赞、库里现在 741；#509 90→495；#1182 47→593。
+    三篇都过了 250 那条线，可门禁只在入库那一分钟被问过一次，没人再问第二次。
+    """
     from app.processing import breaking
+    from app.services.digest import deferral_worthwhile
 
     bar = float(get_config().get("breaking.rule.min_community_heat"))
     ok, why = breaking.gate(hn_row(community_heat=bar - 1), config=get_config(), ai_enabled=False)
-    assert not ok and "source quality" in why
+    assert not ok, "热度差一条也不该破例"
+    assert breaking.HEAT_WATCH in why, f"只差热度的拒绝要写成「等」，不是写成「不行」：{why}"
+    assert "来源质量 65 低于 80" in why, f"理由里要看得见是哪道门挡的：{why}"
+    # can_send_breaking 会把门禁的理由加上 "not breaking: " 前缀，判定必须两种都认
+    assert deferral_worthwhile(why) and deferral_worthwhile(f"not breaking: {why}")
+
+
+def test_an_aged_out_row_is_not_left_waiting_for_heat():
+    """出窗的行没有"下一轮"这回事：那种标记只会每轮白花一次查询。"""
+    from datetime import datetime, timedelta, timezone
+
+    from app.processing import breaking
+    from app.services.digest import deferral_worthwhile
+
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=30)
+    ok, why = breaking.gate(hn_row(community_heat=40, published_at=old),
+                             config=get_config(), ai_enabled=False)
+    assert not ok and breaking.HEAT_WATCH not in why, why
+    assert not deferral_worthwhile(why), why
+
+
+def test_turning_the_heat_bar_off_turns_the_wait_off_with_it():
+    """没有破例通道时，"再等一轮"就没有可能的结果——队列里不该出现这种行。"""
+    from dataclasses import replace
+
+    from app.processing import breaking
+    from app.services.digest import deferral_worthwhile
+
+    cfg = get_config()
+    base = dict(cfg.raw or {})
+    node = dict(base.get("breaking") or {})
+    rule = dict(node.get("rule") or {})
+    rule["min_community_heat"] = 0
+    node["rule"] = rule
+    base["breaking"] = node
+    quiet = replace(cfg, raw=base)
+    ok, why = breaking.gate(hn_row(community_heat=40), config=quiet, ai_enabled=False)
+    assert not ok and "source quality" in why, why
+    assert not deferral_worthwhile(why), why
 
 
 def test_the_settings_text_describes_the_gate_that_is_actually_in_force():
+    from dataclasses import replace
+
     from app.processing import breaking
 
     text = breaking.describe(get_config(), ai_enabled=False)
     assert "热度" in text and "250" in text, f"/设置 说的门必须就是代码里的门：{text}"
+    assert "每轮再问一次" in text, f"只差热度会被重新问过，这件事 /设置 也得说：{text}"
+
+    cfg = get_config()
+    base = dict(cfg.raw or {})
+    node = dict(base.get("breaking") or {})
+    rule = dict(node.get("rule") or {})
+    rule["min_community_heat"] = 0
+    node["rule"] = rule
+    base["breaking"] = node
+    quiet = breaking.describe(replace(cfg, raw=base), ai_enabled=False)
+    assert "热度" not in quiet and "再问一次" not in quiet, f"关掉破例通道，文案也该跟着变：{quiet}"
 
 
 def test_the_settings_text_follows_the_configured_freshness_window():

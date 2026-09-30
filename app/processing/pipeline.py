@@ -420,6 +420,14 @@ async def _process_one(
         article.meta = {**(article.meta or {}), "breaking_reason": why}
         log.info("breaking candidate #%s: %s - %s", article.id, (article.title or "")[:70], why)
         return "breaking"
+    if breaking.HEAT_WATCH in why:
+        # Not too weak, not too old - just not yet read by enough people, and the
+        # number that decides that keeps arriving on later collections of the same
+        # URL. Hand the row to the retry queue instead of deciding for good in the
+        # one minute where anybody looked at it.
+        breaking.note_deferral(article, why)
+        log.info("breaking watch #%s: %s - %s", article.id, (article.title or "")[:70], why)
+        return "processed"
     log.debug("not breaking #%s: %s", article.id, why)
     return "processed"
 

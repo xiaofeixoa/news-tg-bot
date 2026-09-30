@@ -278,7 +278,15 @@ class NewsJobs:
                     if row is None:
                         continue
                     tries = breaking.note_deferral(row, reasons.get(article_id, ""))
-                    if tries >= 3:
+                    reason = reasons.get(article_id, "")
+                    if breaking.HEAT_WATCH in reason:
+                        # A story waiting to get hot is expected to wait for hours, so
+                        # it is reported once and then about hourly. One line per
+                        # 10-minute round per row would be the 204-line log again.
+                        if tries == 1 or tries % 6 == 0:
+                            log.info("breaking 热度观察 #%s（第 %s 轮）：%s",
+                                     article_id, tries, reason)
+                    elif tries >= 3:
                         log.warning("breaking #%s 已连续 %s 轮被推迟，仍未送达：%s",
                                     article_id, tries, reasons.get(article_id, ""))
                     else:

@@ -25,6 +25,15 @@ carried an event word, were collected within 1.4h of publishing and scored 70-78
 and none of them alerted, because they arrived through Hacker News (quality 65).
 Same week, 418 of 431 rows have heat 0 and only 13 reach 100, so the bar cannot flood.
 
+Heat is also the *lagging* signal here, and that cost the feature its own examples. This
+gate runs once, minutes after a row is collected, while `community_heat` keeps being
+refreshed upward every time a collector sees the same URL again (`repository._merge_duplicate`).
+Measured 2026-09-25..29 on the live box: #581 was scored at 26 upvotes and holds 741 now,
+#509 90 -> 495, #1182 47 -> 593 - three stories that crossed the bar after the only minute
+in which anybody asked. A rejection that is *only* about heat inside the freshness window
+therefore comes back as 等待全站热度 so the retry queue re-asks it, and ages out with a
+recorded reason when the window closes.
+
 Tuned against that same 7-day corpus: 21 matches (~3 per Beijing day, inside the
 5/day cap), and each of them is a real event - "Introducing GPT-6 Sol and Luna",
 "Anthropic to pay Akamai $11.6 billion over seven years in cloud deal", "Court
@@ -44,6 +53,9 @@ _PATTERN_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
 DEFERRAL_KEY = "breaking_defer"
 # Fallback for the freshness bar, and the window the retry queue reads itself by.
 MAX_AGE_DEFAULT = 24.0
+# Marks a rejection that a *later* round can overturn because the signal behind it
+# keeps arriving. `digest.deferral_worthwhile` matches this text.
+HEAT_WATCH = "等待全站热度"
 
 
 def _combined(patterns: Any) -> re.Pattern[str] | None:
@@ -71,6 +83,23 @@ def _valid(pattern: str) -> bool:
     except re.error:
         return False
     return True
+
+
+def _age_hours(article: Any, *, at: datetime | None = None) -> float | None:
+    """Hours since publication, or None when the row carries no usable timestamp.
+
+    None also means "no freshness window to wait inside", which is why the retry
+    queue never books a row for heat without a timestamp: it would be re-asked
+    forever, since the gate can never age it out.
+    """
+    published = getattr(article, "published_at", None)
+    if not isinstance(published, datetime):
+        return None
+    return ((at or datetime.utcnow()) - published).total_seconds() / 3600.0
+
+
+def _may_wait(heat_bar: float, age: float | None, max_age: float) -> bool:
+    return (heat_bar > 0 and age is not None and max_age > 0 and (max_age - age) > 0)
 
 
 def event_trigger(title: str | None, config: AppConfig | None = None) -> str | None:
@@ -132,16 +161,22 @@ def gate(article: Any, *, config: AppConfig | None = None, ai_enabled: bool | No
     heat = as_float(getattr(article, "community_heat", None), 0.0)
     heat_bar = as_float(config.get("breaking.rule.min_community_heat"), 0.0)
     rescued = heat_bar > 0 and heat >= heat_bar
-    if quality < min_quality and not rescued:
-        return False, f"source quality {quality:.0f} below {min_quality:.0f}"
-    if score < min_score and not rescued:
-        return False, f"score {score:.0f} below {min_score:.0f}"
-    published = getattr(article, "published_at", None)
     max_age = as_float(config.get("breaking.rule.max_age_hours"), MAX_AGE_DEFAULT)
-    if isinstance(published, datetime) and max_age > 0:
-        age_hours = ((at or datetime.utcnow()) - published).total_seconds() / 3600.0
-        if age_hours > max_age:
-            return False, f"published {age_hours:.0f}h ago, older than {max_age:.0f}h"
+    age = _age_hours(article, at=at)
+    # A row that fails the quality/score bars *while it is still inside the freshness
+    # window* has not failed for good: the number that would rescue it keeps growing
+    # after this minute. Say what is being waited for, and keep the shortfall in the
+    # same line so the audit funnel does not lose which bar turned it away.
+    wait_note = (f"{HEAT_WATCH}：此刻热度 {heat:.0f} / 门槛 {heat_bar:.0f}，"
+                 f"{max_age - age:.0f} 小时内还会再问一次") if _may_wait(heat_bar, age, max_age) else ""
+    if quality < min_quality and not rescued:
+        return False, (f"{wait_note}（来源质量 {quality:.0f} 低于 {min_quality:.0f}）" if wait_note
+                       else f"source quality {quality:.0f} below {min_quality:.0f}")
+    if score < min_score and not rescued:
+        return False, (f"{wait_note}（评分 {score:.0f} 低于 {min_score:.0f}）" if wait_note
+                       else f"score {score:.0f} below {min_score:.0f}")
+    if age is not None and max_age > 0 and age > max_age:
+        return False, f"published {age:.0f}h ago, older than {max_age:.0f}h"
     if rescued:
         return True, (f"event “{trigger}” 全站热度 {heat:.0f}（社区来源破例，"
                       f"来源质量 {quality:.0f}、评分 {score:.0f}）")
@@ -181,9 +216,10 @@ def describe(config: AppConfig | None = None, *, ai_enabled: bool | None = None)
     if ai_enabled:
         bar = as_float(config.get("breaking.threshold", config.settings.breaking_news_threshold), 90.0)
         return f"评分 ≥ {bar:.0f}"
-    heat_bar = as_float(config.get("breaking.rule.min_community_heat"), 0.0)
-    rescued = f"，或全站热度 ≥{heat_bar:.0f} 的大事件（社区来源也可破例）" if heat_bar > 0 else ""
     hours = as_float(config.get("breaking.rule.max_age_hours"), MAX_AGE_DEFAULT)
+    heat_bar = as_float(config.get("breaking.rule.min_community_heat"), 0.0)
+    rescued = (f"，或全站热度 ≥{heat_bar:.0f} 的大事件（社区来源也可破例；"
+               f"只差热度的会在 {hours:.0f} 小时内每轮再问一次）" if heat_bar > 0 else "")
     return f"标题里有大事件 + 一手来源 + {hours:.0f} 小时内{rescued}"
 
 

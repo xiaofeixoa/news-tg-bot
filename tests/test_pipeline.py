@@ -1328,6 +1328,18 @@ def _breaking_row(session, title: str, url: str) -> int:
     return int(stored.id)
 
 
+def _hn_candidate(session, title: str, url: str, *, heat: float = 40) -> int:
+    """线上真实形状：Hacker News 的大事件，来源质量 65 过不了 80，只有热度能破例。"""
+    art = _breaking_row(session, title, url)
+    with session_scope() as s:
+        row = s.get(Article, art)
+        row.source_name = "Hacker News"
+        row.source_quality = 65
+        row.community_heat = heat
+        s.commit()
+    return art
+
+
 @pytest.mark.asyncio
 async def test_two_breaking_stories_in_one_round_are_both_sent(session, monkeypatch):
     """同一轮里两条各自合格的大新闻，不该因为第一条刚发完就把第二条判成"冷却中"。
@@ -1641,15 +1653,112 @@ async def test_a_row_one_reader_got_stays_booked_for_the_reader_in_cooldown(sess
 
 
 def test_only_timing_rejections_are_worth_retrying():
-    """推迟只认会自己重新打开的两道门禁；其余理由每轮都一样。"""
+    """推迟只认会自己重新打开的三道门禁；其余理由每轮都一样。"""
+    from app.processing import breaking
     from app.services.digest import deferral_worthwhile
 
     assert deferral_worthwhile("cooldown 29 min left")
     assert deferral_worthwhile("daily cap reached (5/5)")
+    assert deferral_worthwhile(
+        f"not breaking: {breaking.HEAT_WATCH}：此刻热度 249 / 门槛 250（来源质量 65 低于 80）"), \
+        "热度会随后续采集继续上涨，出窗之前每一轮都该重新问一次门禁"
     for final in ("already sent to this reader", "same event already sent to this reader",
                   "not breaking: published 30h ago, older than 24h",
+                  "not breaking: source quality 65 below 80",
                   "breaking news disabled in config", "user paused / breaking off"):
         assert not deferral_worthwhile(final), final
+
+
+@pytest.mark.asyncio
+async def test_a_story_that_only_lacks_heat_is_reasked_once_it_gets_hot(session, monkeypatch):
+    """热度是迟到信号，门禁却只被问一次：这一轮把它交给队列，下一轮热度到了就该发。
+
+    线上 #581 打分时 26 赞、库里现在 741；#509 90→495；#1182 47→593。三篇都越过 250，
+    但没有一篇被重新问过——`min_community_heat` 这条破例通道因此从来没救过任何一个读者。
+    """
+    from app.processing import breaking
+    from app.scheduler.jobs import NewsJobs
+
+    art = _hn_candidate(session, "OpenAI agent hacked a government website, says PM",
+                        "https://example.org/hot1", heat=40)
+    with session_scope() as s:
+        verdict, why = breaking.gate(s.get(Article, art), config=get_config(), ai_enabled=False)
+        assert not verdict and breaking.HEAT_WATCH in why, why
+        breaking.note_deferral(s.get(Article, art), why)
+        s.commit()
+
+    sender = _Sender()
+    jobs = NewsJobs(get_config(), sender=sender)
+    monkeypatch.setattr(jobs, "chat_ids", lambda: [111111111])
+
+    await jobs.send_breaking([])
+    assert art not in sender.delivered, "40 赞不该破例发出去"
+    with session_scope() as s:
+        assert (s.get(Article, art).meta or {}).get("breaking_defer"), "还没热，标记要留着"
+
+    with session_scope() as s:  # 下一次采集把 741 个赞带了回来（_merge_duplicate 只升不降）
+        s.get(Article, art).community_heat = 741
+        s.commit()
+    await jobs.send_breaking([])
+    assert art in sender.delivered, "热度到位却没人补发：这就是 #581 的遭遇"
+    with session_scope() as s:
+        assert not (s.get(Article, art).meta or {}).get("breaking_defer"), "补发后标记该清掉"
+
+
+@pytest.mark.asyncio
+async def test_the_processing_round_marks_a_heat_short_story_itself(session):
+    """不是只有手工标记才算数：真正入库的那一轮必须自己留下这个记号。"""
+    from app.processing import breaking
+    from app.processing.pipeline import process_pending
+
+    repo.save_article(session, feed_item("Anthropic unveils a supply-chain ruling two",
+                                        "https://example.org/hot2", source="Hacker News"))
+    await process_pending(session, config=get_config(), llm=_SilentLLM(), limit=5)
+    session.commit()
+    with session_scope() as s:
+        row = s.scalar(select(Article).where(Article.url == "https://example.org/hot2"))
+        assert row is not None and row.is_processed
+        info = (row.meta or {}).get("breaking_defer")
+        assert info and breaking.HEAT_WATCH in str(info.get("reason") or ""), \
+            f"HN 大事件只差热度时，本轮就该排进重试队列：meta={row.meta}"
+
+
+def test_the_heat_watch_reports_hourly_not_every_round(session, monkeypatch):
+    """一篇正在攒热度的稿子会等几个小时：每 10 分钟报一次就成了新的日志噪音。"""
+    from app.scheduler import jobs as jobs_module
+    from app.scheduler.jobs import NewsJobs
+
+    lines: list[tuple[str, str]] = []
+
+    class Recorder:
+        def info(self, msg, *args):
+            lines.append(("info", msg % args))
+
+        def warning(self, msg, *args):
+            lines.append(("warning", msg % args))
+
+        def debug(self, msg, *args):
+            lines.append(("debug", msg % args))
+
+        def error(self, msg, *args):
+            lines.append(("error", msg % args))
+
+    monkeypatch.setattr(jobs_module, "log", Recorder())
+    art = _hn_candidate(session, "OpenAI agent hacked a government site", "https://example.org/quiet")
+    watch = "等待全站热度：此刻热度 40 / 门槛 250（来源质量 65 低于 80）"
+    jobs = NewsJobs(get_config(), sender=_Sender())
+    for _ in range(7):
+        jobs._settle_breaking_deferrals(reasons={art: watch}, deferred={art},
+                                        settled=set(), delivered=set())
+    reported = [m for _t, m in lines if "热度观察" in m]
+    assert len(reported) == 2, f"7 轮只该报第 1 轮和第 6 轮：{lines}"
+    assert not [m for _t, m in lines if "已连续" in m], "还在攒热度的行不该每轮刷警告"
+
+    lines.clear()
+    for _ in range(4):
+        jobs._settle_breaking_deferrals(reasons={art: "cooldown 59 min left"}, deferred={art},
+                                        settled=set(), delivered=set())
+    assert [m for _t, m in lines if "已连续" in m], "真正一再被推迟的仍要升级为警告"
 
 
 @pytest.mark.asyncio

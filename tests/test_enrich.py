@@ -111,6 +111,40 @@ async def test_a_page_shorter_than_the_stub_is_not_an_upgrade(monkeypatch):
     assert data["content"] == STUB
 
 
+async def test_enrichment_keeps_markers_that_came_from_elsewhere(monkeypatch):
+    """`article.meta` 里不只有采集器的键：突发热度观察、zh_misses、限免标注住在同一格。
+
+    这里曾经是 `article.meta = data["meta"]` 整体覆盖，于是这一行只要被正文提取碰过
+    一次，本轮之外写进去的记号就全没了——重试队列再也读不到它，突发也就永远不会补发。
+    """
+    async def fake_fetch(url, **kwargs):
+        return FULL
+
+    monkeypatch.setattr(enrich, "fetch", fake_fetch)
+    data = _article(STUB)
+    data["meta"] = {"points": 12}
+    row = Row()
+    row.meta = {"breaking_defer": {"tries": 2, "reason": "等待全站热度"}, "zh_misses": {"title": 1}}
+
+    assert await enrich.maybe_enrich(data, row, get_config(), budget=enrich.Budget(5)) is True
+    assert row.meta["breaking_defer"]["tries"] == 2 and row.meta["zh_misses"]["title"] == 1
+    assert row.meta["points"] == 12 and row.meta["enriched"] is True
+
+    async def refuse(url, **kwargs):
+        return "too short"
+
+    monkeypatch.setattr(enrich, "fetch", refuse)
+    data2 = _article(STUB, url="https://blog.example/refusing-host")
+    data2["meta"] = {"hn_id": "99"}
+    row2 = Row()
+    row2.meta = {"breaking_defer": {"tries": 1, "reason": "等待全站热度"}}
+
+    assert await enrich.maybe_enrich(data2, row2, get_config(), budget=enrich.Budget(5)) is False
+    assert row2.meta["breaking_defer"] and row2.meta["hn_id"] == "99"
+    assert row2.meta["enriched"] is False, "被拒绝也要记号，requeue_stubs 靠它别再敲门"
+    assert data2["meta"] is not row2.meta, "两处不该共用同一个 dict：改一处就是改两处"
+
+
 async def test_a_refusing_host_is_parked_not_asked_again(monkeypatch):
     """One 403 per hour, not one per article - see collectors.base backoff."""
     from app.collectors import base
