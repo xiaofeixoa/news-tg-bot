@@ -135,6 +135,17 @@ async def cmd_setinterest(message: Message, command: CommandObject, news: NewsSe
 
 
 # ------------------------------------------------------------------ helpers
+def _svc() -> NewsService:
+    """面板要现场算"这一档还剩几条"，而 `_panel` 只拿到 user。
+
+    用同一个进程级单例而不是到处加参数：`cmd_settings` / `_refresh` 拿到的 `news`
+    本来就是它，多传一层只会让面板与按钮各读一份服务（v1.83 那条"一个定义"的教训）。
+    """
+    from app.services.news import get_news_service
+
+    return get_news_service()
+
+
 def _panel(user: dict[str, Any], quota: dict[str, Any] | None = None) -> str:
     lines = [
         "⚙️ <b>你的推送设置</b>",
@@ -149,7 +160,9 @@ def _panel(user: dict[str, Any], quota: dict[str, Any] | None = None) -> str:
     if quota_text:
         lines.append(f"   └ {quota_text}")
     lines += [
-        f"📊 最低评分：{user['min_score']:.0f}",
+        # 光有数字不够：上限在哪、这一档现在几条达标，都要在同一行看到（v1.95）
+        fmt.score_scope(user["min_score"], ceiling=_svc().score_ceiling(),
+                        eligible=_svc().count_eligible(hours=24, min_score=user["min_score"])),
         f"⏸ 自动推送：{'已暂停' if user['paused'] else '运行中'}",
         "",
         "<b>兴趣：</b>" + (

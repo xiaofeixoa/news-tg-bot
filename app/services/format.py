@@ -644,6 +644,22 @@ def paged_header(title: str, total: int, shown: int, *, page: int = 1, pages: in
     return " · ".join(parts)
 
 
+def score_scope(value: float, *, ceiling: float, eligible: int) -> str:
+    """`/设置` 里"最低评分"那一行：数字 + 它的上限 + 这一档现在有几条达标。
+
+    面板原来只写 `📊 最低评分：45`，而"上限是多少"和"提到 70 会发生什么"都要他自己猜。
+    真机 2026-10-01 近 24 小时的实测：45→320 条、50→252、60→71、70→10、78→3、**80→0**。
+    0 那一档必须当场说，因为他一旦停在那里，第二天看到的是空简报而不是这条解释。
+    """
+    text = f"📊 最低评分：{value:.0f}（上限 {ceiling:.0f}"
+    if value >= ceiling:
+        text += "，已经是最高的了"
+    text += f" · 近 24 小时 {eligible} 条达标）"
+    if eligible == 0:
+        text += "\n   ⚠️ 这一档现在一条都不达标，早晚报会是空的；点 🔽 降下来才有内容"
+    return text
+
+
 def quota_line(quota: dict[str, Any] | None) -> str:
     """今天还能不能收到突发：把正在生效的上限写在他看的那一屏上。
 

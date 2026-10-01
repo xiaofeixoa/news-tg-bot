@@ -35,6 +35,26 @@ def test_the_handler_no_longer_clamps_to_the_unreachable_90():
     assert "news.score_ceiling()" in src, "clamp 必须读同一个定义"
 
 
+def test_score_scope_shows_the_ceiling_and_what_this_floor_costs():
+    from app.services import format as fmt
+
+    line = fmt.score_scope(45, ceiling=78, eligible=320)
+    assert "📊 最低评分：45" in line, line
+    assert "上限 78" in line and "320 条达标" in line, line
+    assert "⚠" not in line, line                       # 正常档位不该吓人
+    top = fmt.score_scope(78, ceiling=78, eligible=3)
+    assert "已经是最高的了" in top and "3 条达标" in top, top
+    empty = fmt.score_scope(80, ceiling=78, eligible=0)
+    assert "0 条达标" in empty and "早晚报会是空的" in empty, empty
+
+
+def test_the_panel_builds_that_line_in_one_place():
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "app" / "bot" / "handlers" / "settings.py").read_text(encoding="utf-8")
+    assert "fmt.score_scope(" in src, "面板那行必须走同一个措辞生成器"
+    assert 'f"📊 最低评分：' not in src, "handler 里不该再自己拼这一行（第二份实现通常更弱）"
+
+
 def test_a_press_at_the_ceiling_says_so():
     """点到边界那一次不会改数字，也就必须有话说——否则只是"按钮没反应"。"""
     from app.bot.handlers import settings as h
