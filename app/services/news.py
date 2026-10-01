@@ -94,8 +94,19 @@ class ArticleView:
 
     @property
     def translated_summary(self) -> str | None:
-        """Chinese summary only - the only kind allowed to replace the headline."""
-        return self.display_summary if self.summary_zh else None
+        """Chinese summary only - the only kind allowed to replace the headline.
+
+        「只有 `summary_zh` 非空」不等于"它是中文"：真机 2026-10-01 的只读探针数到
+        近 24 小时 288 行非空里有 10 行一个汉字都没有（全库 39 行）——那是
+        `pipeline._note_zh_miss` 认命时抄进去的原文（一段英文、一个 reddit 图片直链、
+        GitHub 仓库名，甚至别人泄露的账号密码）。于是列表首行会用英文/URL 盖掉一个
+        本来就有的中文标题。这里必须验内容，不能只验列非空。
+        """
+        from app.services.translate import has_cjk
+
+        if not self.summary_zh or not has_cjk(self.summary_zh):
+            return None
+        return self.display_summary
 
     @property
     def display_line(self) -> str:

@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 759 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 760 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4040,4 +4040,80 @@ partition_by=func.coalesce(event_id, id)      # 我搬进 SQL 时忠实照搬，
 修复后：模型发布 共 251 → 这一页 10 条 ；开源生态 共 394 → 10 条
         /today 共 109 条，第 1 页 20 条、第 2 页 20 条、重叠 0 条
 ```
+
+### v1.87 `summary_zh` 的列名承诺"中文"，代码只检查"非空"：列表首行被别人的账号密码盖掉了
+
+只读探针（`anr-vps`，`mode=ro` 直连生产库，2026-10-01 03:18Z）：
+
 ```
+近 24h：288 行的 summary_zh 非空，其中 10 行**里面一个汉字都没有**
+近 72h：888 行 → 25 行
+全库：1699 行 → 39 行
+```
+
+这些行存的是**翻译失败后留下的原文**。举几条真实的（内容不含中文，也不含下面的 id）：
+
+- #1876 `I was researching prices on ebay and fed claude a bunch of images…`（一段英文）
+- #1836 / #1837 `https://preview.redd.it/….png?width=984&format=png…`（一个 reddit 图片直链）
+- #1784 `open-pencil/open-pencil (8,679 stars)`（GitHub 仓库名加星数）
+- #1720 一个陌生人的 iCloud 邮箱 + 一串看着像密码的 token（linux.do 福利帖里的内容；**这里不复述，只记 id 备查**）
+
+`ArticleView.translated_summary` 当时的判据是 `return self.display_summary if self.summary_zh else None`
+——列非空就认定它是中文摘要，于是 `display_line` 拿它去盖标题。后果分两级：
+#1836 本来有一个好的中文标题「Gemini 4氩气」，列表首行却显示成一个 png 直链；
+#1720 更糟，**列表首行会把别人泄露的凭据直接推到用户眼前**。这是本轮第一个"能造成实际伤害"的呈现缺陷，
+前几轮那些只是数字不对。
+
+缺陷族还是同一个：**一个名字就是一种承诺**。`_zh` 后缀承诺语言，代码验的是"有没有值"。
+列非空是"它是中文"的必要条件，不是充分条件。
+
+修的是判据本身，不新写正则：
+
+```python
+from app.services.translate import has_cjk
+
+if not self.summary_zh or not has_cjk(self.summary_zh):
+    return None
+return self.display_summary
+```
+
+`has_cjk` 是翻译模块里**已有**的那个判据（翻译失败本来就用它判定），这里复用它——
+"这是中文吗"在项目里只能有一个定义，否则 v1.86 刚记下的那条"两处用同一个错误定义，一致性检查就变成盲区"
+会换个地方长出来。
+
+**为什么修读侧而不是写侧**：`needs_translation` 只对**空字段**补翻，所以这 39 行永远不会被系统自己修好。
+写侧要改 39 行生产数据，那是需要他点头的批量写（见下面这条待办）；
+而读侧这一行改完之后，无论库里躺着什么，列表首行都不可能是非中文——**呈现规则的保证不依赖数据干净**。
+
+测试：759 → **760 passed**（Windows；同一棵树在 `anr-jump` Linux/UTC 也是绿的）。
+新增 `test_a_failed_translation_cannot_replace_a_chinese_headline`，三件事各钉一条：
+非中文的 `summary_zh` 不算中文摘要、中文标题必须回到首行、渲染文本里不能出现 `preview.redd.it`；
+外加一条反向保护：**真中文摘要仍然优先于标题**（他 2026-09-26 的那个选择没变，这一版只挡原文）。
+
+变异验证（三支都改在真实文件上，跑完立刻还原，`restored: True`）：
+
+| 变异 | 结果 |
+| --- | --- |
+| M1 退回"只验列非空" | CAUGHT |
+| M2 摘掉守卫，任何 `summary_zh` 都盖标题 | CAUGHT |
+| M3 `has_cjk` 取反 | CAUGHT |
+
+部署与真机复验：两台 `active`，`app/services/news.py` 三端 md5 `a252b75d2bec6ab3a527d29ddd6cad82` 一致，
+近 20 分钟 `Traceback` 计数 0。同一支列表渲染探针，修复前后 **5 → 0**
+（5 是"真的出现在列表里的非中文首行"条数；库里 24 小时窗口有 10 行非中文，
+只有落到列表里的那几条才会被看到——这两个数不是矛盾的，是"存了原文"和"被用户看见"的差）。
+
+**待办（需要他点头，本轮没动）**
+
+- 库里 39 行 `summary_zh` 存着原文。**写它的是谁已经查到**：`app/processing/pipeline.py:677`
+  的 `_note_zh_miss` —— 一行连拒 N 次之后"认命"，把原文抄进 `_zh` 列。
+  它有个不对称值得记：`title` 分支抄完会补一句 `translated_by = "source"`，
+  `summary` 分支**什么标记都不留**，所以下游没法区分"认命的原文"和"真的译文"，只能整列信。
+  读侧这一版已经不显示它们，但 `needs_translation` 只看字段空不空，这些行永远不会重翻。
+- 因此**下一版要修的是写侧，不是清库**：把 39 行直接置空看似干净，可队列的取行条件之一就是
+  `not row.summary_zh`，置空等于把它们重新推回翻译队列——那一版当初就是为了不再重推才抄原文的
+  （重推会把免费额度打进 60 分钟退避，结果是能翻的行也一起变英文）。
+  正确顺序是：先让"认命"留下标记（和 title 分支对称），再按标记清数据。这属于批量写生产库，需要他点头。
+- 还没验完的另一半：除了 `translated_summary`，还有没有别的面板直接读 `summary_zh`
+  （简报正文、`/search`、卡片详情都算）。#1720 那行的凭据串现在仍在库里，
+  只要有一条路径不经这个守卫就能把它显示出来。下一版挨个渲染面验一遍。

@@ -658,6 +658,26 @@ def test_rendering_prefers_chinese_everywhere():
     assert any("推理更便宜" in b for b in blocks)
 
 
+def test_a_failed_translation_cannot_replace_a_chinese_headline():
+    """`summary_zh` 非空不等于它是中文：真机近 24 小时 288 行非空里有 10 行一个汉字都没有。
+
+    其中 #1836 的"中文摘要"其实是 `https://preview.redd.it/….png?width=984…`，
+    于是列表首行用一个图片直链盖掉了本来就有的中文标题「Gemini 4氩气」。
+    """
+    config = get_config()
+    junk = make_view(title="Gemini 4 Argon", title_zh="Gemini 4 发布",
+                     summary_zh="https://preview.redd.it/abc.png?width=984&format=png")
+    assert junk.translated_summary is None, "非中文的 summary_zh 不算中文摘要"
+    assert junk.display_line == "Gemini 4 发布", junk.display_line
+    text = fmt.news_list([junk], config=config, title="🤖 最新 AI 新闻")
+    assert "preview.redd.it" not in text, text
+    assert "Gemini 4 发布" in text, text
+
+    # 真中文摘要仍然优先于标题（他 2026-09-26 的选择不变）
+    good = make_view(title_zh="Gemini 4 发布", summary_zh="推理更便宜，上下文更大")
+    assert good.display_line == "推理更便宜，上下文更大", good.display_line
+
+
 def test_english_only_item_still_renders_without_translation():
     config = get_config()
     item = make_view()
