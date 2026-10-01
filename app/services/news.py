@@ -67,13 +67,18 @@ class ArticleView:
     free_offer: dict[str, Any] | None = None
 
     # 中文优先：显示层永远先看 zh 字段，缺失才回落到原文。
+    # 两道出口都要遮凭据：`esc()` 是最后一道，但面板会**先截断再交给 esc**
+    # （`head[:120]`、`display_title[:30]`），截到邮箱域名中间就拼不出完整的邮箱正则了。
+    # 这一层的用例（tests/test_redact_secrets.py）第一版就是这么漏掉的。
     @property
     def display_title(self) -> str:
+        from app.services.format import redact_secrets
+
         if not self.title_zh:
-            return self.title
+            return redact_secrets(self.title)
         from app.services.translate import fix_wrong_sense
 
-        return fix_wrong_sense(self.title_zh, self.title)
+        return redact_secrets(fix_wrong_sense(self.title_zh, self.title))
 
     @property
     def display_summary(self) -> str | None:
@@ -90,7 +95,9 @@ class ArticleView:
             from app.services.translate import fix_wrong_sense
 
             text = fix_wrong_sense(text, " ".join(filter(None, (self.title, self.content))))
-        return unescape_entities(strip_feed_boilerplate(text)) or None
+        from app.services.format import redact_secrets
+
+        return redact_secrets(unescape_entities(strip_feed_boilerplate(text))) or None
 
     @property
     def translated_summary(self) -> str | None:

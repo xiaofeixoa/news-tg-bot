@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 760 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 764 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4117,3 +4117,60 @@ return self.display_summary
 - 还没验完的另一半：除了 `translated_summary`，还有没有别的面板直接读 `summary_zh`
   （简报正文、`/search`、卡片详情都算）。#1720 那行的凭据串现在仍在库里，
   只要有一条路径不经这个守卫就能把它显示出来。下一版挨个渲染面验一遍。
+
+### v1.88 渲染出口只有一个：`esc()`。别人泄露的账号密码现在到不了他的聊天
+
+v1.87 那一节末尾留的问题当天就有了答案，而且比预想的糟。
+
+**先量**（`anr-vps`，`mode=ro`，2026-10-01 03:35Z）：
+
+```
+7 天窗口里 1700 行有非空 summary_zh → 37 行在 /免费 的描述行上显示的是「一个汉字都没有」的内容，
+                                      同一行明明有中文标题（#1836「Gemini 4氩气」被一个 png 直链顶掉）
+全库 1946 行 → 3 行是「邮箱紧跟着一串 token」这个形状：#898、#1534 只在 content，
+                #1720 三个字段（summary / summary_zh / content）里各有一份
+现存 telegram.log 21112 字符里邮箱形状命中：0
+```
+
+`/免费` 的描述行是 `fmt.offers_list` 自己写的第二套 head 规则（`display_summary or display_title`），
+比 `display_line` 弱——v1.75 / v1.80 / v1.83 记过的同一族：**一个安全规则的第二份实现通常是更弱的那一份**。
+而 #1720 让这件事从"数字不对"变成"不能出现在他屏幕上"：`/free <关键词>` 的回落脚本会把这类帖子当
+"相关新闻"列出来，描述行就是那一串别人的邮箱和密码。命中 0 次只说明**还没发出去过**，是潜伏不是安全。
+
+**修在出口，不修面板。** `fmt.esc()` 是本项目所有用户可见文本的唯一出口，所以新增
+`fmt.redact_secrets()` 并由 `esc()` 调用——一处修好等于所有面修好，而不是给每个面板再补一次判据：
+
+```python
+_CREDENTIAL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})[!-~]*")
+
+def redact_secrets(value: str) -> str:
+    if "@" not in value:
+        return value
+    return _CREDENTIAL.sub(r"***@\1", value)
+```
+
+规则里两个刻意的选择：
+
+- **域名留着**（`***@icloud.com`）。遮掉本地部分和口令，但读者仍然知道"那是个账号"，
+  这一条新闻的信息量不是被抹平而是被去毒。
+- **尾巴只吃 `[!-~]`（纯 ASCII 可打印）**。中文正文里嵌一个正常邮箱时，
+  `.*` 或 `\S*` 会把后半句中文一起吞掉——那样我就成了那个把答案弄没的代码。
+
+**两道出口都得遮，这条是被自己的用例逼出来的。** 面板是**先截断再交给 `esc()`**
+（`head[:120]`、`display_title[:30]`），截到域名中间邮箱正则就拼不出来，`someone1k` 原样留在屏幕上。
+第一版我只在 `esc()` 里遮，`test_truncation_cannot_dodge_the_redaction` 当场红；
+于是 `ArticleView.display_summary` / `display_title` 在取字段那一层也遮一次。
+**顺序型缺陷：出口在后面，不代表出口能兜住前面切过的东西。**
+
+没做的（诚实边界）：`link()` 的 `href` 不遮（凭据若被塞进 URL 参数，这一版管不到）；
+库里那 3 行数据本身没动——批量写生产库要他点头，而读侧已经保证它出不去。
+
+测试：760 → **764 passed**（Windows；同一棵树在 `anr-jump` Linux/UTC 全绿）。
+新增 `tests/test_redact_secrets.py` 4 条：所有渲染面（`esc` / `link` / `news_list`）都不留凭据、
+截断绕不过去、**普通邮箱仍读起来像联系方式**（只遮本地部分、中文句子必须活着）、
+非文本值与缺 TLD 的串不被误伤。变异验证 M1（`redact_secrets` 变空操作）／M2（只遮邮箱不吃 token 串）／
+M3（退回"只在 esc 里遮"）／M4（`display_title` 那层不遮）→ **4/4 CAUGHT**，还原校验 `restored: True`。
+
+部署与真机复验：两台 `service=active schema=ok stamp=20261001T033511Z`；
+同一支只读探针打在真实行上——**#1720 存 1 个地址形状 → 渲染 0 个**，#898/#1534 的凭据本来就在
+`content` 里、不进描述行，渲染后同样 0。

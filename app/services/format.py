@@ -25,8 +25,26 @@ CIRCLE = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7�
 BULLET = "•"
 
 
+# 采集到的社区帖子里有别人贴出来的账号密码（组合列表）。真机 2026-10-01 数到
+# 1946 行里有 3 行是这个形状，#1720 一份同时躺在 summary/summary_zh/content 三个字段里。
+# 尾巴只吃 ASCII 可打印字符：中文正文里嵌一个邮箱时，不能把后面的句子一起吞掉。
+_CREDENTIAL = re.compile(r"[A-Za-z0-9._%+\-]+@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})[!-~]*")
+
+
+def redact_secrets(value: str) -> str:
+    """邮箱只留域名，紧跟其后的 token 串整个去掉。
+
+    放在 `esc()` 里而不是各个面板里：`esc` 是本项目所有用户可见文本的唯一出口，
+    一处修好等于所有面修好——写在 `ArticleView` 上会漏掉 `/免费` 那一类直接喂
+    `display_summary` 的面板（v1.75/v1.80/v1.83 反复验证过的"第二份实现更弱"）。
+    """
+    if "@" not in value:
+        return value
+    return _CREDENTIAL.sub(r"***@\1", value)
+
+
 def esc(value: Any) -> str:
-    return html.escape(str(value if value is not None else ""), quote=False)
+    return html.escape(redact_secrets(str(value if value is not None else "")), quote=False)
 
 
 def link(text: str, url: str) -> str:
