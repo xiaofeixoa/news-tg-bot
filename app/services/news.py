@@ -250,6 +250,22 @@ def _view(session: Session, article: Article) -> ArticleView:
     )
 
 
+@dataclass
+class DayPage:
+    """一天（读者当地日）的一页新闻，加上"这一天到底有几条"。
+
+    `total` 与列表同义（按事件去重后能看到几条），不是库里的行数：
+    屏幕上出现过的数字必须能从同一个定义算出来，否则"共 N 条"和"这里列出 M 条"
+    会在同一行里互相反悔。
+    """
+
+    items: list[ArticleView]
+    label: str
+    total: int
+    page: int
+    pages: int
+
+
 class NewsService:
     def __init__(self, config: AppConfig | None = None) -> None:
         self.config = config or get_config()
@@ -273,14 +289,24 @@ class NewsService:
             )
             return _views(session, articles[:limit])
 
-    def count_eligible(self, *, hours: int = 24, min_score: float | None = None) -> int:
-        """Rows a briefing could choose from right now, without building views."""
+    def count_eligible(self, *, hours: int = 24, min_score: float | None = None,
+                       category: str | None = None) -> int:
+        """这段时间里能看到几条，不构造视图（口径 = 列表的口径，按事件去重）。"""
         since = datetime.utcnow() - timedelta(hours=hours)
+        threshold = min_score if min_score is not None else self.default_min_score()
         with session_scope() as session:
-            return repo.count_eligible(session, since=since, min_score=min_score)
+            return repo.count_eligible(session, since=since, min_score=threshold,
+                                       category=category)
 
-    def day(self, *, offset_days: int = 0, limit: int = 20, min_score: float | None = None,
-            tz_name: str | None = None) -> tuple[list[ArticleView], str]:
+    def day(self, *, offset_days: int = 0, limit: int = 20, page: int = 1,
+            min_score: float | None = None,
+            tz_name: str | None = None) -> DayPage:
+        """某一天（按读者当地日）的新闻，翻得动、也报得出总数。
+
+        这里原来只有 `limit=20` 而没有任何"今天一共几条"的说法：真机 2026-10-01 量到
+        `/today` 展示 20 条而当天符合条件的是 101 条，`/yesterday` 是 20 / 287。
+        他看到的就是"今天的全部"，而第 21 条以后既看不到也没有入口。
+        """
         tz_name = tz_name or self.config.settings.timezone
         zone = _tz(tz_name)
         today_local = datetime.now(zone).date() + timedelta(days=offset_days)
@@ -289,12 +315,16 @@ class NewsService:
         ).replace(tzinfo=None)
         end = start + timedelta(days=1)
         threshold = min_score if min_score is not None else self.default_min_score()
+        page = max(1, int(page))
         with session_scope() as session:
+            total = repo.count_eligible(session, since=start, until=end, min_score=threshold)
             articles = repo.query_articles(
-                session, since=start, until=end, min_score=threshold, limit=limit * 2,
-                order_by_score=True,
+                session, since=start, until=end, min_score=threshold, limit=limit,
+                offset=(page - 1) * limit, order_by_score=True,
             )
-            return _views(session, articles[:limit]), today_local.isoformat()
+            pages = max(1, -(-total // limit))
+            return DayPage(_views(session, articles), today_local.isoformat(),
+                           total, min(page, pages), pages)
 
     def by_category(self, category: str, *, limit: int = 10, days: int = 3) -> list[ArticleView]:
         since = datetime.utcnow() - timedelta(days=days)

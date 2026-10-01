@@ -94,28 +94,54 @@ async def _answer_list(target: Message, news: NewsService, config: AppConfig, *,
 async def cmd_news(message: Message, command: CommandObject, news: NewsService,
                    app_config: AppConfig) -> None:
     count = _int_arg(command.args) or int(app_config.get("bot.news_limit", 10))
-    items = news.latest(limit=min(count, 30), hours=72)
-    await _answer_list(message, news, app_config, items=items, title="🤖 最新 AI 新闻")
+    count = min(count, 30)
+    items = news.latest(limit=count, hours=72)
+    total = news.count_eligible(hours=72)
+    await _answer_list(message, news, app_config, items=items,
+                       title=f"🤖 最新 AI 新闻 · {fmt.list_scope(total, len(items), newest=True)}"
+                             f"（想看更多：/news 30，或直接 /search 关键词）")
 
 
 @router.message(Command("latest"))
 async def cmd_latest(message: Message, news: NewsService, app_config: AppConfig) -> None:
-    items = news.latest(limit=int(app_config.get("bot.news_limit", 10)), hours=24)
-    await _answer_list(message, news, app_config, items=items, title="🕐 最近 24 小时")
+    limit = int(app_config.get("bot.news_limit", 10))
+    items = news.latest(limit=limit, hours=24)
+    total = news.count_eligible(hours=24)
+    await _answer_list(message, news, app_config, items=items,
+                       title=f"🕐 最近 24 小时 · {fmt.list_scope(total, len(items), newest=True)}")
 
 
 @router.message(Command("today"))
-async def cmd_today(message: Message, news: NewsService, app_config: AppConfig) -> None:
+async def cmd_today(message: Message, command: CommandObject, news: NewsService,
+                    app_config: AppConfig) -> None:
     user = news.user_for(message.chat.id)
-    items, label = news.day(offset_days=0, limit=20, tz_name=user.get("timezone"))
-    await _answer_list(message, news, app_config, items=items, title=f"📅 今日 AI 新闻 · {label}")
+    await _answer_day(message, news, app_config, command, offset_days=0,
+                      title="📅 今日 AI 新闻", tz=user.get("timezone"))
 
 
 @router.message(Command("yesterday"))
-async def cmd_yesterday(message: Message, news: NewsService, app_config: AppConfig) -> None:
+async def cmd_yesterday(message: Message, command: CommandObject, news: NewsService,
+                        app_config: AppConfig) -> None:
     user = news.user_for(message.chat.id)
-    items, label = news.day(offset_days=-1, limit=20, tz_name=user.get("timezone"))
-    await _answer_list(message, news, app_config, items=items, title=f"📅 昨日 AI 新闻 · {label}")
+    await _answer_day(message, news, app_config, command, offset_days=-1,
+                      title="📅 昨日 AI 新闻", tz=user.get("timezone"))
+
+
+async def _answer_day(message: Message, news: NewsService, config: AppConfig,
+                      command: CommandObject, *, offset_days: int, title: str,
+                      tz: str | None) -> None:
+    """`/today`、`/yesterday`：报得出当天有几条，也给得出翻页的入口。
+
+    以前这两个命令是 `limit=20` 就结束了：真机当天符合条件 101 条，他看到的 20 条
+    没有任何标记说明"后面还有 81 条"，也没有任何入口能拿到它们。
+    """
+    page = _int_arg(command.args) or 1
+    day = news.day(offset_days=offset_days, limit=20, page=page, tz_name=tz)
+    scope = fmt.list_scope(day.total, len(day.items), page=day.page, pages=day.pages)
+    hint = f"（下一页：/{'today' if offset_days == 0 else 'yesterday'} {day.page + 1}）" \
+        if day.pages > 1 and day.page < day.pages else ""
+    await _answer_list(message, news, config, items=day.items,
+                       title=f"{title} · {day.label} · {scope}{hint}")
 
 
 @router.message(Command("topics"))

@@ -596,16 +596,20 @@ def count_since(session: Session, since: datetime) -> int:
     return session.scalar(select(func.count(Article.id)).where(Article.published_at >= since)) or 0
 
 
-def count_eligible(session: Session, *, since: datetime, min_score: float | None = None,
+def count_eligible(session: Session, *, since: datetime, until: datetime | None = None,
+                   min_score: float | None = None, category: str | None = None,
                    skip_sent: bool = False) -> int:
-    """How many rows a briefing could actually pick in this window.
+    """这一段时间里，**屏幕上真能看到几条** —— 与 `query_articles` 同一个池子。
 
-    Shown to the user as "这一档还剩几条", so it reads the same predicate the digest
-    draws from - it used to be a hand-copied list of gates with that sentence as an
-    excuse, which is how a definition drifts.
+    以前它数的是行数，而 `query_articles` 返回前会按事件去重（同一事件只留排名最高的
+    一条），于是同一个词"条"在两句里是两个东西。真机 2026-10-01 08:22 量到：
+    近 24 小时门槛 45 时 `COUNT(*) = 246`，而去重后 `query_articles` 只给 239 条——
+    `/settings` 那句「这一档还剩几条」因此比任何列表都能给出的条数多 7。
+    现在按 `COUNT(DISTINCT COALESCE(event_id, id))` 数，和列表逐字同义。
     """
-    stmt = select(func.count(Article.id)).where(*eligibility_conditions(
-        since=since, min_score=min_score, skip_sent=skip_sent))
+    stmt = select(func.count(func.distinct(func.coalesce(Article.event_id, Article.id)))).where(
+        *eligibility_conditions(since=since, until=until, min_score=min_score,
+                                category=category, skip_sent=skip_sent))
     return int(session.scalar(stmt) or 0)
 
 

@@ -597,6 +597,25 @@ def status_line(stats: dict[str, Any]) -> str:
     )
 
 
+def list_scope(total: int, shown: int, *, page: int = 1, pages: int = 1,
+               newest: bool = False) -> str:
+    """列表标题里那句"共几条 / 这一页几条 / 第几页"。
+
+    真机 2026-10-01：`/today` 给 20 条而当天符合条件的是 101 条，`/news` 给 10 条而近 72
+    小时有 729 条——标题里一个数字都没有，于是"这一页"读起来就是"今天的全部"。
+    这和 §11 v1.74 的 `/search`「最近 30 天 20 条」是同一个缺陷，只是那次的标题至少还写了
+    一个假数字，这次连假数字都没有。
+    """
+    if total <= 0:
+        return "今天没有符合条件的新闻" if not newest else "没有符合条件的新闻"
+    parts = [f"共 {total} 条"]
+    if pages > 1:
+        parts.append(f"第 {page}/{pages} 页")
+    if shown < total:
+        parts.append(f"这里按评分列出 {shown} 条" if not newest else f"这里列出最新 {shown} 条")
+    return " · ".join(parts)
+
+
 def quota_line(quota: dict[str, Any] | None) -> str:
     """今天还能不能收到突发：把正在生效的上限写在他看的那一屏上。
 

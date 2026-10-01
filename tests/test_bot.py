@@ -239,6 +239,77 @@ async def test_deep_summary_uses_the_strong_model(seeded, fake_llm):
     assert f"a:{seeded[0]}" in data, data
 
 
+def _seed_today(session, rows: int) -> None:
+    """`rows` 条今天的新闻，分数各不相同，所以翻页的结果是确定的。
+
+    `published_at` 全部用"此刻"而不是往前推几小时：往前推会让用例在
+    接近当地午夜运行时漂到昨天去（CI 是 UTC，开发机 +08:00）。
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with session_scope() as s:
+        for i in range(rows):
+            art = repo.save_article(s, build_article(
+                title=f"OpenAI announces model release {i}",
+                url=f"https://example.org/todayday{i}", source_name="OpenAI",
+                source_type="rss", content="OpenAI announces a model. " * 12,
+                published_at=now))
+            if art:
+                art.is_processed = True
+                art.filtered_out = False
+                art.final_score = 50.0 + i
+                art.source_quality = 90.0
+    s.commit()
+
+
+@pytest.mark.asyncio
+async def test_today_says_how_many_there_really_are_and_how_to_see_the_rest(session):
+    """/today 以前给 20 条就结束：真机当天符合条件 101 条，他没有任何线索知道少了 81 条。"""
+    from app.bot.handlers.news import cmd_today
+
+    _seed_today(session, 25)
+    msg = FakeMessage(ALLOWED, "/today")
+    await cmd_today(msg, Command(None), get_news_service(), get_config())
+    text = msg.all_text()
+    assert "共 25 条" in text, text
+    assert "第 1/2 页" in text, text
+    assert "这里按评分列出 20 条" in text, text
+    assert "/today 2" in text, f"标题得给他下一页的入口：{text}"
+
+
+@pytest.mark.asyncio
+async def test_news_and_latest_admit_they_are_one_page_of_many(session):
+    """/news 与 /latest 也属于同一族：72 小时里 729 条，标题里以前一个数字都没有。"""
+    from app.bot.handlers.news import cmd_latest, cmd_news
+
+    _seed_today(session, 13)
+    msg = FakeMessage(ALLOWED, "/news")
+    await cmd_news(msg, Command(None), get_news_service(), get_config())
+    text = msg.all_text()
+    assert "共 13 条" in text, text
+    assert "这里列出最新 10 条" in text, text
+    assert "/news 30" in text, text
+
+    later = FakeMessage(ALLOWED, "/latest")
+    await cmd_latest(later, get_news_service(), get_config())
+    assert "共 13 条" in later.all_text(), later.all_text()
+
+
+@pytest.mark.asyncio
+async def test_the_second_page_is_a_different_slice_not_the_same_ones(session):
+    _seed_today(session, 25)
+    news = get_news_service()
+    first = news.day(offset_days=0, limit=20, page=1)
+    second = news.day(offset_days=0, limit=20, page=2)
+    assert len(first.items) == 20 and len(second.items) == 5, (len(first.items), len(second.items))
+    assert not ({a.id for a in first.items} & {a.id for a in second.items}), "第二页不能是同一批"
+    assert first.total == second.total == 25, (first.total, second.total)
+    assert first.pages == 2 and second.pages == 2, (first.pages, second.pages)
+    scores = [round(a.final_score) for a in second.items]
+    assert scores == sorted(scores, reverse=True), f"页内按分数从高到低：{scores}"
+    assert max(round(a.final_score) for a in second.items) < min(
+        round(a.final_score) for a in first.items), "第一页必须整体高分于第二页"
+
+
 @pytest.mark.asyncio
 async def test_the_placeholder_promises_only_what_it_can_deliver(seeded, fake_llm, monkeypatch):
     """占位那一句也是一次承诺：没配 key 时说「正在深入分析」，下一句必然是做不到。"""

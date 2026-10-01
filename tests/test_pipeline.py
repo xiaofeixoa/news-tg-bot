@@ -2138,6 +2138,39 @@ def test_the_count_and_the_list_agree_on_what_is_eligible(session):
     assert len(eligibility_conditions(since=since)) == 4
 
 
+def test_the_count_and_the_list_still_agree_when_two_reports_are_one_event(session):
+    """两条报道 = 一个事件：列表只给一条，计数也必须是 1，不然"共 N 条"就是假数字。
+
+    旧实现 `COUNT(*)` 数行，`query_articles` 返回前按事件去重。真机 2026-10-01 08:22 量到
+    近 24 小时门槛 45 时 `count_eligible=246` 而屏幕最多 239 条——`/settings` 那句
+    「这一档还剩几条」比任何列表能给的多 7 条。上一条用例抓不到这个差异：它的 fixture
+    里没有重复事件，所以断言"两者相等"是靠 fixture 侥幸通过的。
+    """
+    from app.database import repository as repo
+    from app.processing import deduplicate
+
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    ids = []
+    for i in range(3):
+        art = repo.save_article(session, feed_item(
+            f"OpenAI announces GPT-{7 - i}", f"https://example.org/dup{i}", hours=i))
+        if art:
+            art.is_processed = True
+            art.final_score = 70
+            ids.append(art.id)
+    session.commit()
+
+    rows = [session.get(Article, i) for i in ids]
+    event = repo.get_or_create_event(session, deduplicate.make_event_key(rows[0].title),
+                                     rows[0].title, rows[0])
+    rows[1].event_id = event.id          # 第二条报道说的是同一件事
+    session.commit()
+
+    listed = repo.query_articles(session, since=since, limit=100)
+    assert len(listed) == 2, [a.title for a in listed]
+    assert repo.count_eligible(session, since=since) == len(listed),         "计数不能退回数行数"
+
+
 def test_the_backlog_count_is_reported_with_the_wait_behind_it():
     """`/stats` 里"待处理 205 条"要能回答"急不急"，否则只是一个数字。"""
     from app.services import format as fmt
