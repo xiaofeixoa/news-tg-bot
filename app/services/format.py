@@ -708,6 +708,28 @@ def disk_rate(stats: dict[str, Any]) -> str:
         window, int(delta), "%.1f" % span if span else "?")
 
 
+# 跌破 `alerts.min_free_mb` 之前几天开始预警。3 天是有意选的：这台机器上写坏一次数据库
+# 不是"变慢"而是"静默停住"（SQLite 报错、采集不再入库、看起来像今天没新闻），
+# 而清日志或扩盘都不是几分钟能干完的事。
+DISK_WARN_DAYS = 3.0
+
+
+def disk_crossing_in_days(stats: dict[str, Any], threshold_mb: int) -> float | None:
+    """照现在的速度，还有几天跌破告警线。只有在真的变少、且样本够算时才给数。"""
+    delta = stats.get("disk_delta_mb")
+    span = stats.get("disk_span_hours")
+    free = stats.get("disk_free_mb")
+    if not delta or not span or not free or delta >= 0:
+        return None
+    # `disk_span_hours` 是**小时**。这里我一开始照抄了 disk_trend 里的 `86400.0 / span`
+    # （那边 span 是秒），于是 30GB 的机器被算成"0.4 天后跌破"——单位尺子用错的现场，
+    # 被我自己写的"余量足够就该安静"那条用例抓住。
+    per_day = -delta * (24.0 / float(span))
+    if per_day <= 0:
+        return None
+    return (int(free) - int(threshold_mb)) / per_day
+
+
 def disk_line(stats: dict[str, Any], config: AppConfig | None = None) -> str:
     """磁盘：数字 **和方向**。只给"剩多少"会被读成倒计时，也会被读成没事。
 
@@ -721,6 +743,14 @@ def disk_line(stats: dict[str, Any], config: AppConfig | None = None) -> str:
     threshold = int((config or get_config()).get("alerts.min_free_mb", 1024))
     rate = " · " + disk_rate(stats)
     if free > threshold:
+        # 原来只有"已经低于线"才报警，而那时正是写不进库的前一刻——太晚了。
+        # 真机 2026-10-01：anr-vps 剩 1623MB、-191MB/12.9h ≈ -355MB/天，
+        # 照此 **1.7 天**就跌破他自己设的 1024MB，而当时那一行还是绿的。
+        crossing = disk_crossing_in_days(stats, threshold)
+        if crossing is not None and crossing <= DISK_WARN_DAYS:
+            return (f"\n⚠️ 磁盘：剩 {free}MB{rate}，照这个速度约 {max(crossing, 0.1):.1f} 天后"
+                    f"跌破 {threshold / 1024:.1f}GB 告警线；现在清日志或加盘还来得及"
+                    "（写不进数据库时采集会静默停住）")
         return f"\n💾 磁盘：剩 {free}MB{rate}"
     return (f"\n⚠️ 磁盘只剩 {free / 1024:.1f}GB（低于 {threshold / 1024:.0f}GB 告警线）{rate}，"
             "采集随时可能因写不进数据库而停住")
