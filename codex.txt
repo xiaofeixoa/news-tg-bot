@@ -889,7 +889,7 @@ push：origin main
 sed 变异：M1 把 `if eligible == 0` 改成 `if False`；M2 把 handler 退回自己拼字符串
 
 【测试结果】
-PASS（本轮最终计数见下一条命令输出）。变异 M1/M2 同时被 3 条用例抓住（FAILED 列表包含
+PASS：779 passed（776 → 779，v1.95 共 3 条新用例）。变异 M1/M2 同时被 3 条用例抓住（FAILED 列表包含
 test_score_scope_shows_the_ceiling… / test_the_panel_builds_that_line_in_one_place /
 test_a_press_at_the_ceiling_says_so），cp 备份 + md5 双向校验还原一致。
 
@@ -898,4 +898,4 @@ test_a_press_at_the_ceiling_says_so），cp 备份 + md5 双向校验还原一�
 - 304 命中率、今晚静默窗口的 v1.82 配速复验、批量写库的三项决定，均未变。
 
 【Git】
-commit / push：见本轮 `git log`；部署：两台 stamp 见命令输出。
+commit：2384eef + 3efcc98；部署：两台 stamp=20261001T061745Z active/schema=ok。

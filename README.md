@@ -4411,6 +4411,6 @@ v1.94 把上限从够不到的 90 收到配置里的 78，但面板仍然只写 
 它返回与 handlers 依赖注入**同一个** `get_news_service()` 单例，而不是新起一份服务
 ——避免"按钮读一份、面板读另一份"这种第二定义（v1.83/v1.67 老账）。
 
-测试：778 → **781 passed**（新增 3 条）。变异 M1（`if eligible == 0` → `if False`）与
+测试：776 → **779 passed**（新增 3 条）。变异 M1（`if eligible == 0` → `if False`）与
 M2（handler 退回自己拼字符串）同时被抓住；`cp` 备份 + md5 双向校验确认还原。
 部署：两台 `service=active schema=ok`，stamp 见 §11 时间线（本轮命令输出）。
