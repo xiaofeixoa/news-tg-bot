@@ -748,9 +748,12 @@ def disk_line(stats: dict[str, Any], config: AppConfig | None = None) -> str:
         # 照此 **1.7 天**就跌破他自己设的 1024MB，而当时那一行还是绿的。
         crossing = disk_crossing_in_days(stats, threshold)
         if crossing is not None and crossing <= DISK_WARN_DAYS:
-            return (f"\n⚠️ 磁盘：剩 {free}MB{rate}，照这个速度约 {max(crossing, 0.1):.1f} 天后"
-                    f"跌破 {threshold / 1024:.1f}GB 告警线；现在清日志或加盘还来得及"
-                    "（写不进数据库时采集会静默停住）")
+            # 真机第一次渲染暴露了读感问题：`… 照这个速度约 4.6 天写满，照这个速度约 1.7 天后跌破…`
+            # 一句里两个"照这个速度"。要改的是我这半句，不是共享的 disk_rate()——
+            # test_sources.py 里那两条措辞用例钉的就是"磁盘只有一份措辞"，把 rate 换掉会同时废掉它们。
+            return (f"\n⚠️ 磁盘：剩 {free}MB{rate}，"
+                    f"约 {max(crossing, 0.1):.1f} 天后跌破 {threshold / 1024:.1f}GB 告警线；"
+                    "现在清日志或加盘还来得及（写不进数据库时采集会静默停住）")
         return f"\n💾 磁盘：剩 {free}MB{rate}"
     return (f"\n⚠️ 磁盘只剩 {free / 1024:.1f}GB（低于 {threshold / 1024:.0f}GB 告警线）{rate}，"
             "采集随时可能因写不进数据库而停住")

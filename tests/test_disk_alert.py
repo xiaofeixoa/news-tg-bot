@@ -25,6 +25,26 @@ def test_a_disk_that_is_falling_towards_the_line_warns_in_advance():
     assert "⚠️" in line and "天后跌破" in line, line
     assert "1.7" in line, line
     assert "静默停住" in line, line            # 说清后果，不是只喊一句小心
+    # 一行里不能有两次"照这个速度"。写成 ==1 是我自己的错：短样本时 disk_rate() 根本不提这句
+    # （它说"还不够算「还剩几天」"），于是那次变异（我给从句加回那句）反而"通过"了。真正的不变量是"至多一次"。
+    assert line.count("照这个速度") <= 1, line
+    assert "天后跌破" in line, line
+
+
+def test_the_countdown_phrase_is_said_once_even_when_the_rate_uses_it():
+    """样本够长时 disk_rate() 自己会说"照这个速度约 X 天写满"——那时从句绝不能重复。
+
+    第一版我把真机那组数（-191MB/12.9h）直接搬成 span=24h，速率因此掉到 -191MB/天，
+    跌破要 3.1 天 > 3 天预警窗，从句根本不出现——是我的算术不成立，不是产品错。
+    这里给一个真的会在 3 天内越线的组合：剩 1500MB、-191MB/24h → 约 2.5 天。
+    """
+    long_window = {"disk_free_mb": 1500, "disk_delta_mb": -191,
+                   "disk_span_hours": 24.0, "disk_days_left": 4.6}
+    assert "照这个速度" in fmt.disk_rate(long_window), "先确认这份措辞本身会说那句话"
+    line = fmt.disk_line(long_window, config=_config())
+    assert line.count("照这个速度") == 1, line
+    assert "天后跌破" in line and "4.6 天写满" in line, line
+    assert "2.5" in line, line
 
 
 def test_a_disk_with_plenty_of_runway_stays_quiet():
