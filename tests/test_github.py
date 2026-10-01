@@ -332,6 +332,64 @@ async def test_the_validator_survives_a_restart(monkeypatch, tmp_path):
     assert seen == [None, '"e1"']
 
 
+async def test_a_record_without_a_body_never_buys_a_free_304(monkeypatch):
+    """只有 etag、没有 body 的记录是个陷阱：免费的 304 到手是空的。
+
+    采集器会因此把一个还在发布的仓库读成"这一轮没有发布"。
+    第一版用例直接手工塞了一个 key，而 `_cache_key` 用的 key 不是那个串，
+    于是 M1（退回"只看 etag 就发验证器"）照样绿——**这是"用例因为无关原因通过"**，
+    现在改成先跑一轮真请求，用代码自己写进缓存的那个 key。
+    """
+    from app.collectors import github
+
+    seen: list[str | None] = []
+
+    async def conditional(self, url, **kwargs):
+        seen.append((kwargs.get("headers") or {}).get("If-None-Match"))
+        return JsonResp(_release(), headers={"etag": '"e1"'})
+
+    monkeypatch.setattr("app.collectors.base.BaseCollector.get", conditional)
+    await _releases_collector().fetch()                       # 第一轮：存下 etag + body
+
+    warm = {k: dict(v) for k, v in github._etag_cache.items()
+            if isinstance(v, dict) and v.get("etag")}
+    assert warm and all(v.get("body") for v in warm.values()), \
+        "第一轮就该存下可回放的记录，否则这条用例什么都没测"
+    for record in warm.values():
+        record.pop("body")                                    # 变成"半条记录"
+    github._etag_cache = warm
+
+    items = await _releases_collector().fetch()
+    assert seen[-1] is None, f"带着验证器去问一个回放不起来的 304：{seen}"
+    assert items and items[0]["meta"]["tag"] == "v1.2", "发布不能被读成没有"
+
+
+def test_the_etag_file_is_capped_by_bytes_not_by_hope(monkeypatch, tmp_path):
+    """400 条 × 400KB = 160MB，每轮整份 `json.dumps` 重写：那才是这台机器的天花板。"""
+    import json
+
+    from app.collectors import github
+
+    monkeypatch.setattr(github, "_etag_path", lambda config: tmp_path / "github_etags.json")
+    big = "x" * 300_000
+    prefix = "https://api.github.com/repos/"
+    cache = {f"{prefix}o{i}/releases":
+             {"etag": f'"e{i}"', "body": big, "at": f"t{i:03d}"} for i in range(40)}
+    assert len(json.dumps(cache, ensure_ascii=False)) > github.MAX_CACHE_BYTES, "用例得先真的超线"
+
+    github.save_etags(None, cache)
+    saved = json.loads((tmp_path / "github_etags.json").read_text(encoding="utf-8"))
+
+    assert len(json.dumps(saved, ensure_ascii=False)) <= github.MAX_CACHE_BYTES
+    assert len(saved) < len(cache), "一条都没丢就等于没设上限"
+    assert all(v.get("etag") and v.get("body") for v in saved.values()), \
+        "留下的每条都必须能回放：半条记录就是上面那条陷阱"
+    # 该丢的是最冷的（t000），留下的必须含最新的（t039）。
+    # 上一版我写的是 `max(saved, key=...) in saved`——那永远为真，是一句自证的废话。
+    assert f"{prefix}o39/releases" in saved, "最新的记录被丢掉了：裁剪挑错了方向"
+    assert f"{prefix}o00/releases" not in saved, "最冷的没被丢掉"
+
+
 async def test_trending_never_reports_an_unwatched_repo(monkeypatch):
     """The production DB filled up with "someone/new-repo (0 stars)" headlines."""
     asked: list[tuple[str, str]] = []

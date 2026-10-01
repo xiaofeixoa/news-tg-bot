@@ -140,6 +140,10 @@ _etag_cache: dict[str, Any] | None = None
 # A search response is ~200KB and its query string changes daily, so caching
 # bodies would grow the file without ever getting a hit.
 MAX_CACHED_BODY = 400_000
+# 但单条有上限不够：400 条 × 400KB 是 160MB，而每轮脏了就要整份 `json.dumps` 重写。
+# 在 475MB、aiogram 自己就吃 ~106MB 的那台机器上，光这一个字符串就能把进程顶到 OOM，
+# 磁盘也一起交代。真机 2026-10-01：27 条 = 982,888 字节，最大一条 299,837（中位数 9,680）。
+MAX_CACHE_BYTES = 8_000_000
 
 
 def _etag_path(config: Any):
@@ -170,11 +174,20 @@ def load_etags(config: Any) -> dict[str, Any]:
 
 
 def save_etags(config: Any, cache: dict[str, Any]) -> None:
+    """落盘前把总量压回天花板，而且**要丢就丢整条记录**。
+
+    只删 body、留着 etag 是最危险的折中：下一轮照样带 `If-None-Match` 去问，
+    GitHub 免费回一个没有正文的 304，采集器就把那个仓库读成"这一轮没发布"。
+    整条丢掉只让下一轮多花一次配额；读成"没新闻"是谎报，花配额是成本。
+    """
     import json
 
-    trimmed = dict(list(cache.items())[-400:])       # newest entries only
     from app.config import atomic_write_json
 
+    trimmed = dict(list(cache.items())[-400:])       # newest entries only
+    while len(trimmed) > 1 and len(json.dumps(trimmed, ensure_ascii=False)) > MAX_CACHE_BYTES:
+        coldest = min(trimmed, key=lambda k: str((trimmed[k] or {}).get("at") or ""))
+        trimmed.pop(coldest)
     try:
         atomic_write_json(_etag_path(config), trimmed)
     except Exception as exc:  # pragma: no cover - read-only data dir
@@ -216,7 +229,10 @@ class GitHubCollector(BaseCollector):
             raise SourceBudget(blocked)
         key = self._cache_key(url, kwargs.get("params"))
         entry = load_etags(self.config).get(key) if key else None
-        if isinstance(entry, dict) and entry.get("etag"):
+        # 只有"回放得起 304"的记录才配发验证器：etag 在、body 不在时，GitHub 会免费回
+        # 一个空正文，而 233 行那个回放分支要求 body 存在——于是正文缺失的 304 原样返回，
+        # 采集器把这个仓库读成"这一轮没有发布"。花一次配额可以，读成没新闻不行。
+        if isinstance(entry, dict) and entry.get("etag") and entry.get("body"):
             headers = dict(kwargs.get("headers") or {})
             headers.setdefault("If-None-Match", str(entry["etag"]))
             kwargs["headers"] = headers

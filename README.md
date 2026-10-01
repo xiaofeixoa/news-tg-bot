@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 768 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 770 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4224,3 +4224,50 @@ etag 27 条、announced 21/20、budget `{"day":"2026-10-01","used_day":209}`，
 **顺带量到的一条，留给下一版**：`github_etags.json` 1MB / 27 条 ≈ **每条 38KB**，
 说明那个"ETag 缓存"里存的不只是 ETag（多半连响应体一起存了），而它每轮整份重写一次。
 在一块根分区已经 83%、告警线 1GB 的盘上，这是个值得单独查的写入量。
+
+### v1.90 ETag 缓存的天花板：160MB 的整份重写，和"半条记录"就能骗过一整轮采集
+
+上一版量到的线索查完了：`github_etags.json` 存的不只是验证器，是**整份响应正文**
+（`_store` 记 `{"etag","body","at"}`），单条上限 `MAX_CACHED_BODY = 400_000`，条数上限 400。
+
+```
+400 × 400KB = 160,000,000 字节，而且每轮弄脏之后要 json.dumps 整份重写成一个大字符串
+真机 2026-10-01：27 条 = 982,888 字节；最大一条 299,837；中位数 9,680
+```
+
+在一台 475MB、aiogram 自己就吃 ~106MB 的机器上，那个"160MB 的字符串"不是磁盘问题，是 OOM 问题。
+修的是**总量**天花板，不是把单条压小——单条压小等于把那个 300KB 的仓库退回每轮付费，
+而此刻两台机器的匿名配额正是 `remaining: 0`，退它等于直接抢他的新闻。
+`save_etags` 现在超过 `MAX_CACHE_BYTES = 8_000_000` 就按 `at` 丢最冷的记录，而且**要丢就丢整条**。
+
+**为什么不能只丢 body、留着 etag**——这才是本轮真正的缺陷，也是它和 v1.89 的因果关系：
+`get()` 决定"要不要带 `If-None-Match`"的判据是 `entry.get("etag")`，
+而 304 到手后的回放分支要求 `entry.get("body")`：**一条记录，两个判据**。
+只要存在"有 etag 没 body"的半条记录，流程就变成：带上验证器 → GitHub **免费**回一个 304（没有正文）
+→ 回放失败 → 采集器拿到空正文 → **这个仓库这一轮被读成"没有发布"**。不花钱、不报错、静悄悄少新闻。
+而总量裁剪如果只删 body，恰恰会批量制造这种半条记录。所以两处一起改：
+验证器判据补成 `etag and body`，裁剪改成 `pop` 整条（每次迭代总量必定变小）。
+
+**我自己在这条上摔了两次，两次都是"用例因为无关原因通过"：**
+
+1. 第一版手工塞了一个 `{"https://api.github.com/repos/…/releases": {"etag": …}}` 当缓存，
+   M1（判据退回只看 etag）**是绿的**——因为 `_cache_key(url, params)` 在带 `params` 时返回 `None`，
+   我猜的那个 key 根本不是代码用的 key，缓存压根没被查过。现在改成**先跑一轮真请求**，
+   用代码自己写进缓存的那个 key 抠掉 body 再跑第二轮，并加一条 `assert warm` 钉住"第一轮就该存下东西"。
+2. 另一版断言写成 `assert max(saved, key=…) in saved`：`max()` 返回的键必然还在 `saved` 里，
+   **这句永远为真**，所以 M4（丢最新而不是丢最冷）也是绿的。改成断言具体两端：`o39` 必须在、`o00` 必须不在。
+3. 还有一条不是漏测而是**永不返回**：M3 那种"只删 body"的写法里，`min()` 每轮挑中的都是同一条
+   已经没有 body 的记录，循环条件永远不满足，测试卡到超时——被 `timeout=60` 抓成"CAUGHT（卡死）"。
+
+顺带把变异脚本本身也加固了：它被超时打断过两次，第二次把工作区留在"两个变异同时在文件里"的状态
+（M1 + M3）。**如果我当时直接 commit，就把两个 bug 一起发布了**——发现它的是 `grep`，不是测试。
+现在脚本先 `shutil.copyfile` 留干净备份，`finally` 无条件还原，并在开头 assert 锚点存在。
+
+测试：768 → **770 passed**。新增 `test_a_record_without_a_body_never_buys_a_free_304` 与
+`test_the_etag_file_is_capped_by_bytes_not_by_hope`；变异 M1/M2/M3/M4 → **4/4 CAUGHT**，`restored: True`。
+
+部署与真机复验：两台 `service=active schema=ok stamp=20261001T045204Z`；
+`github_etags.json` 仍是 27 条、**half_records = 0**、约 1.04MB（远低于 8MB 天花板，
+所以升级本身不会让他这一轮多花配额），日志 0 `ERROR`/`Traceback`。
+诚实边界：部署后的第一轮还没落日志，本轮只验了不变量，**没有声称 304 命中率**；
+下一轮看 `collect github` 那行的 `metered/cached`。
