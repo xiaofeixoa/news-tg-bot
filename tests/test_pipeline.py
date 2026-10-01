@@ -2163,7 +2163,8 @@ def test_the_count_and_the_list_still_agree_when_two_reports_are_one_event(sessi
     rows = [session.get(Article, i) for i in ids]
     event = repo.get_or_create_event(session, deduplicate.make_event_key(rows[0].title),
                                      rows[0].title, rows[0])
-    rows[1].event_id = event.id          # 第二条报道说的是同一件事
+    for r in rows[:2]:
+        r.event_id = event.id            # 一个事件的两条报道都要挂上（只挂一条是假去重）
     session.commit()
 
     listed = repo.query_articles(session, since=since, limit=100)
@@ -2216,3 +2217,173 @@ def test_category_counts_span_more_groups_than_a_page_would_return(session):
     assert len(counts) == len(names), counts
     assert all(count == 2 for count in counts.values()), counts
     assert sum(counts.values()) == 12, counts
+
+
+def _seed_events(session, events: int, dups: int = 0) -> list[int]:
+    """`events` 个事件，每个一条报道；前 `dups` 个事件多一条"同一事件的第二篇报道"。
+
+    分数刻意交错：第二篇报道的分数落在别的事件第一篇之间，这样"先 LIMIT 再去重"的
+    旧写法一定会在前几行里撞上重复事件，页面就会短一截、第 2 页也会重复给。
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    ids: list[int] = []
+    with session_scope() as s:
+        for i in range(events):
+            first = repo.save_article(s, build_article(
+                title=f"Event {i} announced by OpenAI", url=f"https://example.org/ev{i}",
+                source_name="OpenAI", source_type="rss",
+                content="OpenAI announces something notable. " * 10,
+                published_at=now - timedelta(hours=i)))
+            if first:
+                first.is_processed = True
+                first.filtered_out = False
+                first.category = "AI Models"
+                first.final_score = float(100 - i * 2)
+                ids.append(first.id)
+        s.commit()
+        for i in range(dups):
+            rows = s.query(Article).filter(Article.url == f"https://example.org/ev{i}").all()
+            if not rows:
+                continue
+            second = repo.save_article(s, build_article(
+                title=f"Event {i} announced by OpenAI (The Verge)",
+                url=f"https://example.org/ev{i}-verge",
+                source_name="The Verge", source_type="rss",
+                content="The Verge reports the same announcement. " * 10,
+                published_at=now - timedelta(hours=i)))
+            if not second:
+                continue
+            second.is_processed = True
+            second.filtered_out = False
+            second.category = "AI Models"
+            second.final_score = float(99 - i * 2)      # 夹在两个事件之间
+            from app.processing import deduplicate
+            event = repo.get_or_create_event(s, deduplicate.make_event_key(rows[0].title),
+                                             rows[0].title, rows[0])
+            rows[0].event_id = event.id
+            second.event_id = event.id
+        s.commit()
+    return ids
+
+
+def test_a_category_page_delivers_the_number_of_distinct_events_it_asks_for(session):
+    """要 10 条就得给 10 条：旧写法 `LIMIT 10` 加在去重之前，页面会短一截。"""
+    _seed_events(session, events=20, dups=10)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    with session_scope() as s:
+        page = repo.query_articles(s, since=since, category="AI Models", limit=10, min_score=25.0,
+                                   order_by_score=True)
+    assert len(page) == 10, [a.title for a in page]
+    keys = [a.event_id or a.id for a in page]
+    assert len(set(keys)) == 10, "一页里不该出现同一个事件两次"
+
+
+def test_page_two_is_not_a_replay_of_page_one(session):
+    """旧写法：`offset` 数的是行，去重在分页之后 —— 一个事件的两篇报道跨在页界两侧，
+    第 1 页留下先到的那篇，第 2 页又把另一篇当作新内容端上来。同一个事件出现两次。"""
+    from datetime import datetime, timedelta
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with session_scope() as s:
+        from app.processing import deduplicate
+        rows = []
+        for i, (title, score) in enumerate((("Alpha announces a model", 100.0),
+                                            ("Beta announces an agent", 99.0),
+                                            ("Beta announces an agent again", 98.0),
+                                            ("Gamma announces a chip", 97.0))):
+            art = repo.save_article(s, build_article(
+                title=title, url=f"https://example.org/pager/{i}", source_name="OpenAI",
+                source_type="rss", content="Announcement body text. " * 10,
+                published_at=now - timedelta(minutes=i)))
+            art.is_processed = True
+            art.filtered_out = False
+            art.category = "AI Models"
+            art.final_score = score
+            rows.append(art)
+        s.commit()
+        event = repo.get_or_create_event(s, deduplicate.make_event_key(rows[1].title),
+                                         rows[1].title, rows[1])
+        rows[1].event_id = event.id
+        rows[2].event_id = event.id
+        s.commit()
+
+    since = now - timedelta(days=7)
+    with session_scope() as s:
+        one = repo.query_articles(s, since=since, category="AI Models", limit=2, min_score=25.0,
+                                  order_by_score=True, offset=0)
+        two = repo.query_articles(s, since=since, category="AI Models", limit=2, min_score=25.0,
+                                  order_by_score=True, offset=2)
+    assert [a.final_score for a in one] == [100.0, 99.0], [a.final_score for a in one]
+    keys_one = {a.event_id or a.id for a in one}
+    keys_two = {a.event_id or a.id for a in two}
+    assert not (keys_one & keys_two),         f"第 2 页不该把第 1 页已经给过的事件再给一遍：{[(a.title, a.final_score) for a in two]}"
+    assert [a.final_score for a in two] == [97.0], "去重后只剩 Gamma 一条，宁可短也不该重复"
+
+
+def test_the_pages_together_are_exactly_the_count(session):
+    """逐页取完 = count_eligible 的总数，一次不多一次不少（标题那个数字因此可信）。"""
+    _seed_events(session, events=17, dups=8)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    with session_scope() as s:
+        total = repo.count_eligible(s, since=since, category="AI Models", min_score=25.0)
+        collected: list[int] = []
+        page = 0
+        while True:
+            rows = repo.query_articles(s, since=since, category="AI Models", limit=5,
+                                       min_score=25.0, order_by_score=True, offset=page * 5)
+            if not rows:
+                break
+            collected.extend(a.id for a in rows)
+            page += 1
+            if page > 20:
+                break
+    assert total == 17, total
+    assert len(collected) == total, f"翻页取到 {len(collected)} 条，总数说 {total} 条"
+    assert len(set(collected)) == total, "翻页过程中不该有重复"
+
+
+def test_an_unlinked_article_is_not_swallowed_by_an_unrelated_event(session):
+    """去重的键不能混用两个整数空间：`COALESCE(event_id, id)` 让"文章 1"与"事件 1"同分区。
+
+    真机 2026-10-01 量到 228 篇未挂事件的文章 × 1596 个事件里有 **202 组撞车**，
+    症状之一就是"模型发布 分类共 251 条，这一页只给 3 条"。
+    列表与计数必须同时用分开的键（`COALESCE(-event_id, id)`），所以这里两边各钉一次：
+    只改一边时，另一边会立刻和绝对条数对不上。
+    """
+    from datetime import datetime, timedelta
+
+    from app.database.models import Event
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with session_scope() as s:
+        a1 = repo.save_article(s, build_article(
+            title="Alpha announces a model", url="https://example.org/collide-a",
+            source_name="OpenAI", source_type="rss", content="Alpha body text. " * 10,
+            published_at=now))
+        a2 = repo.save_article(s, build_article(
+            title="Beta announces an agent", url="https://example.org/collide-b",
+            source_name="The Verge", source_type="rss", content="Beta body text. " * 10,
+            published_at=now - timedelta(minutes=1)))
+        for a in (a1, a2):
+            a.is_processed = True
+            a.filtered_out = False
+            a.category = "AI Models"
+            a.final_score = 80.0
+        s.flush()
+        ev = Event(id=a1.id, event_key="collide-beta", title="Beta",
+                   member_count=1, source_names=["The Verge"], final_score=80.0)
+        s.add(ev)
+        s.flush()
+        a2.event_id = ev.id            # 事件 id 正好等于另一篇"未挂事件"的文章 id
+        s.commit()
+
+        since = now - timedelta(days=7)
+        listed = repo.query_articles(s, since=since, category="AI Models", limit=10,
+                                     min_score=25.0, order_by_score=True)
+        counted = repo.count_eligible(s, since=since, category="AI Models", min_score=25.0)
+        titles = sorted(a.title for a in listed)
+
+    assert titles == ["Alpha announces a model", "Beta announces an agent"], titles
+    assert counted == 2, f"计数把两件不相干的事算成了一件：{counted}"

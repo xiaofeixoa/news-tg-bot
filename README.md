@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 755 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 759 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -3975,4 +3975,57 @@ v1.84 给 `/today` 加上总数之后，`p:` 按钮那条路径还是老样子�
 
 部署：两台 `service=active schema=ok stamp=20261001T014558Z`，三端代码树 md5
 `2544570aac9bff281b307dbfd1c8774a`，`Traceback` 计数不变（4+4，仍是 09-26 那次旧事故）。
+
+### v1.86 去重的键混用了两个整数空间：202 组撞车，新闻被毫不相干的报道吃掉
+
+v1.85 那条"要 10 条只给 3 条"我没有停在表面原因上。把去重移进 SQL 之后，
+一个新写的用例（第 2 页不该重播第 1 页）在**新实现下也红了**——顺着它查下去才发现真正的病根：
+
+```python
+key = article.event_id or article.id          # 旧：Python 去重
+partition_by=func.coalesce(event_id, id)      # 我搬进 SQL 时忠实照搬，同一个错
+```
+
+`event_id` 与文章 `id` 都是正整数，来自两张不同的表。**"没挂事件的文章 1"和"事件 1 的成员"
+会落进同一个分区**，于是按分数只留一条——另一条新闻凭空消失。真机（`anr-vps`，只读）：
+
+```
+未挂事件的文章 228 篇 · 事件 1596 个 · 整数空间撞车 = 202 组
+   撞车 id=48 「1Password increases engineering productivity」 ← 与"事件 48"同分区
+   撞车 id=51 「Google Beam expands with new regions…」
+分类 模型发布：共 251 条 → 这一页只给到 3 条   （修复后：给到 10 条）
+```
+
+也就是说 v1.85 看到的"3 条"里，一部分根本不是 `LIMIT` 早于去重，而是**新闻被别人的事件吞了**。
+
+- 键改成 `COALESCE(-event_id, id)`：事件取负、未挂事件的文章取自身 id，两个空间不再重叠。
+  **列表与计数同时改**（`query_articles` 的分区、`count_eligible` 的 `COUNT(DISTINCT …)`），
+  只改一边就会一边说 2 条一边给 1 条。
+- 一个此前**自洽但一起错**的现象值得单独记：修复前 `count_eligible` 与 `query_articles`
+  在近 24 小时窗口上都报 226 —— 两边用的是同一个坏键，所以它们互相"验证"通过。
+  **两处用同一个错误定义，一致性检查就会变成盲区**，这一条对我自己同样适用：
+  只比对两个派生数字，不等于其中任何一个是真的。
+
+测试：755 → **759 passed**。4 条新用例：
+`test_an_unlinked_article_is_not_swallowed_by_an_unrelated_event`（显式造一次撞车，
+钉住"两条都该在"这个**绝对**数字）、`test_page_two_is_not_a_replay_of_page_one`、
+`test_a_category_page_delivers_the_number_of_distinct_events_it_asks_for`、
+`test_the_pages_together_are_exactly_the_count`。
+变异验证：把列表键退回混用 → 2 条失败；把计数键退回混用 → 1 条失败。
+**计数那一侧第一轮是活的**，因为"count == len(list)"这种相对断言在两边同时错时永远成立；
+补了绝对条数断言之后才被抓住——这是本项目第 4 次确认"断言要钉绝对值"。
+
+顺带纠正我自己在本轮早先说过的一句：我当时报"第 2 页与第 1 页重叠 10/10"，
+那是我第一版探针**没有把 `offset` 传进被比较的那一侧**造成的假象
+（两次查的是同一个请求）。分页真正的缺陷是上面那两条：页会短、事件会互相吞。
+
+部署与真机复验：两台 `service=active schema=ok stamp=20261001T021352Z`；
+三端代码树 md5 `0eed0865e7663fa4da6c63941c7f4c00`；`Traceback` 计数不变；
+`anr-jump` 部署后同一棵树 Linux/UTC `exit=0`。同一支只读探针，修复前 vs 修复后：
+
+```
+修复前：模型发布 共 251 → 这一页 3 条 ；开源生态 共 394 → 10 条
+修复后：模型发布 共 251 → 这一页 10 条 ；开源生态 共 394 → 10 条
+        /today 共 109 条，第 1 页 20 条、第 2 页 20 条、重叠 0 条
+```
 ```

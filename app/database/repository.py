@@ -576,20 +576,28 @@ def query_articles(
     order = [Article.final_score.desc(), Article.published_at.desc()] if order_by_score else [
         Article.published_at.desc(), Article.final_score.desc()
     ]
+    if not include_duplicates:
+        # 去重必须发生在 SQL 里，不能在 LIMIT 之后用 Python 挑：
+        # 真机 2026-10-01 09:56 量到 `模型发布/近 24 小时/要 10 条` 只回 6 条，
+        # 而 `offset=10` 的第 2 页与第 1 页**重叠 10/10** —— 那 10 行是同一批事件的
+        # 另一些报道，Python 去重之后把它们提了上来，于是他按 ➡️ 看到的是同样的新闻。
+        # `ROW_NUMBER()` 按同一套排序取每个事件的第一名，LIMIT/OFFSET 才作用在"事件"上。
+        rn = func.row_number().over(
+            # 键要分开两个整数空间：事件 id 与文章 id 都是正整数，
+            # `COALESCE(event_id, id)` 会让"没挂事件的文章 1"和"事件 1 的成员"落进同一个分区，
+            # 于是一条新闻被另一条毫不相干的报道吃掉（测试里 Beta 就是这样消失的）。
+            partition_by=func.coalesce(-Article.event_id, Article.id),
+            order_by=(Article.final_score.desc(), Article.published_at.desc(), Article.id.desc()),
+        ).label("anr_rn")
+        picked = select(Article.id, rn).where(stmt.whereclause).subquery()
+        stmt = (select(Article)
+                .join(picked, Article.id == picked.c.id)
+                .where(picked.c.anr_rn == 1))
     stmt = stmt.order_by(*order).limit(limit).offset(offset)
     articles = list(session.scalars(stmt.options(selectinload(Article.tags))))
     if include_duplicates:
         return articles
-    # De-duplicate events: keep the highest-ranked article of every event.
-    seen: set[int] = set()
-    out: list[Article] = []
-    for article in articles:
-        key = article.event_id or article.id
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(article)
-    return out
+    return articles
 
 
 def count_since(session: Session, since: datetime) -> int:
@@ -607,7 +615,7 @@ def count_eligible(session: Session, *, since: datetime, until: datetime | None 
     `/settings` 那句「这一档还剩几条」因此比任何列表都能给出的条数多 7。
     现在按 `COUNT(DISTINCT COALESCE(event_id, id))` 数，和列表逐字同义。
     """
-    stmt = select(func.count(func.distinct(func.coalesce(Article.event_id, Article.id)))).where(
+    stmt = select(func.count(func.distinct(func.coalesce(-Article.event_id, Article.id)))).where(
         *eligibility_conditions(since=since, until=until, min_score=min_score,
                                 category=category, skip_sent=skip_sent))
     return int(session.scalar(stmt) or 0)
