@@ -629,3 +629,57 @@ push：origin main
 【下一步】
 1. 明早看 `collect github` 的 `metered/cached` 行，确认 304 命中没有因判据收紧而下降。
 2. 同一族还有没有"一条记录两个判据"的地方：把 `entry`/`record`/`meta` 这类多字段 dict 的读取点列一遍。
+
+==================================================
+时间：2026-10-01 13:10（北京）／ 2026-10-01 05:10Z
+版本：v1.91
+==================================================
+
+【用户需求】
+"继续优化"。本轮做 v1.88 自己写下的那条边界（href 不去毒），路上撞出一条会自己变红的用例。
+
+【产品经理】
+一条规矩不能留在文档里当地图缺口：既然写了"href 不在范围内"，就要么补上、要么给出不补的理由。
+同时，一条今天绿明天红的用例会让下一个 Agent 把产品当成坏的来重写——它比 bug 更贵。
+
+【资深研发】
+- `app/services/format.py`：`link()` 先 `redact_secrets(url)` 再 `html.escape(..., quote=True)`。
+- `tests/test_quiet_hours.py`：`test_the_gate_still_decides_first_…` 的造行时间从
+  `datetime.utcnow() - 30h` 改成 `NIGHT - timedelta(hours=30)`，与它自己注入的判断时钟对齐。
+
+【测试】
+只读量法（`anr-jump`）：库里 URL 含 `@` 的行 **0**、ETag 键里邮箱形状 **0** → href 那条是**潜伏**。
+时间相关的证据：同一支用例 04:52Z 绿、05:05Z 红，且用 HEAD 版 `format.py` 一样红
+→ 与我的改动无关，是真钟泄漏（测得的时效 = 30h −（真现在 − NIGHT））。
+v1.90 的补验：部署后完整一轮 `GitHub Trending: 1 new of 25`、`GitHub Releases: 0 new of 8`、
+`Coding Agent Releases: 0 new of 3`；`metered/cached` 行未落盘，304 命中率不声称。
+
+【本次修改】
+href 与文本同一道去毒；钉时钟的用例回到同一颗钟。
+
+【测试命令】
+.venv/Scripts/python.exe -m pytest -q --no-header
+sed 变异：`safe = html.escape(redact_secrets(url or ""), quote=True)` → 去掉 redact_secrets
+
+【测试结果】
+PASS：771 passed（770 → 771）。变异 M1 CAUGHT（还原用 cp 备份 + md5 校验一致）。
+过程中我自己写的 `assert x, plain, "…"` 让整文件收集失败（assert 只能带一条消息），
+`exit=2` 被脚本误判成 CAUGHT——已改成 f-string 并复验真失败签名。
+
+【发现的问题】
+1. 规矩写在 docstring 里但没有覆盖每一行：那批"钉时钟"的用例有一行用了真实现在造行。
+2. 变异/测试脚本必须区分 exit=1（真失败）、exit=2（collection error）、超时；混为一谈会把
+   自己的语法错误当成"这条变异被抓住了"。
+
+【未解决】
+- 304 命中率（`metered/cached`）仍待下一轮日志确认。
+- 库里 39 行非中文 summary_zh、3 行凭据文本：等他点头才做批量写。
+- 今晚 23:00 → 明早 07:00：v1.82 小时级配速复验。
+
+【Git】
+commit：v1.91 href 不是第二扇门；以及一条会自己从绿变红的用例
+push：origin main
+
+【下一步】
+1. 看下一轮 `collect github` 的 `metered/cached`，把 v1.90 的 304 声称补上或纠正。
+2. 扫一遍其它测试文件里"注入时钟 + utcnow 造数据"的混用（同一族）。

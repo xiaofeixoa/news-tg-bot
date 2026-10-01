@@ -48,7 +48,15 @@ def esc(value: Any) -> str:
 
 
 def link(text: str, url: str) -> str:
-    return f'<a href="{html.escape(url, quote=True)}">{esc(text)}</a>'
+    """正文和 href 走同一道去毒：凭据常常就写在链接的参数里。
+
+    v1.88 只在 `esc()` 里遮，那是文本出口；`href` 走的是 `html.escape` 这条路。
+    真机 2026-10-01 数到：库里 1946 行 URL 带 `@` 的是 0 行、ETag 键里邮箱形状 0 条，
+    所以这条是**潜伏**（没有一条新闻现在真的会推给他），但它是 v1.88 自己写下的边界。
+    顺序是先遮再转义：遮完的串仍是普通文本，交给 `html.escape` 处理引号。
+    """
+    safe = html.escape(redact_secrets(url or ""), quote=True)
+    return f'<a href="{safe}">{esc(text)}</a>'
 
 
 def tznow(name: str) -> datetime:

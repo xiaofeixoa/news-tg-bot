@@ -65,6 +65,17 @@ def test_an_ordinary_email_keeps_reading_like_a_contact():
     assert "有问题" in text, text
 
 
+def test_the_href_is_not_a_second_door():
+    """v1.88 修的是文本出口；链接的 href 走的是另一条 `html.escape`，也要遮。"""
+    href = fmt.link("领取方式", "https://shar.test/get?to=someone1k@icloud.com----T3sTk3nXV4")
+    assert "someone1k" not in href and "T3sTk3nXV4" not in href, href
+    assert "***@icloud.com" in href, href
+    plain = fmt.link("原文", "https://example.com/a?b=1&c=2")
+    assert 'href="https://example.com/a?b=1&amp;c=2"' in plain, f"普通链接不能被改动：{plain}"
+    quoted = fmt.link("x", 'https://e.test/?q="quoted"')
+    assert '"quoted"' not in quoted and "&quot;" in quoted, f"引号还得转义：{quoted}"
+
+
 def test_a_bare_domain_or_non_text_still_escapes_normally():
     assert fmt.esc(42) == "42"
     assert fmt.esc(None) == ""

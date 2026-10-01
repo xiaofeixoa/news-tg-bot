@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 770 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 771 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4271,3 +4271,32 @@ etag 27 条、announced 21/20、budget `{"day":"2026-10-01","used_day":209}`，
 所以升级本身不会让他这一轮多花配额），日志 0 `ERROR`/`Traceback`。
 诚实边界：部署后的第一轮还没落日志，本轮只验了不变量，**没有声称 304 命中率**；
 下一轮看 `collect github` 那行的 `metered/cached`。
+
+### v1.91 href 不是第二扇门；以及一条会自己从绿变红的用例
+
+两件一起提交，因为第二件是第一件事路上撞出来的。
+
+**① `link()` 的 href 补上同一道去毒。** v1.88 写下"href 不在这一版范围内"，本轮把那个边界关掉：
+凭据最容易藏在链接参数里（`?to=someone@icloud.com----TOKEN`），而 `href` 走的是 `html.escape`，
+不经过 `esc()`。顺序是**先遮再转义**。真机量法（`anr-jump` 只读）：
+库里 URL 带 `@` 的行 **0** 条、ETag 键里邮箱形状 **0** 条，所以这条是**潜伏**——
+今天没有任何一条新闻真的会推给他这个；修它的理由是这条边界本来就是我写下的、而不该留在文档里当地图缺口。
+
+**② `test_the_gate_still_decides_first_…` 在今早 04:52Z 还是绿的，05:05Z 就红了。**
+它把判断时钟冻在 `NIGHT`（2026-09-30 20:00），却用 `datetime.utcnow() - 30h` 造行的 `published_at`：
+于是"这条新闻多久大"= 30h −（真现在 − NIGHT）——**真钟每走一小时，它就离"过期"远一小时**。
+这类文件的开头 docstring 早就写着"钉住时钟的用例一律用注入的 `at`，否则真实时钟会让整批测试集体变红"，
+规矩在，但这一行漏在外面（**"只在 docstring 里写的限制不算限制"** 的另一面：写在 docstring 里的规矩
+也要有用例盯着，否则它会漏）。改成 `NIGHT - timedelta(hours=30)`，行和判断用同一颗钟。
+这条如果不修，下一次 CI（UTC，真钟更靠前）就会替我变红——所以它必须先于 href 那条落地。
+
+顺带把 v1.90 的验证补上一句：部署后 `anr-jump` 跑了完整一轮，
+`GitHub Trending: 1 new of 25 fetched`、`GitHub Releases: 0 new of 8`、`Coding Agent Releases: 0 new of 3`
+——判据收紧后请求仍然正常返回，没有把 GitHub 源问成 0 条；`metered/cached` 那一行当时没落盘，
+所以 304 命中率的绝对值仍待下一轮确认，我不把它说成已验。
+
+测试：770 → **771 passed**。新增 `test_the_href_is_not_a_second_door`（凭据 URL 被遮、
+普通链接一字不改、引号仍转义）；变异 M1（`link` 退回不遮 href）→ CAUGHT。
+中途我自己写的一句 `assert x, plain, "…"`（assert 只能带一条消息）让整个文件收集失败，
+`exit=2` 被我的脚本当成"CAUGHT"——**第一次出现"变异被语法错误抓住"**，已改成 f-string 并复验：
+真失败是 `FAILED ...::test_the_href_is_not_a_second_door`，不是 collection error。

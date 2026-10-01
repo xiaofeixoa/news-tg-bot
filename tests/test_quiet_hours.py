@@ -151,7 +151,11 @@ def test_the_gate_still_decides_first_so_a_stale_story_cannot_hide_in_the_window
 
     art = _first_hand_row(session, "OpenAI announced an ancient outage", "https://openai.com/quiet3")
     with session_scope() as s:
-        s.get(Article, art).published_at = datetime.utcnow() - timedelta(hours=30)
+        # 这行必须钉在**被注入的那颗时钟**上。之前写的是 `datetime.utcnow() - 30h`，
+        # 也就是"真实现在减 30 小时"，而下一行把判断时钟冻在 NIGHT（2026-09-30 20:00）：
+        # 于是测出来的时效 = 30h −（真现在 − NIGHT），真钟每走一小时这条用例就离"过期"远一小时。
+        # 2026-10-01 它就在全绿了十几分钟后自己变红了——文件开头那句 docstring 警告的正是这个。
+        s.get(Article, art).published_at = NIGHT - timedelta(hours=30)
         s.commit()
     monkeypatch.setattr("app.config._now_utc", lambda: NIGHT)
     ok, why = DigestService(quiet_config(config)).can_send_breaking(111111111, article_id=art)
