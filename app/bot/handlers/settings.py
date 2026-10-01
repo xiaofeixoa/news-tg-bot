@@ -63,9 +63,19 @@ async def cb_settings(callback: CallbackQuery, news: NewsService, app_config: Ap
         user = news.update_user(chat_id, paused=not user["paused"])
         note = "自动推送已暂停" if user["paused"] else "自动推送已恢复"
     elif action in ("score+", "score-"):
-        floor = min(90.0, max(0.0, user["min_score"] + (5 if action == "score+" else -5)))
-        user = news.update_user(chat_id, min_score=floor)
-        note = _floor_note(news, app_config, floor)
+        ceiling = news.score_ceiling()
+        step = 5 if action == "score+" else -5
+        floor = min(ceiling, max(0.0, user["min_score"] + step))
+        if floor == user["min_score"]:
+            # 按到边界的那一次也必须说话：数字没动而他什么也没听到，读起来就是"按钮坏了"。
+            # 上限现在是配置里的 78（规则模式给得到最高 78.0，真机全库 0 行 ≥80），
+            # 不再是代码里那个谁也够不到的 90。
+            note = (f"已经到上限 {ceiling:.0f}：规则模式最高就给得到这个分，"
+                    f"再往上提就一条都进不了简报了"
+                    if step > 0 else "已经是 0：抓到的每一条都会进简报")
+        else:
+            user = news.update_user(chat_id, min_score=floor)
+            note = _floor_note(news, app_config, floor)
     elif action == "interest":
         await _answer(callback, "用 <code>/setinterest</code> 加一句话描述，例如：\n"
                                 "<code>/setinterest 我主要关注 AI Agent、开源模型、GPU 和 Claude</code>",

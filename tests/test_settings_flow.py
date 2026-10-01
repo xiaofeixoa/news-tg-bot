@@ -220,18 +220,30 @@ async def test_raising_the_floor_says_how_many_items_are_left_in_the_window():
 
 @pytest.mark.asyncio
 async def test_the_floor_that_lets_nothing_in_warns_instead_of_going_quiet():
-    """评分上限远高于 90，一路点 🔼 的代价要到早上才知道——所以点的时候就告诉他。"""
+    """够不到的档位现在被界面挡住；但"点了等于没简报"必须当场说，不能等早上。
+
+    2026-10-01 改动：🔼 的上限从代码里硬写的 90 换成配置里的 78
+    （真机全库 `final_score >= 80` 是 0 行，近 7 天最高 78.0）。
+    原来这条用例一路点到 90 是在**证明他能够进到那个空区间**——现在点不进了，
+    但警告与"到边也要说话"这两样一个都不能少。
+    """
     seed_scored([50.0, 60.0, 70.0])
     news = news_service()
     for _ in range(9):
         cb = Cb("score+")
         await cb_settings(cb, news, get_config())
-    assert stored()["min_score"] == 90.0
+    assert stored()["min_score"] == 78.0, f"应停在引擎真给得到的上限：{stored()['min_score']}"
     assert "0 条达标" in cb.note and "收不到简报" in cb.note, cb.note
-    for _ in range(6):
+
+    cb = Cb("score+")                       # 到边上的那一次：数字不动，但必须有话
+    await cb_settings(cb, news, get_config())
+    assert stored()["min_score"] == 78.0
+    assert "已经到上限" in cb.note, cb.note
+
+    for _ in range(4):
         cb = Cb("score-")
         await cb_settings(cb, news, get_config())
-    assert stored()["min_score"] == 60.0
+    assert stored()["min_score"] == 58.0
     assert "2 条达标" in cb.note and "⚠" not in cb.note, cb.note
 
 

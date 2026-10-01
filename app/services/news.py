@@ -638,6 +638,15 @@ class NewsService:
         }
 
     # ------------------------------------------------------------- settings
+    def score_ceiling(self) -> float:
+        """`🔼 提高门槛` 能到的上限——必须来自配置，不能是代码里的某个数字。
+
+        规则模式给不出高于 78 的分：真机 2026-10-01 全库 `final_score >= 80` 为 0 行，
+        近 7 天最高 78.0。旧代码 clamp 到 90，所以按钮可以把他推进
+        "一条都不会进简报"的区间，而面板上不会说这件事。
+        """
+        return float(self.config.get("digest.score_ceiling", 78) or 78)
+
     def default_min_score(self, *, min_floor: float | None = None) -> float:
         value = float(self.config.settings.min_article_score or 0)
         return value if min_floor is None else max(min_floor, value)
