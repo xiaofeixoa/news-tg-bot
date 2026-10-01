@@ -5,6 +5,7 @@ Secrets only ever come from the environment (.env), never from YAML or code.
 
 from __future__ import annotations
 
+import json
 import os
 import string
 from dataclasses import dataclass, field
@@ -17,6 +18,30 @@ from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def atomic_write_json(path: "Path | str", payload: Any, *, indent: int | None = None) -> None:
+    """状态文件只走这一条路：先写 `.tmp` 再 `os.replace`，失败时正式文件仍是上一份好数据。
+
+    配额账本（`github_rate.json`）、304 缓存（`github_etags.json`）、限免公告台账
+    （`free_models.json`）原本用 `write_text` 直接覆盖正式文件。磁盘写满一次（这台机器的
+    告警线就是 `alerts.min_free_mb`）或者进程崩在半路，会把**上一份好数据一起毁掉**，
+    而这三个的读取侧一律"读不到就当没有"——于是磁盘满一次，三份"重启之后接着用"的记忆
+    同时失忆，正好各自触发它们本来要避免的后果：重花 60 次/小时的匿名 GitHub 配额、
+    丢掉本来免费的 304、把同一个免费模型再公告一遍。
+    """
+    target = Path(path)
+    tmp = target.with_name(target.name + ".tmp")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=indent), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _env_files() -> tuple[str, ...]:

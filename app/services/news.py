@@ -558,11 +558,10 @@ class NewsService:
             free_mb = self.disk_free_mb()
         samples = self._disk_samples(now)
         samples.append([round(now), int(free_mb)])
-        tmp = Path(str(path) + ".tmp")
+        from app.config import atomic_write_json
+
         try:
-            tmp.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(samples[-96:]), encoding="utf-8")
-            os.replace(tmp, path)
+            atomic_write_json(path, samples[-96:])
         except OSError:
             return False
         return True

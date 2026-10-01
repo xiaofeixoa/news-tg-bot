@@ -236,13 +236,10 @@ def _load_cooldowns() -> None:
 
 def _save_cooldowns() -> bool:
     """Never let a bookkeeping write stop a collection round."""
-    path = _cooldown_path()
-    tmp = Path(str(path) + ".tmp")
+    from app.config import atomic_write_json
+
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps({h: round(u, 1) for h, u in _cooldowns.items()}),
-                       encoding="utf-8")
-        os.replace(tmp, path)          # atomic: the bot and a round can write at once
+        atomic_write_json(_cooldown_path(), {h: round(u, 1) for h, u in _cooldowns.items()})
     except OSError:
         return False
     return True

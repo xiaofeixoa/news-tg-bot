@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 764 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 768 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4174,3 +4174,53 @@ M3（退回"只在 esc 里遮"）／M4（`display_title` 那层不遮）→ **4/
 部署与真机复验：两台 `service=active schema=ok stamp=20261001T033511Z`；
 同一支只读探针打在真实行上——**#1720 存 1 个地址形状 → 渲染 0 个**，#898/#1534 的凭据本来就在
 `content` 里、不进描述行，渲染后同样 0。
+
+### v1.89 状态文件只允许一条写入路径：半个新文件不许盖掉整份旧记忆
+
+先量（两台机器 `data/`，2026-10-01 03:52Z）：
+
+```
+github_rate.json     此刻 = {"remaining": 0, "reset": 1790826253.0}   ← 账本正躺在盘上被用
+github_etags.json    1,037,187 字节（27 条），每轮整份重写
+free_models.json     announced 台账 21 / 20 条
+translate_budget.json {"day": "2026-10-01", "used_day": 209}
+anr-vps 根分区：已用 83%，剩 1684MB（自己的告警线是 1024MB）
+```
+
+仓里一共六个状态文件写盘点。**三处已经做对了**（`source_cooldowns` / `disk_history` /
+`translate_budget`：写 `.tmp` 再 `os.replace`），**三处还在用 `write_text` 直接覆盖正式文件**
+（`github_rate` / `github_etags` / `free_models`）。同一份规矩在同一个仓里实现了三遍、
+漏了三遍，而漏掉的这三份恰好都是"**重启之后接着用**"的记忆：它们的读取侧一律
+`except Exception: return`（读不到就当没有），所以磁盘写满一次、或者进程崩在 1MB 的
+ETag 文件写到一半，账本、304 缓存、公告台账会一起回到失忆状态，各自触发本来要避免的后果——
+
+- 忘记"这一小时配额已用完" → 重花匿名 60 次/小时（v1.56 就是为这个才把账本落盘的）；
+- 丢掉 27 个 ETag → 每个请求从免费的 304 变成整份响应，配额烧得更快；
+- 丢掉公告台账 → **把同一个免费模型再给他公告一遍**。
+
+修在唯一的写入出口：`app/config.py` 新增 `atomic_write_json(path, payload, *, indent=None)`，
+六个写点全部改走它——三处是修 bug，三处是去重（防止下一个"第五份实现"再漏掉替换这一步）。
+失败时顺手删掉 `.tmp`：半个 tmp 留在 `data/` 里，运维会当成真状态来读。
+
+**两条 SURVIVED 的变异暴露的是我的假写得太干净。** M1（退回覆盖式 `write_text`）和
+M2（失败后不清理 `.tmp`）第一轮都是绿的，因为我的 monkeypatch 只 `raise`、**一个字节都不写**，
+于是"写正式文件"和"写 tmp 再替换"在那个假面前看起来一模一样。
+改成"真的打开文件、写进前 12 个字符、然后 ENOSPC"之后：M1 让旧账本变成半截 JSON（断言当场红），
+M2 让 `free_models.json.tmp` 留在目录里（也红）。
+**只抛不写的假钉不住任何与写入顺序有关的性质**——这是 v1.68 / v1.71 那条
+"fake 换不掉真接线"教训的第 N 次现身，这次出现在文件系统上。
+
+测试：764 → **768 passed**（Windows）。新增 `tests/test_state_files.py` 4 条：
+写失败必须保住旧数据、必须不留 `.tmp`、迁移到统一出口不许改变任何读取侧看到的形状
+（列表形状、`indent=1`、中文模型名不能被 `ensure_ascii` 变回 `\uXXXX`），
+以及一条**仓内扫描**：`app/**/*.py` 里除 `config.py` 之外出现任何 `.write_text(` 就失败——
+"只允许一条路"这条规矩本身也要有用例盯着。M1-M5 全部 CAUGHT，还原校验 `restored: True`。
+
+部署与真机复验：两台 `service=active schema=ok stamp=20261001T035726Z`；重启后逐个读回六个状态文件：
+rate `{"remaining": 4, "reset": 1790827496}`（是部署后新写的，证明新格式被旧读取侧接受）、
+etag 27 条、announced 21/20、budget `{"day":"2026-10-01","used_day":209}`，
+`data/*.tmp` 残留 0，日志 0 `ERROR`/`Traceback`。
+
+**顺带量到的一条，留给下一版**：`github_etags.json` 1MB / 27 条 ≈ **每条 38KB**，
+说明那个"ETag 缓存"里存的不只是 ETag（多半连响应体一起存了），而它每轮整份重写一次。
+在一块根分区已经 83%、告警线 1GB 的盘上，这是个值得单独查的写入量。

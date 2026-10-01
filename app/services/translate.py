@@ -366,12 +366,11 @@ class Budget:
         """Persist the counter; never let a write failure stop a translation."""
         if self.path is None or not self.day_of:
             return False
-        tmp = Path(str(self.path) + ".tmp")
+        from app.config import atomic_write_json
+
         try:
-            tmp.write_text(json.dumps({"day": self.day_of, "used_day": self.used_day}),
-                           encoding="utf-8")
-            os.replace(tmp, self.path)      # atomic, so a concurrent round cannot
-        except OSError:                     # leave a half-written file behind
+            atomic_write_json(self.path, {"day": self.day_of, "used_day": self.used_day})
+        except OSError:                     # 并发的另一轮永远不会读到半个文件
             return False
         return True
 

@@ -481,3 +481,81 @@ push：origin main
 【下一步】
 1. 拿他点头后：写侧 `_note_zh_miss` 留下与 title 分支对称的标记，再按标记清 39 行 + 3 行凭据。
 2. 把"所有面向用户出口的清单"写成一页（`esc` / `link` href / 附件 / `/导出` 之类），逐条验一条规则能不能全兜住。
+
+==================================================
+时间：2026-10-01 11:59（北京）／ 2026-10-01 03:59Z
+版本：v1.89
+==================================================
+
+【用户需求】
+"继续优化"。本轮走的是我自己列在 v1.88 之后的那条待办族：共享 JSON 状态文件的写入。
+
+【产品经理】
+状态文件是他看不见的东西，但它们决定他收不收得到重复推送、GitHub 源这一轮还有没有配额。
+"重启之后接着用"的记忆如果会被一次写满的磁盘抹掉，那这套克制的承诺就是假的（v1.69 族）。
+
+【首席架构师】
+同一个仓里"原子写"实现了三遍（cooldowns / disk_history / translate_budget），
+另外三个写点根本没实现（github_rate / github_etags / free_models）。
+决定：加一个唯一出口 `app/config.py:atomic_write_json()`，六个写点全改走它——
+三处修 bug、三处去重；并用一条仓内扫描用例钉住"不许有第四份实现"。
+
+【资深研发】
+- `app/config.py`：`atomic_write_json(path, payload, *, indent=None)`，写 `.tmp` 再 `os.replace`，
+  失败时删除 `.tmp` 并抛出，让调用方按各自语义处理（`save_rate` 记 debug、`_write_state` 记 warning、
+  `budget.save` 返回 False）。
+- 改走出口的六个点：`collectors/github.py`（rate、etags）、`services/free_models.py`（台账）、
+  以及原本已经自己写对的 `collectors/base.py`、`services/news.py`（磁盘历史）、`services/translate.py`（配额）。
+
+【测试】
+只读量法（两台 `data/`，03:52Z）：
+
+```
+github_rate.json 此刻 = {"remaining": 0, "reset": 1790826253.0}   ← 账本正在被使用
+github_etags.json = 1,037,187 字节 / 27 条，每轮整份重写
+free_models.json announced = 21 / 20 ；translate_budget = {"2026-10-01", 209}
+anr-vps 根分区 83% 已用、剩 1684MB（告警线 1024MB）
+data/*.tmp 残留：0
+```
+
+后果链：读取侧一律 `except Exception: return`，所以一份写到一半的文件等于没有文件——
+忘记配额已用完（重花 60 次/小时）、丢掉 27 个免费 304、把同一个免费模型再公告一遍。
+
+【本次修改】
+唯一写入出口 + 六个写点迁移 + 一条"不许出现第四份实现"的扫描用例。
+
+【测试环境】
+本机 Windows / 3.13.2；`anr-jump` Linux/UTC；CI python 3.12 / 3.13。
+
+【测试命令】
+.venv/Scripts/python.exe -m pytest -q
+.venv/Scripts/python.exe /c/tmp/anr-mut/mut189.py
+
+【测试结果】
+PASS：768 passed（764 → 768）。
+变异第一轮：M1 覆盖式写回正式文件 **SURVIVED**、M2 失败不清理 .tmp **SURVIVED**、M3/M4/M5 CAUGHT。
+根因是**我的假只 raise、一个字节都不写**，于是"写正式文件"与"写 tmp 再替换"无法区分。
+改成"真的打开文件写进前 12 个字符再 ENOSPC"后 M1/M2 当场变红 → 最终 5/5 CAUGHT。
+
+【发现的问题】
+"只抛不写的假钉不住任何与写入顺序有关的性质"——v1.68 / v1.71 的 fake 教训在文件系统上重演。
+
+【修复】
+六处统一走 `atomic_write_json`；已部署真机复验（见下）。
+
+【未解决】
+- `github_etags.json` 1MB / 27 条 ≈ 每条 38KB，怀疑缓存里连响应体一起存了，且每轮整份重写；
+  在一块 83% 已用的盘上值得单独查（下一版）。
+- `link()` 的 href 不去毒；库里 3 行凭据文本与 39 行非中文 summary_zh 仍未清理（需他点头）。
+- 今晚 23:00 → 明早 07:00：v1.82 小时级配速仍需真机复验。
+
+【Git】
+commit：v1.89 状态文件只允许一条写入路径：半个新文件不许盖掉整份旧记忆
+push：origin main
+部署：两台 `stamp=20261001T035726Z` active/schema=ok；重启后六个状态文件逐个读回通过
+（rate 已是部署后新写的 `{"remaining": 4, ...}`，证明新格式被旧读取侧接受），
+`.tmp` 残留 0，日志 0 ERROR/Traceback。
+
+【下一步】
+1. 查 ETag 缓存到底存了什么（每条 38KB），必要时只存 etag 字符串。
+2. 同一族的另一半：状态文件的**读取**容错是否都真的把半截文件当没有（已有 except，但要逐个用例钉住）。

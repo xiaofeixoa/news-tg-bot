@@ -62,7 +62,9 @@ def save_rate(config: Any) -> None:
     if (_saved_rate["remaining"], _saved_rate["reset"]) == (_rate["remaining"], _rate["reset"]):
         return                                  # nothing moved since the last write
     try:
-        _rate_path(config).write_text(json.dumps(_rate), encoding="utf-8")
+        from app.config import atomic_write_json
+
+        atomic_write_json(_rate_path(config), dict(_rate))
     except Exception as exc:  # pragma: no cover - read-only data dir
         log.debug("github rate state unwritable (%s): %s", config, exc)
         return
@@ -171,8 +173,10 @@ def save_etags(config: Any, cache: dict[str, Any]) -> None:
     import json
 
     trimmed = dict(list(cache.items())[-400:])       # newest entries only
+    from app.config import atomic_write_json
+
     try:
-        _etag_path(config).write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+        atomic_write_json(_etag_path(config), trimmed)
     except Exception as exc:  # pragma: no cover - read-only data dir
         log.warning("github etag cache unwritable: %s", exc)
 

@@ -179,9 +179,9 @@ class FreeModelWatcher:
 
     def _write_state(self, state: dict[str, Any]) -> None:
         try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1),
-                                       encoding="utf-8")
+            from app.config import atomic_write_json
+
+            atomic_write_json(self.state_path, state, indent=1)
         except Exception as exc:  # a read-only data dir must not break /免费
             log.warning("free-model state unwritable (%s): %s", self.state_path, exc)
 
