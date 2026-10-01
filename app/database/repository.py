@@ -420,19 +420,6 @@ def get_article(session: Session, article_id: int) -> Article | None:
     return session.get(Article, article_id)
 
 
-def canonical_ids(session: Session, ids: Sequence[int]) -> list[int]:
-    """Collapse an id list to one representative article per event."""
-    out: list[int] = []
-    seen_events: set[int] = set()
-    for article in session.scalars(select(Article).where(Article.id.in_(ids))):
-        key = article.event_id or article.id
-        if key in seen_events:
-            continue
-        seen_events.add(key)
-        out.append(article.id)
-    return out
-
-
 # ------------------------------------------------------------------ events
 def get_or_create_event(session: Session, event_key: str, title: str, article: Article) -> Event:
     event = session.scalar(select(Event).where(Event.event_key == event_key))
