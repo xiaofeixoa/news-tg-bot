@@ -326,12 +326,23 @@ class NewsService:
             return DayPage(_views(session, articles), today_local.isoformat(),
                            total, min(page, pages), pages)
 
+    def category_min_score(self) -> float:
+        """分类页的门槛。列表与"这个分类有几条"必须用同一个数字，否则标题会少报。"""
+        return self.default_min_score(min_floor=25)
+
+    def count_category(self, category: str, *, days: int = 7) -> int:
+        """该分类在 N 天窗口里能看到几条（与 `by_category` 同门槛、同去重口径）。"""
+        since = datetime.utcnow() - timedelta(days=days)
+        with session_scope() as session:
+            return repo.count_eligible(session, since=since, category=category,
+                                       min_score=self.category_min_score())
+
     def by_category(self, category: str, *, limit: int = 10, days: int = 3) -> list[ArticleView]:
         since = datetime.utcnow() - timedelta(days=days)
         with session_scope() as session:
             return _views(session, repo.query_articles(
                 session, since=since, category=category, limit=limit, order_by_score=True,
-                min_score=self.default_min_score(min_floor=25),
+                min_score=self.category_min_score(),
             ))
 
     def free_offers(self, *, days: int = 30, limit: int = 20,

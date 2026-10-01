@@ -47,10 +47,14 @@ def _chat_of(callback: CallbackQuery) -> int | None:
 
 async def show_list(message: Message | None, *, chat_id: int, items: Sequence[ArticleView],
                     title: str, news: NewsService, config: AppConfig, page: int = 1,
-                    callback: CallbackQuery | None = None, edit: bool = False) -> None:
+                    callback: CallbackQuery | None = None, edit: bool = False,
+                    total: int | None = None, more: str = "") -> None:
     """Render one page of a remembered list so digit buttons stay stable."""
     all_ids = [a.id for a in items]
-    store.remember(chat_id, list(items), kind="news")
+    # 列表的名字、真实总数和"更多去哪儿"必须跟着这一批条目一起记住：`p:` 按钮回来时
+    # 只有这些还在，否则第 2 页会顶着一个错标题（以前是写死的"🤖 AI 新闻"）。
+    store.remember(chat_id, list(items), kind="news", title=title, total=total, more=more)
+    total_all = len(all_ids) if total is None else int(total)
     total_pages = max(1, (len(all_ids) + PER_PAGE - 1) // PER_PAGE)
     page = min(max(1, page), total_pages)
     start = (page - 1) * PER_PAGE
@@ -58,7 +62,9 @@ async def show_list(message: Message | None, *, chat_id: int, items: Sequence[Ar
     # 先把即将显示的这几条翻成中文，用户不必等后台翻译轮
     window = await news.ensure_chinese(list(window), with_points=False)
     # Numbers must match the buttons, so re-start the circle per page.
-    text = fmt.news_list(window, config=config, tz_name=_tz(news.user_for(chat_id)), title=title)
+    header = fmt.paged_header(title, total_all, len(all_ids),
+                              page=page, pages=total_pages, more=more)
+    text = fmt.news_list(window, config=config, tz_name=_tz(news.user_for(chat_id)), title=header)
     keyboard = K.news_list_keyboard([a.id for a in window], page=page, total_pages=total_pages)
     if callback is not None:
         target = callback.message if edit else None
@@ -78,7 +84,7 @@ async def show_list(message: Message | None, *, chat_id: int, items: Sequence[Ar
 
 
 async def _answer_list(target: Message, news: NewsService, config: AppConfig, *, items: Sequence[ArticleView],
-                       title: str) -> None:
+                       title: str, total: int | None = None, more: str = "") -> None:
     if not items:
         await target.answer(
             f"{fmt.esc(title)}\n\n暂无符合条件的新闻。先用 /sources 检查数据源，"
@@ -86,7 +92,8 @@ async def _answer_list(target: Message, news: NewsService, config: AppConfig, *,
             parse_mode="HTML",
         )
         return
-    await show_list(target, chat_id=target.chat.id, items=list(items), title=title, news=news, config=config)
+    await show_list(target, chat_id=target.chat.id, items=list(items), title=title,
+                    news=news, config=config, total=total, more=more)
 
 
 # ------------------------------------------------------------------ commands
@@ -96,19 +103,16 @@ async def cmd_news(message: Message, command: CommandObject, news: NewsService,
     count = _int_arg(command.args) or int(app_config.get("bot.news_limit", 10))
     count = min(count, 30)
     items = news.latest(limit=count, hours=72)
-    total = news.count_eligible(hours=72)
     await _answer_list(message, news, app_config, items=items,
-                       title=f"🤖 最新 AI 新闻 · {fmt.list_scope(total, len(items), newest=True)}"
-                             f"（想看更多：/news 30，或直接 /search 关键词）")
+                       title="🤖 最新 AI 新闻（近 72 小时）",
+                       total=news.count_eligible(hours=72), more="/news 30")
 
 
 @router.message(Command("latest"))
 async def cmd_latest(message: Message, news: NewsService, app_config: AppConfig) -> None:
-    limit = int(app_config.get("bot.news_limit", 10))
-    items = news.latest(limit=limit, hours=24)
-    total = news.count_eligible(hours=24)
-    await _answer_list(message, news, app_config, items=items,
-                       title=f"🕐 最近 24 小时 · {fmt.list_scope(total, len(items), newest=True)}")
+    items = news.latest(limit=int(app_config.get("bot.news_limit", 10)), hours=24)
+    await _answer_list(message, news, app_config, items=items, title="🕐 最近 24 小时",
+                       total=news.count_eligible(hours=24), more="/search 关键词")
 
 
 @router.message(Command("today"))
@@ -137,11 +141,10 @@ async def _answer_day(message: Message, news: NewsService, config: AppConfig,
     """
     page = _int_arg(command.args) or 1
     day = news.day(offset_days=offset_days, limit=20, page=page, tz_name=tz)
-    scope = fmt.list_scope(day.total, len(day.items), page=day.page, pages=day.pages)
-    hint = f"（下一页：/{'today' if offset_days == 0 else 'yesterday'} {day.page + 1}）" \
-        if day.pages > 1 and day.page < day.pages else ""
+    name = "today" if offset_days == 0 else "yesterday"
+    more = f"/{name} {day.page + 1}" if day.page < day.pages else ""
     await _answer_list(message, news, config, items=day.items,
-                       title=f"{title} · {day.label} · {scope}{hint}")
+                       title=f"{title} · {day.label}", total=day.total, more=more)
 
 
 @router.message(Command("topics"))
@@ -239,11 +242,14 @@ async def cb_topic(callback: CallbackQuery, news: NewsService, app_config: AppCo
         await callback.answer(STALE_CALLBACK, show_alert=True)
         return
     items = news.by_category(category, limit=PER_PAGE, days=7)
+    label = fmt.esc(app_config.category_label(category))
     if not items:
-        await callback.message.answer(f"{app_config.category_label(category)} 分类最近 7 天还没有新闻。")
+        await callback.message.answer(f"{label} 分类最近 7 天还没有新闻。")
     else:
         await show_list(callback.message, chat_id=chat_id, items=items,
-                        title=f"{fmt.esc(app_config.category_label(category))} 分类",
+                        title=f"{label} 分类（近 7 天）",
+                        total=news.count_category(category, days=7),
+                        more="/search 关键词",
                         news=news, config=app_config)
     await callback.answer()
 
@@ -259,10 +265,21 @@ async def cb_page(callback: CallbackQuery, news: NewsService, app_config: AppCon
     ids = context.article_ids if context else []
     items = [news.by_id(i) for i in ids]
     items = [i for i in items if i is not None]
-    if not items:
-        items = news.latest(limit=30, hours=72)
-    await show_list(callback.message, chat_id=chat_id, items=items, title="🤖 AI 新闻",
-                    news=news, config=app_config, page=page, callback=callback, edit=True)
+    if items:
+        # 第 2 页顶着的必须是这一批原本的名字、总数与去向，而不是写死的"🤖 AI 新闻"
+        await show_list(callback.message, chat_id=chat_id, items=items,
+                        title=context.title or "🤖 AI 新闻", news=news, config=app_config,
+                        page=page, total=context.total, more=context.more,
+                        callback=callback, edit=True)
+        return
+    # 记忆只有 6 小时（进程重启也会清空）。以前的做法是悄悄换成"最近 72 小时最新 30 条"
+    # 并继续用原标题展示：他点的是某条消息的第 2 页，拿到的却是另一个列表的第 1 页。
+    recent = news.latest(limit=30, hours=72)
+    await show_list(callback.message, chat_id=chat_id, items=recent,
+                    title="🕐 这条面板已经过期（记忆 6 小时），下面是刚取的最近 72 小时",
+                    news=news, config=app_config, page=1,
+                    total=news.count_eligible(hours=72), more="/news 30",
+                    callback=callback, edit=True)
 
 
 @router.callback_query(F.data.startswith(f"{K.BACK}:"))

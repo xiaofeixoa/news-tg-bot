@@ -271,9 +271,8 @@ async def test_today_says_how_many_there_really_are_and_how_to_see_the_rest(sess
     await cmd_today(msg, Command(None), get_news_service(), get_config())
     text = msg.all_text()
     assert "共 25 条" in text, text
-    assert "第 1/2 页" in text, text
-    assert "这里按评分列出 20 条" in text, text
-    assert "/today 2" in text, f"标题得给他下一页的入口：{text}"
+    assert "这批 20 条的第 1/2 页" in text, text
+    assert "更多请用 /today 2" in text, f"标题得给他下一页的入口：{text}"
 
 
 @pytest.mark.asyncio
@@ -292,6 +291,112 @@ async def test_news_and_latest_admit_they_are_one_page_of_many(session):
     later = FakeMessage(ALLOWED, "/latest")
     await cmd_latest(later, get_news_service(), get_config())
     assert "共 13 条" in later.all_text(), later.all_text()
+
+
+@pytest.mark.asyncio
+async def test_page_two_keeps_the_lists_own_name_not_a_generic_one(session, monkeypatch):
+    """➡️ 以前把每一页都重写成"🤖 AI 新闻"：`/today` 的第 2 页顶着别人的名字，
+    而 v1.84 刚加上的"共 25 条"在第二页上消失了。"""
+    from app.bot.handlers.news import cb_page, cmd_today
+
+    _seed_today(session, 25)
+    msg = FakeMessage(ALLOWED, "/today")
+    await cmd_today(msg, Command(None), get_news_service(), get_config())
+    keyboard = msg.sent[-1][1]["reply_markup"]
+    pages = [b.callback_data for r in keyboard.inline_keyboard for b in r
+             if getattr(b, "callback_data", None) and b.callback_data.startswith("p:")]
+    assert pages, f"20 条应该给出第 2 页的按钮：{pages}"
+
+    callback = FakeCallback("p:2")
+    await cb_page(callback, get_news_service(), get_config())
+    edited = callback.message.last
+    assert "今日 AI 新闻" in edited, edited[:160]
+    assert "共 25 条" in edited, edited[:160]
+    assert "这批 20 条的第 2/2 页" in edited, edited[:200]
+    assert "🤖 AI 新闻" not in edited, f"第 2 页不能换名单：{edited[:160]}"
+
+
+@pytest.mark.asyncio
+async def test_an_expired_panel_says_so_instead_of_passing_as_the_same_list(session, monkeypatch):
+    """记忆 6 小时（重启也清空）。点旧消息的 ➡️ 时以前会悄悄换成"最近 72 小时"，
+    却继续用原标题展示——他点的是某条消息第 2 页，拿到的是另一个列表第 1 页。"""
+    from app.bot.context import store
+    from app.bot.handlers.news import cb_page
+
+    _seed_today(session, 30)
+    store._store.clear()                      # 模拟过期/重启
+    callback = FakeCallback("p:3")
+    await cb_page(callback, get_news_service(), get_config())
+    text = callback.message.last
+    assert "已经过期" in text, text[:200]
+    assert "最近 72 小时" in text, text[:200]
+    assert "第 3" not in text, f"重新取的就是新的一页，不该谎称第 3 页：{text[:200]}"
+
+
+@pytest.mark.asyncio
+async def test_the_topic_page_states_how_many_the_category_really_has(session):
+    """/topics 点进去的分类页是这一族里最后一块：它给 10 条，而分类里可能有 37 条。"""
+    from app.bot.handlers.news import cb_topic
+    from app.database.models import Article
+
+    # 14 条：其中 2 条低于门槛、一对是同一事件的两条报道 → 能看到 11 条，本页只给 10 条
+    _seed_today(session, 14)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with session_scope() as s:
+        for i in range(3):
+            art = repo.save_article(s, build_article(
+                title=f"Control group row {i}", url=f"https://example.org/ctrl{i}",
+                source_name="GitHub", source_type="rss",
+                content="Control group body text. " * 12, published_at=now))
+            if art:
+                art.is_processed = True
+                art.final_score = 60.0
+        s.commit()
+    with session_scope() as s:
+        rows = s.query(Article).filter(Article.title.like("OpenAI announces model%")).all()
+        for row in rows:
+            row.category = "AI Models"
+        # 另两个分类做对照：`count_category` 如果漏掉分类过滤，总数就会把别人家也算进来
+        others = s.query(Article).filter(Article.title.like("Control group%")).all()
+        for row in others:
+            row.is_processed = True
+            row.filtered_out = False
+            row.final_score = 60.0
+            row.source_quality = 90.0
+            row.category = "Open Source"
+        s.commit()
+        rows = s.query(Article).filter(Article.title.like("OpenAI announces model%")).all()
+        for i, score in ((0, 10.0), (1, 20.0)):          # 门槛之下的两条
+            rows[i].final_score = score
+        from app.processing import deduplicate
+        event = repo.get_or_create_event(s, deduplicate.make_event_key(rows[2].title),
+                                         rows[2].title, rows[2])
+        for r in (rows[2], rows[3]):                      # 两条报道 = 一个事件（都要挂上）
+            r.event_id = event.id
+        s.commit()
+
+    news = get_news_service()
+    # 期望值从 fixture 自己算出来，不靠我心算：门槛之上的行，按事件去重后有几条？
+    floor = news.category_min_score()
+    with session_scope() as s:
+        rows = s.query(Article).filter(Article.category == "AI Models").all()
+        eligible = [r for r in rows if (r.final_score or 0) >= floor and not r.filtered_out]
+        distinct = {r.event_id or r.id for r in eligible}
+    assert len(eligible) < 14, f"低于门槛的两条不该进来：{len(eligible)}"
+    assert len(distinct) < len(eligible), "fixture 里必须真的有一对重复事件，否则这条测试是空跑"
+
+    visible = len(news.by_category("AI Models", limit=100, days=7))
+    total = news.count_category("AI Models", days=7)
+    assert visible == len(distinct), (visible, len(distinct))
+    assert total == visible, f"标题的总数必须等于列表能给的：{total} vs {visible}"
+
+    callback = FakeCallback("t:AI Models")
+    await cb_topic(callback, news, get_config())
+    text = callback.message.last
+    assert f"共 {total} 条" in text, text[:220]
+    assert "这里列出最新 10 条" in text, text[:220]
+    assert "更多请用 /search 关键词" in text, text[:220]
+    assert "近 7 天" in text, text[:120]
 
 
 @pytest.mark.asyncio

@@ -597,22 +597,24 @@ def status_line(stats: dict[str, Any]) -> str:
     )
 
 
-def list_scope(total: int, shown: int, *, page: int = 1, pages: int = 1,
-               newest: bool = False) -> str:
-    """列表标题里那句"共几条 / 这一页几条 / 第几页"。
+def paged_header(title: str, total: int, shown: int, *, page: int = 1, pages: int = 1,
+                 more: str = "") -> str:
+    """列表的第一行：名字 + 真实总数 + 这一页是其中哪一段 + 下一步去哪。
 
-    真机 2026-10-01：`/today` 给 20 条而当天符合条件的是 101 条，`/news` 给 10 条而近 72
-    小时有 729 条——标题里一个数字都没有，于是"这一页"读起来就是"今天的全部"。
-    这和 §11 v1.74 的 `/search`「最近 30 天 20 条」是同一个缺陷，只是那次的标题至少还写了
-    一个假数字，这次连假数字都没有。
+    翻页按钮以前把每一页都重新写成"🤖 AI 新闻"：`/today` 的第 2 页顶部换了名字，
+    而 v1.84 刚加上的"共 102 条"在第二页上直接消失。标题必须由同一处生成，
+    这样第一页和后面的每一页说的是同一件事。
     """
+    parts = [title]
     if total <= 0:
-        return "今天没有符合条件的新闻" if not newest else "没有符合条件的新闻"
-    parts = [f"共 {total} 条"]
+        return title
+    parts.append(f"共 {total} 条")
     if pages > 1:
-        parts.append(f"第 {page}/{pages} 页")
-    if shown < total:
-        parts.append(f"这里按评分列出 {shown} 条" if not newest else f"这里列出最新 {shown} 条")
+        parts.append(f"这批 {shown} 条的第 {page}/{pages} 页")
+    elif shown < total:
+        parts.append(f"这里列出最新 {shown} 条")
+    if more and total > shown:
+        parts.append(f"更多请用 {more}")
     return " · ".join(parts)
 
 

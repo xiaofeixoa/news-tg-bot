@@ -24,13 +24,21 @@ class ChatContext:
     # /免费 上"近 N 天"的选择：Telegram 不会告诉我们面板现在是什么状态，
     # 而工具按钮的回调数据里放不下天数（标签最长 40 字，64 字节的上限很快就爆）。
     days: int | None = None
+    # 翻页按钮（`p:2`）以前把每一页都重新写成"🤖 AI 新闻"，于是 `/today` 的第 2 页
+    # 顶部写着另一个名字，而 v1.84 那句"共 102 条"也在第 2 页上消失了。
+    # 列表的名字与总数必须活过翻页，所以它们和 id 一起记住。
+    title: str = ""
+    total: int | None = None
+    more: str = ""
 
 
 class ContextStore:
     def __init__(self) -> None:
         self._store: dict[int, ChatContext] = {}
 
-    def remember(self, chat_id: int, items: list[ArticleView] | list[int], *, kind: str = "news") -> ChatContext:
+    def remember(self, chat_id: int, items: list[ArticleView] | list[int], *, kind: str = "news",
+                 title: str | None = None, total: int | None = None,
+                 more: str | None = None) -> ChatContext:
         ids: list[int] = []
         labels: list[str] = []
         for item in items:
@@ -40,7 +48,13 @@ class ContextStore:
             else:
                 ids.append(int(item))
                 labels.append("")
-        context = ChatContext(article_ids=ids, labels=labels, kind=kind, updated_at=time.time())
+        previous = self._store.get(chat_id)
+        context = ChatContext(article_ids=ids, labels=labels, kind=kind, updated_at=time.time(),
+                              # 没给新值时沿用上一份：翻页时 `show_list` 只带条目，
+                              # 不能让列表的名字和总数在第二页上蒸发。
+                              title=title if title is not None else (previous.title if previous else ""),
+                              total=total if total is not None else (previous.total if previous else None),
+                              more=more if more is not None else (previous.more if previous else ""))
         self._store[chat_id] = context
         return context
 
