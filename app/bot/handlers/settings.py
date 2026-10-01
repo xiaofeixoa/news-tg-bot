@@ -67,12 +67,11 @@ async def cb_settings(callback: CallbackQuery, news: NewsService, app_config: Ap
         step = 5 if action == "score+" else -5
         floor = min(ceiling, max(0.0, user["min_score"] + step))
         if floor == user["min_score"]:
-            # 按到边界的那一次也必须说话：数字没动而他什么也没听到，读起来就是"按钮坏了"。
-            # 上限现在是配置里的 78（规则模式给得到最高 78.0，真机全库 0 行 ≥80），
-            # 不再是代码里那个谁也够不到的 90。
-            note = (f"已经到上限 {ceiling:.0f}：规则模式最高就给得到这个分，"
-                    f"再往上提就一条都进不了简报了"
+            # 到边上的那一次也必须说话；但不能只说"到边了"而把"这一档几条都不达标"丢掉——
+            # 那正是他按下之后唯一想知道的事。两句一起给。
+            edge = (f"已经到上限 {ceiling:.0f}：规则模式最高就给得到这个分，再往上提就一条都进不了简报了"
                     if step > 0 else "已经是 0：抓到的每一条都会进简报")
+            note = f"{edge} · {_floor_note(news, app_config, floor)}"
         else:
             user = news.update_user(chat_id, min_score=floor)
             note = _floor_note(news, app_config, floor)
