@@ -48,6 +48,16 @@ def test_score_scope_shows_the_ceiling_and_what_this_floor_costs():
     assert "0 条达标" in empty and "早晚报会是空的" in empty, empty
 
 
+def test_a_legacy_floor_above_the_ceiling_is_not_called_the_highest():
+    """v1.94 之前他能点到 90；那种行不该被说成"已经是最高的了"。"""
+    from app.services import format as fmt
+
+    above = fmt.score_scope(90, ceiling=78, eligible=0)
+    assert "已超过上限 78" in above, above
+    assert "已经是最高的了" not in above, above
+    assert "0 条达标" in above and "早晚报会是空的" in above, above
+
+
 def test_the_panel_builds_that_line_in_one_place():
     src = (pathlib.Path(__file__).resolve().parent.parent
            / "app" / "bot" / "handlers" / "settings.py").read_text(encoding="utf-8")

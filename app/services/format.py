@@ -652,7 +652,11 @@ def score_scope(value: float, *, ceiling: float, eligible: int) -> str:
     0 那一档必须当场说，因为他一旦停在那里，第二天看到的是空简报而不是这条解释。
     """
     text = f"📊 最低评分：{value:.0f}（上限 {ceiling:.0f}"
-    if value >= ceiling:
+    if value > ceiling:
+        # 历史上他能一路点到 90（v1.94 之前 clamp 是 90），所以库里可能真有高于上限的行；
+        # 对那种行说"已经是最高的了"是错的——他不在最高档，他早在够不着的区间里。
+        text += f"，已超过上限 {ceiling:.0f}"
+    elif value == ceiling:
         text += "，已经是最高的了"
     text += f" · 近 24 小时 {eligible} 条达标）"
     if eligible == 0:

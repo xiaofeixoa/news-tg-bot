@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 776 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 779 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4385,3 +4385,32 @@ v1.63 那根 90 分按钮的同一族：**控制件的天花板高过引擎能�
 测试 772 → **776 passed**；新增 `tests/test_score_ceiling.py`（上限来自配置 / 不高于实测 78.0 /
 handler 里没有 `min(90.0` / 两个方向的边界都有中文说明）；变异 M1（`ceiling = 90.0`）CAUGHT。
 部署：两台 `stamp=20261001T055618Z` `service=active schema=ok`（这是带修复的那次）。
+
+### v1.95 门槛那一行现在会回答"提到这么高要付多少"
+
+v1.94 把上限从够不到的 90 收到配置里的 78，但面板仍然只写 `📊 最低评分：45`——
+上限在哪、这一档现在有几条达标，都得他自己猜。这轮补齐，措辞收进 `fmt.score_scope()` 一处：
+
+```
+部署后在 anr-vps 用真代码 + 真库渲染（近 24 小时）：
+45 → 📊 最低评分：45（上限 78 · 近 24 小时 306 条达标）
+60 → 71 条 ；  70 → 9 条
+78 → …（上限 78，已经是最高的了 · 1 条达标）
+80 → …（上限 78，已超过上限 78 · 0 条达标）
+      ⚠️ 这一档现在一条都不达标，早晚报会是空的；点 🔽 降下来才有内容
+```
+
+数字与早上一量（45→320、70→10）不同，正说明这一行读的是实时账而不是写死的说明。
+
+**量第 5 行的时候才发现一处措辞 bug**：v1.94 之前 clamp 是 90，所以库里可能留着
+`min_score = 80/85/90` 的历史行；对那种行说"已经是最高的了"是假话——他不在最高档，
+他早就在够不着的区间里。改成 `value > ceiling → 已超过上限 78`、`value == ceiling → 已经是最高的了`，
+并加 `test_a_legacy_floor_above_the_ceiling_is_not_called_the_highest` 钉住。
+
+同一处还引入 `handlers/settings.py:_svc()`：面板需要实时条数，而 `_panel` 只拿到 `user`。
+它返回与 handlers 依赖注入**同一个** `get_news_service()` 单例，而不是新起一份服务
+——避免"按钮读一份、面板读另一份"这种第二定义（v1.83/v1.67 老账）。
+
+测试：778 → **781 passed**（新增 3 条）。变异 M1（`if eligible == 0` → `if False`）与
+M2（handler 退回自己拼字符串）同时被抓住；`cp` 备份 + md5 双向校验确认还原。
+部署：两台 `service=active schema=ok`，stamp 见 §11 时间线（本轮命令输出）。
