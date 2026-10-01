@@ -1,0 +1,106 @@
+框架：AI News Radar —— 模块关系 / 数据流 / 部署关系 / 网络结构
+（§25 规定的角色：一眼看清"系统长什么样"。事实取自当前源码目录与两台生产机实测。）
+
+==================================================
+1. 进程与主机
+==================================================
+anr-vps   机器人主机（475MB RAM，根分区 83% 已用，剩 ~1684MB）
+          systemd 单元：ai-news-radar.service
+          职责：Telegram Bot + 调度（采集 / 处理 / 突发 / 早晚报）
+          代码：/opt/ai-news-radar    数据：/opt/ai-news-radar/data/news.db
+          密钥：/etc/ai-news-radar/env（0600，root 所有；只有 env 里可以有密钥）
+          时区：unit 里 Environment=TZ=Asia/Shanghai，必须等于 settings.timezone（有用例钉住）
+
+anr-jump  采集 / 测试机（4GB RAM，Linux/UTC）
+          同一份代码、同一套单元名；兼作"CI 环境复验"的执行处（pytest 在同一棵树跑）
+
+部署：bash scripts/deploy.sh anr-vps anr-jump
+      验证：service=active schema=ok stamp=<UTC 时间戳>；三端原始 md5sum 比对
+      只改 scripts/ 或 tests/ 且 app/ 未动时：scp + md5sum，不重启（重启会烧掉共享的
+      匿名 GitHub 配额，还会打断补发窗口）
+
+==================================================
+2. 目录与依赖方向
+==================================================
+app/
+  main.py            入口：起 bot + 调度器；--self-check 输出健康行
+  config.py          env(pydantic-settings) + YAML 调参；_now_utc() 是唯一可注入时钟；
+                     atomic_write_json() 是唯一的状态文件写入出口
+  logging_setup.py   日志分级与 warn_once
+  collectors/        来源侧：base.py(RSS/HTTP + SourceCooling + SourceBudget) github.py …
+  processing/        normalize(→build_article) 去重归并 event 打分 enrich free_offers breaking pipeline
+  database/          models / session / repository（"一条可见新闻"的唯一定义）
+  services/          news(ArticleView 中文优先判据) format(唯一文本出口 esc/link/clip)
+                     digest(冷却+每日配额+静默窗口) translate(has_cjk/品牌/错义) free_*
+  scheduler/         jobs.py：轮次编排、突发重试队列、每用户早晚报
+  bot/               handlers / keyboards / context(跨页记住标题·总数·下一页指令)
+
+config/
+  settings.yaml sources.yaml categories.yaml free_offers.yaml prompts.yaml
+scripts/
+  init_db.py preview.py test_sources.py delivery_report.py log_incidents.py
+  reconcile_db.py telegram_smoke.py deploy.sh
+
+允许的依赖方向：bot → services → processing/database → collectors；
+services 不 import bot。数据库不 import 任何业务模块。
+（format.py import services.news 的 ArticleView；news.py 需要 format 时一律在函数内延迟 import，
+ 避免环形导入。）
+
+==================================================
+3. 数据流（一轮）
+==================================================
+来源(RSS/GitHub/HN/arXiv)
+  └→ collectors：HTTP + 降速/配额状态机（等待表落 data/source_cooldowns.json）
+     └→ processing.normalize.build_article（此刻 published_at = 真实 UTC 现在）
+        └→ database.repository.save_article
+             · URL 去重；重复行合并并抬高 community_heat
+             · 事件归并：article.event_id
+           └→ 打分（规则模式；重要性/相关性是关键词命中数，天花板约 78）
+              └→ enrich：抓正文补全（喂给重要性打分与摘要）
+                 └→ translate：标题/摘要 → 中文（免费路由 + 每日预算 + 品牌占位保护）
+                    └→ pipeline：翻译/限免/预算记账
+                       ├→ breaking.gate：分数·质量·时效·全站热度·静默窗口·冷却·每日配额
+                       │    ├→ 通过 → services.digest 生成消息 → bot 发送 → 记 push_logs
+                       │    └→ 时序性拒绝 → scheduler 重试队列（下一轮再问；早晚报前补发）
+                       └→ scheduler.jobs 按"每个读者本地钟"触发早报/晚报
+            呈现：services.format 渲染（列表/卡片/简报/搜索），esc() 是唯一文本出口；
+                  中文优先判据在 services.news.ArticleView（display_line / display_summary）
+
+状态文件（data/，全部经 atomic_write_json）：
+  github_rate.json GitHub 配额账本        github_etags.json 条件请求验证器 + 可回放的正文
+  source_cooldowns.json  对方要求的等待   translate_budget.json  当日翻译预算
+  free_models.json  限免模型公告台账      disk_history.json  磁盘趋势采样（24h 窗口）
+
+==================================================
+4. 表结构要点（SQLite）
+==================================================
+articles        一行 = 一条抓到的条目；final_score/source_quality/category/
+                title_zh/summary_zh/is_free_offer/free_offer(meta json)/is_processed/
+                is_archived/filtered_out/event_id/published_at/created_at
+events          跨来源归并后的"一件事"；member_count / source_names
+sources         来源健康：enabled/error_count/last_error/last_fetch_at
+users           订阅者：chat_id、timezone、daily_time/evening_time、开关
+push_logs       推送台账：kind(morning/evening/breaking/free_offer…)、时间、文章 id
+                —— 冷却与"每日 N 条"配额都以这张表为准，且按读者时区的一天切分
+
+==================================================
+5. 网络结构与外部约束
+==================================================
+出站 HTTPS 为主（无入站监听；Telegram 走长轮询）。
+· 多数来源屏蔽机房 IP（Cloudflare JA3 / Reddit / arXiv 限流）。Reddit 需要**默认 UA**，
+  伪装 Chrome UA 必须与 browser_tls 同时开启，否则一起读作机器人（sources.yaml 有用例守着）。
+· GitHub 无 token 时是**每 IP 60 次/小时**，这是 27 个仓库的实际瓶颈；条件请求（304 不计费）
+  把一轮从 26 次降到约 5–7 次，因此验证器缓存必须能跨重启存活。
+· 翻译走免费路由，有每日预算；预算耗尽的表现是"新行暂时显示英文"，
+  实测从未影响到他真正收到的简报内容。
+· 上游封禁/降速属于常态，策略是"礼貌等待 + 换 IP 需他批准"，不是重试轰炸。
+
+==================================================
+6. 观测点（排查时先看这些）
+==================================================
+journalctl -u ai-news-radar --since "-30 min"        服务日志
+logs/app.log / scheduler.log / telegram.log          按子系统分流
+scripts/log_incidents.py --since N                   按根因分组统计（注意：N 的单位用日志时区）
+scripts/delivery_report.py --kind morning            简报送达证据
+python -m app.main --self-check                      一行健康摘要（含磁盘方向）
+"0 new" 的歧义由日志行区分：github <名>: N metered + M free 304 + K known-empty, quota left=…
