@@ -597,6 +597,26 @@ def status_line(stats: dict[str, Any]) -> str:
     )
 
 
+def quota_line(quota: dict[str, Any] | None) -> str:
+    """今天还能不能收到突发：把正在生效的上限写在他看的那一屏上。
+
+    配额用完时"突发新闻：开"是一个会让人白等的状态（2026-10-01 实测 5/5 用光后，
+    #1813 只能拿到 `daily cap reached (5/5)`，要等到当地零点）。
+    """
+    if not quota:
+        return ""
+    limit = int(quota.get("limit") or 0)
+    if limit <= 0:
+        return ""
+    used = int(quota.get("used") or 0)
+    cooldown = int(quota.get("cooldown_minutes") or 0)
+    pace = f"，最快每 {cooldown} 分钟一条" if cooldown > 0 else ""
+    if used >= limit:
+        return (f"今日突发名额已用完 {used}/{limit}"
+                f"（下一条要等当地 00:00 之后{pace}）")
+    return f"今日还可推送 {limit - used}/{limit} 条{pace}"
+
+
 def disk_rate(stats: dict[str, Any]) -> str:
     """磁盘"方向"的那句话——`/stats` 与维护日志共用一份。
 

@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from app.config import AppConfig, as_int, get_config
+from app.config import AppConfig, as_int, get_config, local_day_start
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.database.models import Article, Source, User
@@ -583,6 +583,33 @@ class NewsService:
     def default_min_score(self, *, min_floor: float | None = None) -> float:
         value = float(self.config.settings.min_article_score or 0)
         return value if min_floor is None else max(min_floor, value)
+
+    def breaking_quota(self, chat_id: int) -> dict[str, Any]:
+        """今天（读者的当地日）突发名额的用量，口径与 `can_send_breaking` 完全一致。
+
+        面板上原来只写"突发新闻：开"，而 2026-10-01 的真相是当天 5/5 已经用完：
+        夜里积压的突发在 07:03 一次放光名额，#1813 之后只拿到
+        `daily cap reached (5/5)`。一个正在生效的上限如果不在他看的那一屏上，
+        "开"就是一个会让人等电话的假状态（和 §11 v1.63 那根 90 分按钮同一族）。
+        """
+        from app.services.digest import breaking_limits  # 延迟导入：digest 反过来依赖本模块
+
+        config = self.config
+        limits = breaking_limits(config)
+        with session_scope() as session:
+            # 只读：`get_user` 而不是 `get_or_create_user`——面板不该因为有人看了一眼设置
+            # 就往订阅表里插一行。没有账本行就没有推送过，而 `pushes_since(user=None)`
+            # 的含义是"数所有人"，绝不能当成 0 传进去（v1.50 那个全局标志的同一个坑）。
+            user = repo.get_user(session, chat_id)
+            if user is None:
+                return {"used": 0, "limit": limits["max_per_day"],
+                        "cooldown_minutes": limits["cooldown_minutes"],
+                        "zone": config.settings.timezone}
+            zone = user.timezone or config.settings.timezone
+            used = repo.pushes_since(session, user=user, kind="breaking",
+                                     since=local_day_start(zone, config=config))
+        return {"used": int(used), "limit": limits["max_per_day"],
+                "cooldown_minutes": limits["cooldown_minutes"], "zone": zone}
 
     def user_for(self, chat_id: int, *, display_name: str | None = None,
                  user_id: int | None = None, tz: str | None = None) -> dict[str, Any]:

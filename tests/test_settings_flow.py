@@ -334,3 +334,104 @@ async def test_setinterest_admits_when_it_cannot_understand_the_sentence():
                           LLMService(get_config()), get_config())
     assert "换个说法" in msg.last_text()
     assert stored()["interests"] == [], "识别不出来就不该留下半条兴趣"
+
+
+def _push_breakings(count: int, chat: int = CHAT, *, days_ago: int = 0) -> None:
+    """`days_ago=0` 落在读者今天的名额里；`=3` 是"昨天的 5 条不该继续挡今天"那一支。"""
+    from datetime import timedelta
+
+    with session_scope() as s:
+        user = repo.get_or_create_user(s, chat)
+        for _ in range(count):
+            repo.record_push(s, user=user, kind="breaking")
+        if days_ago:
+            for p in s.query(repo.PushLog).filter(repo.PushLog.kind == "breaking").all():
+                p.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_ago)
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_the_panel_shows_the_quota_that_is_actually_binding(session, monkeypatch):
+    """2026-10-01 那天 `/设置` 只写"突发新闻：开"，而真实状态是 5/5 用光、当天不会再有突发。"""
+    from datetime import timedelta
+
+    news = news_service()
+    with session_scope() as s:
+        user = repo.get_or_create_user(s, CHAT)
+        for _ in range(5):
+            repo.record_push(s, user=user, kind="breaking")
+        s.commit()
+    msg = Msg()
+    await cmd_settings(msg, news)
+    text = msg.last_text()
+    assert "突发新闻：开" in text, text
+    assert "已用完 5/5" in text, text
+    assert "当地 00:00" in text and "还可推送" not in text, text
+    # 节奏也要说出来：他会问"为什么早上只来了一条"，答案是他自己配的 60 分钟
+    assert "最快每 60 分钟一条" in text, text
+
+    # 昨天的 5 条不该继续挡住今天：名额按读者当地日恢复
+    with session_scope() as s:
+        for p in s.query(repo.PushLog).filter(repo.PushLog.kind == "breaking").all():
+            p.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+        s.commit()
+    later = Msg()
+    await cmd_settings(later, news)
+    assert "还可推送 5/5" in later.last_text(), later.last_text()
+
+
+@pytest.mark.asyncio
+async def test_a_reader_with_room_sees_the_remaining_count(session):
+    news = news_service()
+    _push_breakings(1)
+    msg = Msg()
+    await cmd_settings(msg, news)
+    assert "还可推送 4/5" in msg.last_text(), msg.last_text()
+
+
+@pytest.mark.asyncio
+async def test_the_quota_follows_the_readers_own_day_and_the_configured_limit(session, monkeypatch):
+    """两个方向：名额按**读者自己的**当地日恢复，而那个上限只能有一个读取处。
+
+    同一个瞬间，上海读者的那条推送属于"今天"，UTC 读者的同一条属于"昨天"。
+    闸门那边已经按当地日算（v1.65），面板若退化成 UTC 日界就会对一半的人说谎——
+    两处数字来自两个"今天"，正是本项目反复犯的那一类。
+    """
+    from app.services import format as fmt
+
+    news = news_service()
+    instant = datetime(2026, 10, 1, 1, 0)          # UTC 01:00 = 上海 10-01 09:00
+    push_at = datetime(2026, 9, 30, 20, 0)         # 两种"今天"在这条推送上分家
+    monkeypatch.setattr("app.config._now_utc", lambda: instant)
+
+    with session_scope() as s:
+        sh = repo.get_or_create_user(s, CHAT, timezone="Asia/Shanghai")
+        utc = repo.get_or_create_user(s, 222222222, timezone="UTC")
+        for who in (sh, utc):
+            entry = repo.record_push(s, user=who, kind="breaking")
+            entry.created_at = push_at
+        s.commit()
+
+    assert news.breaking_quota(CHAT)["used"] == 1, "上海读者：这条属于他今天（当地 09-30 16:00 起）"
+    assert news.breaking_quota(222222222)["used"] == 0, "UTC 读者：同一条属于他昨天"
+
+    # 上限是配置里的数字，不是面板上写死的 5
+    node = dict((news.config.raw.get("breaking") or {}))
+    node["max_per_day"] = 2
+    monkeypatch.setitem(news.config.raw, "breaking", node)
+    quota = news.breaking_quota(CHAT)
+    assert quota["limit"] == 2, quota
+    # "还剩 1 / 共 2"两个数字都来自配置与账本，证明上限不是面板上写死的 5
+    assert "还可推送 1/2 条" in fmt.quota_line(quota), fmt.quota_line(quota)
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_sees_zero_and_nobody_else_s_ledger(session):
+    """`pushes_since(user=None)` 的含义是"数所有人"，面板绝不能把它当成 0 传进去。"""
+    news = news_service()
+    _push_breakings(5, chat=222222222)
+    quota = news.breaking_quota(333333333)
+    assert quota["used"] == 0, quota
+    assert quota["limit"] == 5, quota
+    with session_scope() as s:
+        assert repo.get_user(s, 333333333) is None, "看一眼设置面板不该往订阅表里插一行"

@@ -124,6 +124,22 @@ class Digest:
     empty: bool = False
 
 
+def breaking_limits(config: "AppConfig | None" = None) -> dict[str, int]:
+    """突发节流的两个数字：{cooldown_minutes, max_per_day}，一处读取。
+
+    `can_send_breaking` 用它决定发不发，`/设置` 用它告诉读者今天还剩几条名额。
+    两处各读各的 YAML 就会漂：面板说"开"，而闸门其实已经关掉了一整天
+    （2026-10-01 实测：夜间积压在 07:03 一次用光 5/5，#1813 之后只得到
+    `daily cap reached (5/5)`，而 `/设置` 那行仍然只写"突发新闻：开"）。
+    """
+    config = config or get_config()
+    node = config.get("breaking", {}) or {}
+    return {
+        "cooldown_minutes": int(node.get("cooldown_minutes", config.settings.breaking_cooldown_minutes)),
+        "max_per_day": int(node.get("max_per_day", config.settings.max_breaking_news_per_day)),
+    }
+
+
 class DigestService:
     def __init__(self, config: AppConfig | None = None, news: NewsService | None = None,
                  llm: LLMService | None = None) -> None:
@@ -263,8 +279,9 @@ class DigestService:
         """
         cfg = self.config
         breaking_cfg = cfg.get("breaking", {}) or {}
-        cooldown = int(breaking_cfg.get("cooldown_minutes", cfg.settings.breaking_cooldown_minutes))
-        max_per_day = int(breaking_cfg.get("max_per_day", cfg.settings.max_breaking_news_per_day))
+        limits = breaking_limits(cfg)
+        cooldown = limits["cooldown_minutes"]
+        max_per_day = limits["max_per_day"]
         if not cfg.settings.breaking_news_enabled or not breaking_cfg.get("enabled", True):
             return False, "breaking news disabled in config"
         with session_scope() as session:

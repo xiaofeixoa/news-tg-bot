@@ -30,7 +30,8 @@ EVENING_SLOTS = ["17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, news: NewsService) -> None:
     user = news.user_for(message.chat.id)
-    await message.answer(_panel(user), parse_mode="HTML", reply_markup=_keyboard(user))
+    await message.answer(_panel(user, news.breaking_quota(message.chat.id)),
+                         parse_mode="HTML", reply_markup=_keyboard(user))
 
 
 @router.callback_query(F.data.startswith(f"{K.ACT}:"))
@@ -73,7 +74,7 @@ async def cb_settings(callback: CallbackQuery, news: NewsService, app_config: Ap
         return
     else:
         note = "未知操作"
-    await _refresh(callback, user, note)
+    await _refresh(callback, user, note, news.breaking_quota(chat_id))
 
 
 @router.message(Command("pause"))
@@ -125,7 +126,7 @@ async def cmd_setinterest(message: Message, command: CommandObject, news: NewsSe
 
 
 # ------------------------------------------------------------------ helpers
-def _panel(user: dict[str, Any]) -> str:
+def _panel(user: dict[str, Any], quota: dict[str, Any] | None = None) -> str:
     lines = [
         "⚙️ <b>你的推送设置</b>",
         "",
@@ -133,6 +134,12 @@ def _panel(user: dict[str, Any]) -> str:
         f"（{fmt.timezone_label(user['timezone'])}）",
         f"🌙 晚报：{'开' if user['evening_enabled'] else '关'} · {user['evening_time']}",
         f"🚨 突发新闻：{'开' if user['breaking_enabled'] else '关'} · {breaking.describe()}",
+    ]
+    # 上限用完时"开"是不够的：他需要知道为什么今天不会再有突发（见 §11 v1.83）
+    quota_text = fmt.quota_line(quota)
+    if quota_text:
+        lines.append(f"   └ {quota_text}")
+    lines += [
         f"📊 最低评分：{user['min_score']:.0f}",
         f"⏸ 自动推送：{'已暂停' if user['paused'] else '运行中'}",
         "",
@@ -156,7 +163,8 @@ def _keyboard(user: dict[str, Any]):
     )
 
 
-async def _refresh(callback: CallbackQuery, user: dict[str, Any], note: str) -> None:
+async def _refresh(callback: CallbackQuery, user: dict[str, Any], note: str,
+                   quota: dict[str, Any] | None = None) -> None:
     """就地改写面板，而不是再发一份。
 
     按钮上写的是当前状态（⏸ 暂停推送 / 🚨 突发 开），旧面板留在聊天里就是一个
@@ -164,7 +172,7 @@ async def _refresh(callback: CallbackQuery, user: dict[str, Any], note: str) -> 
     """
     if callback.message is not None:
         try:
-            await callback.message.edit_text(_panel(user), parse_mode="HTML",
+            await callback.message.edit_text(_panel(user, quota), parse_mode="HTML",
                                              reply_markup=_keyboard(user))
         except TelegramBadRequest as exc:
             # "message is not modified"（未知操作那一支）以及坏掉的 markup 都只
