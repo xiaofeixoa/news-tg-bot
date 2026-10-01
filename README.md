@@ -384,7 +384,7 @@ Chat ID（日志里也会记一份），复制进 `ALLOWED_CHAT_IDS` 重启就�
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest            # 771 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
+.venv/bin/python -m pytest            # 772 个用例（Windows 与 Linux/UTC 同一棵树都跑过）
 ```
 
 覆盖：RSS/Atom 解析、空源、超时、HTTP 500、XML 损坏、单个坏源不影响整体；
@@ -4300,3 +4300,27 @@ etag 27 条、announced 21/20、budget `{"day":"2026-10-01","used_day":209}`，
 中途我自己写的一句 `assert x, plain, "…"`（assert 只能带一条消息）让整个文件收集失败，
 `exit=2` 被我的脚本当成"CAUGHT"——**第一次出现"变异被语法错误抓住"**，已改成 f-string 并复验：
 真失败是 `FAILED ...::test_the_href_is_not_a_second_door`，不是 collection error。
+
+### v1.92 把整批"钉时钟"的用例真正钉住：真钟不再参与静默时段的判断
+
+v1.91 修了一行，但那个缺陷族的规矩是写在文件 docstring 里的（"钉住时钟的用例一律用注入的 `at`，
+否则真实时钟会让整批测试集体变红"），而**规矩只在 docstring 里 = 没有规矩**。
+本轮把整个文件收干净：
+
+- `_first_hand_row()` / `_offer_row()` 造行时用 `build_article(published_at=NIGHT - 10min)`，
+  不再让 `build_article` 的默认值（真实现在）替测试决定"这条新闻多久大"。
+  这两支 helper 撑着本文件 22 条用例，也就是说今早那种"过几小时自己变红"的雷还有 21 颗没拆。
+- 新增 `test_the_pinned_rows_do_not_lean_on_the_wall_clock`：把行的时间钉到分钟级并断言漂移 < 5 秒。
+  **这条就是那条 docstring 的看守**——谁再把真实时间塞回这批用例，它先红。
+
+验证：`tests/test_quiet_hours.py` 22 条全绿（说明钉钟没有改变任何一条用例的语义——
+"夜里到达→早上补发"靠的还是同一颗注入的钟）；把两行 `published_at=` 去掉，
+新用例当场 `FAILED`（CAUGHT），文件从 `cp` 备份还原并 md5 校验一致；全量 **772 passed**。
+
+只有 `tests/` 变动、`app/` 一行没动，所以按 v1.79 定下的规矩**不跑 deploy**：
+scp 文件到两台 + 原始 `md5sum` 比对，不重启服务、不烧那份共享的匿名 GitHub 配额，
+也不打断明早 07:00 的补发窗口。
+
+我自己在这轮也留了一次现场教训：改 helper 时误删了一个换行，`Sender.__init__` 的函数体被并到
+`def` 那一行 → `IndentationError`。是 `py_compile` 先报的，不是 pytest——
+**编辑之后先编译再跑**，尤其是我用 Edit 改 CJK 密集文件的时候。

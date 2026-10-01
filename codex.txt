@@ -683,3 +683,59 @@ push：origin main
 【下一步】
 1. 看下一轮 `collect github` 的 `metered/cached`，把 v1.90 的 304 声称补上或纠正。
 2. 扫一遍其它测试文件里"注入时钟 + utcnow 造数据"的混用（同一族）。
+
+==================================================
+时间：2026-10-01 13:21（北京）／ 2026-10-01 05:21Z
+版本：v1.92
+==================================================
+
+【用户需求】
+"继续优化"。接 v1.91 记在【下一步】里的第 2 条：其它测试文件里"注入时钟 + 真钟造数据"的混用。
+
+【产品经理】
+一条今天绿、明天红的用例，代价不是"某条测试挂了"，而是下一个 Agent 会把产品当成坏的来重写。
+这类成本比功能 bug 更高，因为它污染的是判断力。
+
+【首席架构师】
+静默时段那批用例的规矩本来就写在文件 docstring 里（"钉住时钟的用例一律用注入的 at"），
+但 v1.91 只修了一行。**规矩只在 docstring 里等于没有规矩**——这一轮把整个文件收干净，
+并给那条 docstring 配一个看守用例。
+
+【资深研发】
+- `tests/test_quiet_hours.py`：`_first_hand_row()` / `_offer_row()` 造行时
+  `build_article(published_at=NIGHT - timedelta(minutes=10))`，不再用默认的真实现在。
+  这两支 helper 撑着本文件 22 条用例。
+- 新增 `test_the_pinned_rows_do_not_lean_on_the_wall_clock`：断言行时间与 NIGHT 的漂移 < 5 秒。
+
+【测试】
+`tests/test_quiet_hours.py` 22 条全绿（钉钟没有改变任何用例语义）；
+变异（删掉两行 `published_at=`）→ 新用例当场 FAILED，即 CAUGHT；
+从 `cp` 备份还原 + md5 校验一致；全量 **772 passed**。
+
+【本次修改】只有 `tests/`，`app/` 一行未动。
+
+【测试环境】本机 Windows/3.13.2；CI python 3.12 / 3.13。
+
+【测试结果】PASS 772。
+
+【发现的问题】
+docstring 里的规矩没有代码盯着，就会一行一行漏出去；v1.91 那条红只是第一颗雷，
+同文件还有 21 条依赖同样的混用。
+
+【修复】helper 全部对齐注入时钟 + 一条漂移看守用例。
+
+【未解决】
+- 其它测试文件仍有 `utcnow()` / `now(timezone.utc)` 造数据（`test_free_alerts.py`、
+  `test_free_models.py`、`test_github.py` 等）。它们有没有把判断钟冻住、需要不需要同样处理，
+  下一轮按同样方法逐个查（先找"冻结 `_now_utc` 或用固定常量做决定"的测试，再看它的数据来源）。
+- 304 命中率（`metered/cached`）仍待日志确认；39 行 summary_zh 与 3 行凭据文本待他点头。
+- 今晚 23:00 → 明早 07:00：v1.82 小时级配速复验（本轮不重启服务正是为了不打断这个窗口）。
+
+【Git】
+commit：v1.92 把整批"钉时钟"的用例真正钉住
+push：origin main
+部署：**不跑 deploy**（只有 tests/ 变动），按 v1.79 规矩 scp + 原始 md5 比对。
+
+【下一步】
+1. 同样方法扫其余测试文件的真钟泄漏。
+2. 明早看 `collect github` 的 `metered/cached`，补上 v1.90 那条未声称的 304 数字。

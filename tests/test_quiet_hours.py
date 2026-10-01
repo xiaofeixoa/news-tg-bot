@@ -40,8 +40,14 @@ def _first_hand_row(session, title: str, url: str) -> int:
     from app.services.news import get_news_service
 
     get_news_service().user_for(111111111)
+    from datetime import timedelta
+
+    # 行必须钉在被注入的那颗钟上：v1.91 有一条用例用 `utcnow()` 造行、却把判断钟冻在
+    # NIGHT，于是"这条新闻多久大" = 真钟与 NIGHT 的距离，真钟每走一小时它就离终局远一小时——
+    # 今早 04:52Z 还绿、05:05Z 就红了。整批"夜里到达"的用例都按同一颗钟走。
     stored = repo.save_article(session, build_article(
         title=title, url=url, source_name="OpenAI", source_type="rss",
+        published_at=NIGHT - timedelta(minutes=10),
         content=title + ". The company says the new model improves reasoning. " * 4))
     article = session.get(Article, stored.id)
     article.final_score = 96
@@ -53,8 +59,11 @@ def _first_hand_row(session, title: str, url: str) -> int:
 
 
 def _offer_row(session, title: str, url: str) -> int:
+    from datetime import timedelta
+
     article = repo.save_article(session, build_article(
         title=title, url=url, source_name="Linux.do 福利分类", source_type="rss",
+        published_at=NIGHT - timedelta(minutes=10),
         content=title + " 详情", quality="C"))
     article.is_free_offer = True
     article.free_offer_tool = "Qoder"
@@ -64,6 +73,21 @@ def _offer_row(session, title: str, url: str) -> int:
     article.final_score = 70
     session.commit()
     return int(article.id)
+
+
+def test_the_pinned_rows_do_not_lean_on_the_wall_clock(session):
+    """这批用例的行必须只认被注入的那颗钟（v1.91 的红线就是从真钟漏进来得到的）。
+
+    真钟每走一小时，用 `utcnow()` 造出来的行就离"过期"远一小时。这里把行的时间钉到分钟，
+    谁再把真实时间塞回这批用例，这条先红——规矩写在 docstring 里不够，得有用例盯着。
+    """
+    from datetime import timedelta
+
+    art = _first_hand_row(session, "OpenAI pins the clock", "https://openai.com/pin")
+    with session_scope() as s:
+        row = s.get(Article, art)
+        drift = abs((row.published_at - (NIGHT - timedelta(minutes=10))).total_seconds())
+        assert drift < 5, f"行又被真钟带着走了：漂移 {drift} 秒"
 
 
 class Sender:
